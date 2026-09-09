@@ -458,6 +458,14 @@ this is the ceiling that actually binds: scalar <code>f64</code> is 131,072 colu
 add up to a global one, so a span touching several shapes is held to the total as well; crossing
 it writes out the widest block.</li>
 </ul>
+<p><code>MAX_PENDING_BYTES</code> is the only one of the three a caller can move: <code>Store::set_write_buffer_bytes</code>
+in the Rust core, <code>store.write_buffer_bytes = n</code> in Python, <code>set_write_buffer_bytes!(store, n)</code> in
+Julia, <code>infrastore_store_set_write_buffer_bytes</code> across the C ABI. Raising it is how a run of single
+adds gets the dataset the bulk add of the same series writes, since a batch handed over as a list is
+written as one block with no budget applied at all — the caller is already holding it. The chunk-row
+ceiling above it does not move, and neither does the figure travel: it belongs to the handle that
+set it, not to the artifact, because it is a budget for the writing process rather than a property
+of the file.</p>
 <p><strong>A block of one is not a block.</strong> If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked <code>(1, 1)</code>, that would
 give a scalar <code>f64</code> series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the

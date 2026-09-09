@@ -3794,15 +3794,28 @@ descriptor are a duplicate. See
 <a href="guides/../explanation/time-references.html">Time references</a>.</p>
 <h3 id="add-many-series-at-once"><a class="header" href="#add-many-series-at-once">Add many series at once</a></h3>
 <p><code>add_time_series_bulk</code> takes a list of dicts mirroring <code>add_time_series</code>'s keyword arguments and
-commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
-load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
-in the same packed dataset.</p>
+commits them in one catalog transaction, taking the block-sized HDF5 write path, so same-shaped
+series land in the same packed dataset.</p>
+<p>An item carries exactly the keys <code>add_time_series</code> takes as parameters — <code>owner_id</code>, <code>owner_type</code>,
+<code>owner_category</code>, <code>time_series</code>, and optionally <code>features</code> — and any other key raises, as the
+misspelled keyword it almost always is. Everything that <em>describes</em> the values (<code>units</code>,
+<code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>application_data</code>, <code>element_type</code>,
+<code>time_reference</code>) rides on the <code>time_series</code> object, exactly as it does on the single-series path.</p>
 <pre><code class="language-python">ids = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
-     "time_series": series[i], "units": "MW"}
+     "time_series": series[i]}
     for i in range(len(series))
 ])   # one catalog id per item, in input order; all-or-nothing
 </code></pre>
+<p>This is an order of magnitude faster than a bare loop of single adds, which pays one catalog
+transaction and one HDF5 flush per series. It is <strong>not</strong> faster than that same loop inside a
+<a href="guides/python.html#transactions">transaction</a>, which buffers and writes the identical datasets. What separates the
+two is one thing: this call writes the batch as a single block whatever its size, because you are
+already holding it, where the transaction holds its buffered adds to
+<a href="guides/python.html#how-wide-a-dataset-a-span-writes"><code>write_buffer_bytes</code></a> and spills past it. Reach for this when
+the whole cohort is in hand as a list; reach for the loop when you would rather build the series one
+at a time than materialize every one of them first, and raise the budget if you want the single
+dataset back.</p>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Several operations that must take effect together — replacing a series is an add plus a remove — go
 inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
@@ -3829,8 +3842,28 @@ two widths, or once the unwritten arrays across every group cross 128 MiB:</p>
 actually binds — a 30,500-step <code>float64</code> series is 244 KB a column, so its group spills at 550.</li>
 </ul>
 <p>And a span holding a <strong>single</strong> array fills a shared-pool slot rather than claiming a dataset one
-column wide. <code>add_time_series_bulk</code> is still the direct way to say it when you already have the
-batch in hand.</p>
+column wide.</p>
+<h4 id="how-wide-a-dataset-a-span-writes"><a class="header" href="#how-wide-a-dataset-a-span-writes">How wide a dataset a span writes</a></h4>
+<p>The 128 MiB is a default, not a law. <code>write_buffer_bytes</code> sets it, and through it how wide a dataset
+a run of single adds can produce:</p>
+<pre><code class="language-python">store.write_buffer_bytes = 1 &lt;&lt; 30      # 1 GiB
+with store.transaction():
+    for s in series:
+        store.add_time_series(owner_id=..., owner_type="Generator",
+                              owner_category=OwnerCategory.Component, time_series=s)
+# one dataset, however many series that was
+</code></pre>
+<p>Raised far enough, the loop writes exactly what <code>add_time_series_bulk</code> of the same series writes —
+and the memory it costs is the memory the bulk call's caller was holding anyway. Measured on 2,000
+hourly year-long <code>float64</code> series: at the default they are ~0.26 s as one bulk call against ~0.31 s
+as a loop, one <code>(8760, 2000)</code> dataset against a <code>(8760, 1915)</code> and a <code>(8760, 85)</code>; raise the budget
+and the loop lands the single dataset too.</p>
+<p>The figure belongs to the <code>Store</code> object, not to the artifact — nothing is persisted, and a store
+reopened elsewhere is back to 128 MiB. It is a budget for the writing process, so a machine that
+cannot afford another machine's choice does not inherit it. Lowering it mid-transaction writes out
+whatever the buffer already holds beyond the new figure; zero raises <code>InvalidParameterError</code>, since
+a pool's width floors at one column and a zero budget would mean a dataset per array rather than no
+buffering at all. The chunk-row ceiling above it does not move.</p>
 <h2 id="read-a-series-1"><a class="header" href="#read-a-series-1">Read a Series</a></h2>
 <pre><code class="language-python">got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
@@ -4583,14 +4616,21 @@ in a descriptor are a duplicate. See
 <h3 id="add-many-series-at-once-1"><a class="header" href="#add-many-series-at-once-1">Add many series at once</a></h3>
 <p><code>AddBatch</code> accepts the same <code>add_time_series!</code> calls as a <code>Store</code> but only accumulates them;
 <code>add_time_series_bulk!</code> commits the whole batch in one catalog transaction and takes the block-sized
-HDF5 write path. It is the way to load a system: an order of magnitude faster than a loop of single
-adds, and same-shaped series land in the same packed dataset.</p>
+HDF5 write path, so same-shaped series land in the same packed dataset.</p>
 <pre><code class="language-julia">batch = AddBatch()
 for (id, ts) in series
     add_time_series!(batch, id, "Generator", Component, ts)
 end
 ids = add_time_series_bulk!(store, batch)   # Vector{Int64}, in input order; all-or-nothing
 </code></pre>
+<p>This is an order of magnitude faster than a bare loop of single adds, which pays one catalog
+transaction and one HDF5 flush per series. It is <strong>not</strong> faster than that same loop inside a
+<a href="guides/julia.html#transactions">transaction</a>, which buffers and writes the identical datasets. What separates the
+two is one thing: the batch is written as a single block whatever its size, because you are already
+holding it, where the transaction holds its buffered adds to
+<a href="guides/julia.html#how-wide-a-dataset-a-span-writes"><code>write_buffer_bytes</code></a> and spills past it. Reach for the batch
+when the whole cohort is in hand; reach for the loop when you would rather add each series as you
+build it than hold them all first, and raise the budget if you want the single dataset back.</p>
 <h3 id="transactions-1"><a class="header" href="#transactions-1">Transactions</a></h3>
 <p>Several operations that must take effect together — replacing a series is an add plus a remove — go
 inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
@@ -4615,8 +4655,29 @@ two widths, or once the unwritten arrays across every group cross 128 MiB:</p>
 actually binds — a 30,500-step <code>Float64</code> series is 244 KB a column, so its group spills at 550.</li>
 </ul>
 <p>And a span holding a <strong>single</strong> array fills a shared-pool slot rather than claiming a dataset one
-column wide. <code>add_time_series_bulk!</code> is still the direct way to say it when you already have the
-batch in hand.</p>
+column wide.</p>
+<h4 id="how-wide-a-dataset-a-span-writes-1"><a class="header" href="#how-wide-a-dataset-a-span-writes-1">How wide a dataset a span writes</a></h4>
+<p>The 128 MiB is a default, not a law. <code>set_write_buffer_bytes!</code> moves it, and with it how wide a
+dataset a run of single adds can produce:</p>
+<pre><code class="language-julia">set_write_buffer_bytes!(store, 1 &lt;&lt; 30)   # 1 GiB
+transaction(store) do
+    for (id, ts) in series
+        add_time_series!(store, id, "Generator", Component, ts)
+    end
+end
+# one dataset, however many series that was
+</code></pre>
+<p>Raised far enough, the loop writes exactly what <code>add_time_series_bulk!</code> of the same series writes —
+and the memory it costs is the memory the batch was holding anyway. Measured on 400 hourly year-long
+<code>Float64</code> series, the two are already the same file in comparable time (~0.09 s either way, and
+~0.12–0.14 s for a <code>NonSequentialTimeSeries</code> cohort on one axis); at 2,000 they part only over that
+extra dataset, ~0.30 s as one batch against ~0.38 s as a loop, and raising the budget closes it.</p>
+<p><code>write_buffer_bytes(store)</code> reads the figure back. It belongs to the handle, not to the artifact —
+nothing is persisted, and a store reopened elsewhere is back to 128 MiB. It is a budget for the
+writing process, so a machine that cannot afford another machine's choice does not inherit it.
+Lowering it mid-transaction writes out whatever the buffer already holds beyond the new figure; zero
+throws, since a pool's width floors at one column and a zero budget would mean a dataset per array
+rather than no buffering at all. The chunk-row ceiling above it does not move.</p>
 <h3 id="values-that-are-not-numbers-1"><a class="header" href="#values-that-are-not-numbers-1">Values that are not numbers</a></h3>
 <p>A timestep's value can be a function rather than a number — a cost curve re-offered every hour, a
 pair of coefficients, a fixed-width tuple. Hand the constructor those values and it does the rest:
@@ -6098,6 +6159,14 @@ this is the ceiling that actually binds: scalar <code>f64</code> is 131,072 colu
 add up to a global one, so a span touching several shapes is held to the total as well; crossing
 it writes out the widest block.</li>
 </ul>
+<p><code>MAX_PENDING_BYTES</code> is the only one of the three a caller can move: <code>Store::set_write_buffer_bytes</code>
+in the Rust core, <code>store.write_buffer_bytes = n</code> in Python, <code>set_write_buffer_bytes!(store, n)</code> in
+Julia, <code>infrastore_store_set_write_buffer_bytes</code> across the C ABI. Raising it is how a run of single
+adds gets the dataset the bulk add of the same series writes, since a batch handed over as a list is
+written as one block with no budget applied at all — the caller is already holding it. The chunk-row
+ceiling above it does not move, and neither does the figure travel: it belongs to the handle that
+set it, not to the artifact, because it is a budget for the writing process rather than a property
+of the file.</p>
 <p><strong>A block of one is not a block.</strong> If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked <code>(1, 1)</code>, that would
 give a scalar <code>f64</code> series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the
@@ -7364,6 +7433,15 @@ changes how data is read back — see the <a href="reference/../explanation/stor
     pub fn commit_transaction(&amp;mut self) -&gt; Result&lt;()&gt;;
     pub fn rollback_transaction(&amp;mut self) -&gt; Result&lt;()&gt;;
     pub fn in_transaction(&amp;self) -&gt; bool;
+    // The byte budget an open transaction's buffered adds are held to, and so
+    // how wide a dataset a run of single adds writes. Raised, the run produces
+    // what `add_time_series_bulk` of the same items produces -- a batch handed
+    // over as a list applies no budget, the caller already holding it. Belongs
+    // to this handle, not to the artifact: nothing is persisted. Lowering it
+    // under an open transaction writes out what the buffer already holds beyond
+    // the new figure; zero is `InvalidParameter`.
+    pub fn write_buffer_bytes(&amp;self) -&gt; usize;
+    pub fn set_write_buffer_bytes(&amp;mut self, bytes: usize) -&gt; Result&lt;()&gt;;
     // Write the whole store (arrays + catalog) to `path` + `&lt;path&gt;.sqlite`,
     // overwriting them. Works for on-disk *and* in-memory stores.
     pub fn persist_to(&amp;mut self, path: &amp;Path) -&gt; Result&lt;()&gt;;
@@ -8967,7 +9045,15 @@ flag, and <code>closed</code> once closed.</p>
 <pre><code class="language-python">store.read_only -&gt; bool
 store.catalog -&gt; str            # "attached" or "memory"
 store.in_transaction -&gt; bool
+store.write_buffer_bytes -&gt; int         # settable; default 128 MiB
 </code></pre>
+<p><code>write_buffer_bytes</code> is the byte budget an open transaction's buffered adds are held to, and through
+it how wide a dataset a run of single adds writes: raise it and the loop produces what
+<code>add_time_series_bulk</code> of the same series produces, which applies no budget at all. It belongs to
+this <code>Store</code> object rather than the artifact (nothing is persisted), lowering it mid-transaction
+writes out what the buffer already holds beyond the new figure, and <code>0</code> raises
+<code>InvalidParameterError</code>. See
+<a href="reference/../guides/python.html#how-wide-a-dataset-a-span-writes">how wide a dataset a span writes</a>.</p>
 <h3 id="methods"><a class="header" href="#methods">Methods</a></h3>
 <pre><code class="language-python">def add_time_series(
     self,
@@ -8993,7 +9079,8 @@ def add_time_series_bulk(self, items: list[dict]) -&gt; list[int]: ...
 # `owner_type`, `owner_category`, `time_series`; optional `features`. Any other
 # key raises, as the misspelled keyword it almost always is.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
-# faster than looping over add_time_series. Results are in input order.
+# faster than looping over add_time_series *outside* a transaction; inside one,
+# the loop buffers and writes the same datasets. Results are in input order.
 
 # Every write returns the catalog `id` its row was filed under -- the handle to
 # record in your own object model, and what every read and removal
@@ -10267,11 +10354,11 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>read_by_ids</code>, <code>read_only</code>, <code>remove_by_filter!</code>, <code>remove_by_ids!</code>,
 <code>remove_parent_child_associations!</code>, <code>remove_supplemental_attribute_associations!</code>,
 <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
-<code>replace_supplemental_attribute_component_id!</code>, <code>rollback_transaction!</code>, <code>static_grid</code>,
-<code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>,
-<code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>,
-<code>timestamps</code>, <code>transaction</code>, <code>transform_single_time_series!</code>, <code>value_at</code>, <code>verify_integrity</code>,
-<code>zoned_timestamp</code>, <code>zoned_timestamps</code>.</p>
+<code>replace_supplemental_attribute_component_id!</code>, <code>rollback_transaction!</code>, <code>set_write_buffer_bytes!</code>,
+<code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>,
+<code>static_values</code>, <code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>,
+<code>time_series_counts</code>, <code>timestamps</code>, <code>transaction</code>, <code>transform_single_time_series!</code>, <code>value_at</code>,
+<code>verify_integrity</code>, <code>write_buffer_bytes</code>, <code>zoned_timestamp</code>, <code>zoned_timestamps</code>.</p>
 <h2 id="constructors-2"><a class="header" href="#constructors-2">Constructors</a></h2>
 <pre><code class="language-julia">Store(; in_memory::Union{Nothing,Bool}=nothing, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
@@ -10728,9 +10815,10 @@ add_time_series_bulk!(store::Store, batch::AddBatch) -&gt; Vector{Int64}   # ids
 </code></pre>
 <p><code>AddBatch</code> accepts the same <code>add_time_series!</code> methods as <code>Store</code> (every series and forecast type)
 but only accumulates the requests; <code>add_time_series_bulk!</code> commits the whole batch in <strong>one</strong>
-metadata transaction, which is much faster than per-item adds when ingesting many series. The submit
-is all-or-nothing: on error nothing is committed. The batch is drained by the call in either case
-and may be reused. <code>length(batch)</code> returns the number of pending requests.</p>
+metadata transaction, which is much faster than per-item adds <em>outside</em> a transaction; inside one,
+the same per-item calls buffer and write the same datasets. The submit is all-or-nothing: on error
+nothing is committed. The batch is drained by the call in either case and may be reused.
+<code>length(batch)</code> returns the number of pending requests.</p>
 <h3 id="lookups"><a class="header" href="#lookups">Lookups</a></h3>
 <pre><code class="language-julia">get_metadata_by_id(store, id::Integer) -&gt; Union{TimeSeriesMetadata, Nothing}
 list_metadata_by_ids(store, ids::AbstractVector{&lt;:Integer}) -&gt; Vector{TimeSeriesMetadata}
@@ -11087,6 +11175,14 @@ begin_transaction!(store) -&gt; Nothing
 commit_transaction!(store) -&gt; Nothing    # errors if no transaction is open
 rollback_transaction!(store) -&gt; Nothing  # errors if no transaction is open
 in_transaction(store) -&gt; Bool
+write_buffer_bytes(store) -&gt; Int         # the budget an open transaction's buffered adds are held
+                                         # to, and so how wide a dataset a run of single adds writes
+set_write_buffer_bytes!(store, bytes) -&gt; Nothing
+                                  # move it: raised, a run of single adds writes what
+                                  # add_time_series_bulk! of the same series writes, which applies no
+                                  # budget at all. Belongs to the handle, not the artifact (nothing
+                                  # is persisted). Lowering it mid-transaction writes out what the
+                                  # buffer holds beyond the new figure; 0 throws ArgumentError.
 clear!(store; owner_id=nothing, owner_category=nothing) -&gt; Nothing
                                   # both `nothing`: remove every series in the store.
                                   # Scope to one owner by passing BOTH keywords — they identify the
@@ -12303,6 +12399,14 @@ int32_t infrastore_store_begin_transaction(struct InfraStore *handle);
 int32_t infrastore_store_commit_transaction(struct InfraStore *handle);
 int32_t infrastore_store_rollback_transaction(struct InfraStore *handle);
 int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
+/* The byte budget an open transaction's buffered adds are held to, and through it how wide a
+   dataset a run of single adds writes. Raised, that run produces the dataset the equivalent
+   bulk add produces -- a batch handed over as a list applies no budget, the caller already
+   holding it. The figure belongs to the handle, not the artifact: nothing is persisted.
+   `bytes` must be non-zero; lowering it under an open transaction writes out whatever the
+   buffer already holds beyond the new figure, so that call can do file I/O and fail. */
+int32_t infrastore_store_write_buffer_bytes(const struct InfraStore *handle, uint64_t *out);
+int32_t infrastore_store_set_write_buffer_bytes(struct InfraStore *handle, uint64_t bytes);
 /* Persist the store's data to `path` (HDF5) and `&lt;path&gt;.sqlite` (metadata),
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);

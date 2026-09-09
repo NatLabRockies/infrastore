@@ -224,11 +224,11 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>read_by_ids</code>, <code>read_only</code>, <code>remove_by_filter!</code>, <code>remove_by_ids!</code>,
 <code>remove_parent_child_associations!</code>, <code>remove_supplemental_attribute_associations!</code>,
 <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
-<code>replace_supplemental_attribute_component_id!</code>, <code>rollback_transaction!</code>, <code>static_grid</code>,
-<code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>,
-<code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>,
-<code>timestamps</code>, <code>transaction</code>, <code>transform_single_time_series!</code>, <code>value_at</code>, <code>verify_integrity</code>,
-<code>zoned_timestamp</code>, <code>zoned_timestamps</code>.</p>
+<code>replace_supplemental_attribute_component_id!</code>, <code>rollback_transaction!</code>, <code>set_write_buffer_bytes!</code>,
+<code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>,
+<code>static_values</code>, <code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>,
+<code>time_series_counts</code>, <code>timestamps</code>, <code>transaction</code>, <code>transform_single_time_series!</code>, <code>value_at</code>,
+<code>verify_integrity</code>, <code>write_buffer_bytes</code>, <code>zoned_timestamp</code>, <code>zoned_timestamps</code>.</p>
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
 <pre><code class="language-julia">Store(; in_memory::Union{Nothing,Bool}=nothing, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
@@ -685,9 +685,10 @@ add_time_series_bulk!(store::Store, batch::AddBatch) -&gt; Vector{Int64}   # ids
 </code></pre>
 <p><code>AddBatch</code> accepts the same <code>add_time_series!</code> methods as <code>Store</code> (every series and forecast type)
 but only accumulates the requests; <code>add_time_series_bulk!</code> commits the whole batch in <strong>one</strong>
-metadata transaction, which is much faster than per-item adds when ingesting many series. The submit
-is all-or-nothing: on error nothing is committed. The batch is drained by the call in either case
-and may be reused. <code>length(batch)</code> returns the number of pending requests.</p>
+metadata transaction, which is much faster than per-item adds <em>outside</em> a transaction; inside one,
+the same per-item calls buffer and write the same datasets. The submit is all-or-nothing: on error
+nothing is committed. The batch is drained by the call in either case and may be reused.
+<code>length(batch)</code> returns the number of pending requests.</p>
 <h3 id="lookups"><a class="header" href="#lookups">Lookups</a></h3>
 <pre><code class="language-julia">get_metadata_by_id(store, id::Integer) -&gt; Union{TimeSeriesMetadata, Nothing}
 list_metadata_by_ids(store, ids::AbstractVector{&lt;:Integer}) -&gt; Vector{TimeSeriesMetadata}
@@ -1044,6 +1045,14 @@ begin_transaction!(store) -&gt; Nothing
 commit_transaction!(store) -&gt; Nothing    # errors if no transaction is open
 rollback_transaction!(store) -&gt; Nothing  # errors if no transaction is open
 in_transaction(store) -&gt; Bool
+write_buffer_bytes(store) -&gt; Int         # the budget an open transaction's buffered adds are held
+                                         # to, and so how wide a dataset a run of single adds writes
+set_write_buffer_bytes!(store, bytes) -&gt; Nothing
+                                  # move it: raised, a run of single adds writes what
+                                  # add_time_series_bulk! of the same series writes, which applies no
+                                  # budget at all. Belongs to the handle, not the artifact (nothing
+                                  # is persisted). Lowering it mid-transaction writes out what the
+                                  # buffer holds beyond the new figure; 0 throws ArgumentError.
 clear!(store; owner_id=nothing, owner_category=nothing) -&gt; Nothing
                                   # both `nothing`: remove every series in the store.
                                   # Scope to one owner by passing BOTH keywords — they identify the

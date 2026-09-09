@@ -333,15 +333,28 @@ descriptor are a duplicate. See
 <a href="../explanation/time-references.html">Time references</a>.</p>
 <h3 id="add-many-series-at-once"><a class="header" href="#add-many-series-at-once">Add many series at once</a></h3>
 <p><code>add_time_series_bulk</code> takes a list of dicts mirroring <code>add_time_series</code>'s keyword arguments and
-commits them in one catalog transaction, taking the block-sized HDF5 write path. It is the way to
-load a system: an order of magnitude faster than a loop of single adds, and same-shaped series land
-in the same packed dataset.</p>
+commits them in one catalog transaction, taking the block-sized HDF5 write path, so same-shaped
+series land in the same packed dataset.</p>
+<p>An item carries exactly the keys <code>add_time_series</code> takes as parameters — <code>owner_id</code>, <code>owner_type</code>,
+<code>owner_category</code>, <code>time_series</code>, and optionally <code>features</code> — and any other key raises, as the
+misspelled keyword it almost always is. Everything that <em>describes</em> the values (<code>units</code>,
+<code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>application_data</code>, <code>element_type</code>,
+<code>time_reference</code>) rides on the <code>time_series</code> object, exactly as it does on the single-series path.</p>
 <pre><code class="language-python">ids = store.add_time_series_bulk([
     {"owner_id": i, "owner_type": "Generator", "owner_category": OwnerCategory.Component,
-     "time_series": series[i], "units": "MW"}
+     "time_series": series[i]}
     for i in range(len(series))
 ])   # one catalog id per item, in input order; all-or-nothing
 </code></pre>
+<p>This is an order of magnitude faster than a bare loop of single adds, which pays one catalog
+transaction and one HDF5 flush per series. It is <strong>not</strong> faster than that same loop inside a
+<a href="#transactions">transaction</a>, which buffers and writes the identical datasets. What separates the
+two is one thing: this call writes the batch as a single block whatever its size, because you are
+already holding it, where the transaction holds its buffered adds to
+<a href="#how-wide-a-dataset-a-span-writes"><code>write_buffer_bytes</code></a> and spills past it. Reach for this when
+the whole cohort is in hand as a list; reach for the loop when you would rather build the series one
+at a time than materialize every one of them first, and raise the budget if you want the single
+dataset back.</p>
 <h3 id="transactions"><a class="header" href="#transactions">Transactions</a></h3>
 <p>Several operations that must take effect together — replacing a series is an add plus a remove — go
 inside a transaction. Removals are reversible only there; outside one the array bytes are reclaimed
@@ -368,8 +381,28 @@ two widths, or once the unwritten arrays across every group cross 128 MiB:</p>
 actually binds — a 30,500-step <code>float64</code> series is 244 KB a column, so its group spills at 550.</li>
 </ul>
 <p>And a span holding a <strong>single</strong> array fills a shared-pool slot rather than claiming a dataset one
-column wide. <code>add_time_series_bulk</code> is still the direct way to say it when you already have the
-batch in hand.</p>
+column wide.</p>
+<h4 id="how-wide-a-dataset-a-span-writes"><a class="header" href="#how-wide-a-dataset-a-span-writes">How wide a dataset a span writes</a></h4>
+<p>The 128 MiB is a default, not a law. <code>write_buffer_bytes</code> sets it, and through it how wide a dataset
+a run of single adds can produce:</p>
+<pre><code class="language-python">store.write_buffer_bytes = 1 &lt;&lt; 30      # 1 GiB
+with store.transaction():
+    for s in series:
+        store.add_time_series(owner_id=..., owner_type="Generator",
+                              owner_category=OwnerCategory.Component, time_series=s)
+# one dataset, however many series that was
+</code></pre>
+<p>Raised far enough, the loop writes exactly what <code>add_time_series_bulk</code> of the same series writes —
+and the memory it costs is the memory the bulk call's caller was holding anyway. Measured on 2,000
+hourly year-long <code>float64</code> series: at the default they are ~0.26 s as one bulk call against ~0.31 s
+as a loop, one <code>(8760, 2000)</code> dataset against a <code>(8760, 1915)</code> and a <code>(8760, 85)</code>; raise the budget
+and the loop lands the single dataset too.</p>
+<p>The figure belongs to the <code>Store</code> object, not to the artifact — nothing is persisted, and a store
+reopened elsewhere is back to 128 MiB. It is a budget for the writing process, so a machine that
+cannot afford another machine's choice does not inherit it. Lowering it mid-transaction writes out
+whatever the buffer already holds beyond the new figure; zero raises <code>InvalidParameterError</code>, since
+a pool's width floors at one column and a zero budget would mean a dataset per array rather than no
+buffering at all. The chunk-row ceiling above it does not move.</p>
 <h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
 <pre><code class="language-python">got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
