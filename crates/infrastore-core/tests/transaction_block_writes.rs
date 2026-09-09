@@ -1033,3 +1033,52 @@ fn an_in_memory_store_records_the_budget_without_acting_on_it() {
         10
     );
 }
+
+/// The budget lives in the backend, and two paths swap the backend under a live
+/// handle: `compact` and a `persist_to` back over the store's own file both have
+/// to close the HDF5 file so a rename can replace it. Each has to carry the
+/// figure across, or the "belongs to this handle" the setter documents lasts
+/// only until the next maintenance call.
+#[test]
+fn a_backend_swap_keeps_the_budget_the_caller_set() {
+    let dir = tempfile::tempdir().unwrap();
+    const COLUMN_BYTES: usize = 24 * 8;
+    let path = dir.path().join("s.h5");
+    let mut store = create_store(Some(&path), false).unwrap();
+    store.set_write_buffer_bytes(COLUMN_BYTES * 4).unwrap();
+    store.add(request(1, 100.0)).unwrap();
+
+    store.compact().unwrap();
+    assert_eq!(
+        store.write_buffer_bytes(),
+        COLUMN_BYTES * 4,
+        "compact reopens the file and must not reset the budget"
+    );
+
+    store.persist_to(&path).unwrap();
+    assert_eq!(
+        store.write_buffer_bytes(),
+        COLUMN_BYTES * 4,
+        "a same-path persist_to reopens the file too"
+    );
+
+    // And it is still the budget in force, not just the one reported: ten adds
+    // under a four-column ceiling are three datasets, as before the swaps.
+    store.begin_transaction().unwrap();
+    for owner in 2..=11 {
+        store.add(request(owner, owner as f64 * 100.0)).unwrap();
+    }
+    store.commit_transaction().unwrap();
+    store.flush().unwrap();
+    let base = "sts_f64_s_24_PT1H";
+    let widths: Vec<usize> = packed_layout(&path)
+        .values()
+        .map(|(shape, _)| shape[1])
+        .collect();
+    assert!(
+        packed_layout(&path).len() >= 3,
+        "the four-column ceiling still spills: got {widths:?} in {:?}",
+        packed_layout(&path).keys().collect::<Vec<_>>()
+    );
+    assert!(packed_layout(&path).contains_key(&format!("{base}__1")));
+}

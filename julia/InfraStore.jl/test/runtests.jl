@@ -4229,6 +4229,12 @@ end
     before = write_buffer_bytes(store)
     @test_throws ArgumentError set_write_buffer_bytes!(store, 0)
     @test write_buffer_bytes(store) == before
+    # Nor a figure the getter could not hand back: the ABI takes a UInt64 and
+    # `write_buffer_bytes` returns an Int, so this would set and then throw.
+    @test_throws ArgumentError set_write_buffer_bytes!(store, typemax(UInt64))
+    @test write_buffer_bytes(store) == before
+    set_write_buffer_bytes!(store, typemax(Int))
+    @test write_buffer_bytes(store) == typemax(Int)
     close!(store)
 end
 

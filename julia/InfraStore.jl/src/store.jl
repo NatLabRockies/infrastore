@@ -427,11 +427,18 @@ The figure belongs to this handle, not to the artifact: nothing is persisted,
 and a store reopened elsewhere is back to the 128 MiB default. A per-group block
 still stops at the width one chunk row holds, which no budget raises. Setting it
 below what an open transaction has already buffered writes those blocks out
-immediately. Zero throws. An in-memory store records it without acting on it,
+immediately. Zero throws, as does anything past `typemax(Int)`, which the
+getter could not hand back. An in-memory store records it without acting on it,
 having no datasets to size.
 """
 function set_write_buffer_bytes!(store::Store, bytes::Integer)
     bytes > 0 || throw(ArgumentError("bytes must be greater than zero, got $bytes"))
+    # The ABI takes a `UInt64`, but the getter hands back an `Int`, so anything
+    # past `typemax(Int)` would set successfully and then throw `InexactError`
+    # on the way back out. Refuse it here rather than accept a figure that
+    # cannot round-trip -- a budget that large is unbounded either way.
+    bytes <= typemax(Int) ||
+        throw(ArgumentError("bytes must be at most $(typemax(Int)), got $bytes"))
     _check(
         @ccall lib_path().infrastore_store_set_write_buffer_bytes(
             store::Ptr{Cvoid}, UInt64(bytes)::UInt64
