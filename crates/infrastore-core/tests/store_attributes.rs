@@ -170,6 +170,31 @@ fn writes_are_refused_on_a_read_only_store() {
     );
 }
 
+/// A key is checked before the store's writability, so a bad key reports what
+/// is wrong with the key rather than that the store is read-only — the answer
+/// that stays true once the caller opens it for writing.
+#[test]
+fn a_bad_key_is_refused_before_a_read_only_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.h5");
+    create_store(Some(&path), false)
+        .expect("store should be created")
+        .flush()
+        .expect("flush should succeed");
+
+    let mut store = open_store(&path, true).expect("read-only open should succeed");
+    for key in ["", "infrastore.version"] {
+        assert!(matches!(
+            store.set_store_attribute(key, "v"),
+            Err(TimeSeriesError::InvalidParameter(_))
+        ));
+        assert!(matches!(
+            store.remove_store_attribute(key),
+            Err(TimeSeriesError::InvalidParameter(_))
+        ));
+    }
+}
+
 #[test]
 fn attributes_take_part_in_the_ambient_transaction() {
     let mut store = create_store(None, true).expect("in-memory store should initialize");

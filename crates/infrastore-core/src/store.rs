@@ -1800,11 +1800,24 @@ impl Store {
                     "transaction rolled back"
                 );
             }
-            Err(e) => tracing::warn!(
-                level,
-                error = %e,
-                "transaction rolled back; could not decide which of its writes to remove"
-            ),
+            Err(e) => {
+                // Without the counts nothing is removed from the file — an
+                // orphan there is `compact`'s. The buffer is another matter: an
+                // array left in it outlives the transaction, and a later add of
+                // the same hash would take it as stored, skip the flush, and
+                // commit a row whose bytes exist only in RAM. Every array this
+                // level buffered is one only its own, now unwound, rows named —
+                // anything older was already held and never staged — so they go
+                // without a count.
+                for hash in &written.arrays {
+                    self.write_buffer.remove(hash);
+                }
+                tracing::warn!(
+                    level,
+                    error = %e,
+                    "transaction rolled back; could not decide which of its writes to remove"
+                );
+            }
         }
         Ok(())
     }
@@ -2269,7 +2282,10 @@ impl Store {
     /// than claiming a dataset sized to one column (see `put_block`). That
     /// covers a batch of one too — a binding whose `add_time_series` *is* a
     /// one-item batch (Julia's, through the C ABI) gets the shared pool, not
-    /// one dataset per call.
+    /// one dataset per call. A lone *irregular* array is written standalone
+    /// instead, unless the file already holds a pool for its time axis: an
+    /// irregular pool is shared only by series on that exact axis, so a pool of
+    /// one would never fill.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesId>> {
         self.add_requests(items)
