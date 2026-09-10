@@ -1817,7 +1817,10 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`TimeSeriesError::InvalidParameter`] if no transaction is open.
+    /// [`TimeSeriesError::InvalidParameter`] if no transaction is open — or,
+    /// for an inner level, if the reference counts run after its unwind were
+    /// what made SQLite roll the enclosing transaction back; the level is gone
+    /// either way, and a second call then discards the rest.
     pub fn rollback_transaction(&mut self) -> Result<()> {
         let level = self.innermost_level()?;
         if self.transaction_was_forced_back() {
@@ -1845,6 +1848,11 @@ impl Store {
         // and must go now: an outer commit only ever looks at `pending_free`
         // and would strand it in the file.
         self.unwind_written(written);
+        // The counts in there ran on the caller's connection. Had one of them
+        // been the statement that made SQLite roll the enclosing transaction
+        // back, this level is gone either way, but the caller must hear that
+        // the rest of the span went with it rather than read success.
+        self.check_transaction_alive()?;
         tracing::debug!(level, "transaction rolled back");
         Ok(())
     }
@@ -2698,6 +2706,10 @@ impl Store {
             tracing::warn!(error = %e, "cleared time series; time axes left for compaction");
             Vec::new()
         });
+        // The sweep ran on the caller's connection. If it was the statement
+        // that made SQLite roll an enclosing transaction back, the clear went
+        // with it and cannot be reported as done.
+        self.check_transaction_alive()?;
         self.free_or_defer(FileObjects { arrays, timestamps });
         Ok(count)
     }
