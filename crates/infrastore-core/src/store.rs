@@ -2453,9 +2453,20 @@ impl Store {
             // length)` plus the time axis — and write each as a block with
             // `put_block`, the block writer the buffer uses. Standalone inputs
             // (the dense forecasts) keep the per-array path.
+            //
+            // A hash names bytes, not a time axis, so one batch can carry the
+            // same array under two pools — identical values at two
+            // resolutions. Only its first request writes it, as inside a
+            // transaction, where arrival order decides: otherwise the pool
+            // that claims the bytes would follow the map's iteration order,
+            // and the file would differ from run to run.
             let mut pools: HashMap<PoolKey, Vec<usize>> = HashMap::new();
+            let mut seen: HashSet<[u8; 32]> = HashSet::new();
             for (i, (item, part)) in items.iter().zip(&parts).enumerate() {
                 let array = request_array(item);
+                if !seen.insert(part.hash) {
+                    continue;
+                }
                 if part.layout.is_packed() {
                     pools
                         .entry(pool_key(array, part.group))

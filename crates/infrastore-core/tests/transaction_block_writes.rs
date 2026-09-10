@@ -348,6 +348,67 @@ fn a_transaction_around_one_add_fills_a_slot_rather_than_sizing_a_dataset() {
     assert!(store.verify_integrity().unwrap().ok());
 }
 
+/// One batch carrying the same array under two pools — identical values at two
+/// resolutions — writes it once, under the pool of its *first* request, the
+/// way arrival order decides inside a transaction. Here that makes the hourly
+/// pool a block of two and leaves the five-minute pool with nothing to write;
+/// were the claim decided by map iteration order instead, either pool could
+/// end up a block of one in a growth pool, differing from run to run.
+#[test]
+fn a_repeated_hash_across_pools_goes_to_its_first_request() {
+    let five_minute = |owner: i64, base: f64| {
+        let vals: Vec<f64> = (0..24).map(|i| base + i as f64).collect();
+        AddRequest::new(
+            owner,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                t0(),
+                Duration::minutes(5),
+                TypedArray::from_f64(vec![24], &vals),
+                "load",
+            )),
+        )
+    };
+    let batch = || vec![request(1, 100.0), request(2, 200.0), five_minute(3, 100.0)];
+
+    let dir = tempfile::tempdir().unwrap();
+    let loose = dir.path().join("loose.h5");
+    {
+        let mut store = create_store(Some(&loose), false).unwrap();
+        store.add_time_series_bulk(batch()).unwrap();
+        store.flush().unwrap();
+    }
+    let spanned = dir.path().join("spanned.h5");
+    {
+        let mut store = create_store(Some(&spanned), false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add_time_series_bulk(batch()).unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+
+    let layout = packed_layout(&loose);
+    assert_eq!(layout, packed_layout(&spanned));
+    assert_eq!(
+        layout,
+        BTreeMap::from([(
+            "sts_f64_s_24_PT1H".to_string(),
+            (vec![24, 2], Some(vec![24, 2]))
+        )]),
+        "the hourly pool holds both arrays; the five-minute pool wrote nothing"
+    );
+
+    let store = open_store(&loose, true).unwrap();
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 3);
+    assert_eq!(
+        first_value(&store, 3),
+        100.0,
+        "the five-minute series reads from the shared array"
+    );
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
 /// An array a span both adds and removes is never written: the commit decides
 /// what to free before it flushes, and leaves the doomed array out of its
 /// block. What remains is a block of one, so it fills a growth-pool slot — the
