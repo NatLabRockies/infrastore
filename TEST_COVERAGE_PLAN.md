@@ -65,9 +65,7 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
   back arrays containing NaN, +Inf, −Inf, −0.0 (f64 and f32; static + one Deterministic). Assert
   byte-exact round trip (compare via `to_le_bytes`, not `==`, because NaN). Dedup determinism: two
   arrays identical except different NaN _bit patterns_ must content-address to one stored array
-  (`num_distinct_arrays == 1`) — `hash.rs` canonicalizes NaN, this pins it end-to-end. Also pin that
-  Legacy netcdf-c fill values do not collide: a stored value equal to netcdf-c's default f64 fill
-  must survive reopen.
+  (`num_distinct_arrays == 1`) — `hash.rs` canonicalizes NaN, this pins it end-to-end.
 - **1.2 Empty and minimal arrays.** Pin current behavior (accept-or-error, with a comment) for:
   `SingleTimeSeries` with `length == 0`; single-element series persisted and reopened (memory-only
   today); `Deterministic` with `count == 1` and with `horizon_count == 1`; `Probabilistic` with one

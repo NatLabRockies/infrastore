@@ -22,7 +22,7 @@
 //!
 //! # `$ref` resolution
 //!
-//! They are draft-07 and their `$ref`s are relative filesystem paths
+//! They declare draft 2020-12, and their `$ref`s are relative filesystem paths
 //! (`common.json#/definitions/...`, `../Core/common.json#/definitions/...`),
 //! not `$id`-anchored URLs. Each is compiled against a synthetic
 //! `vendored:///<path>` base URI — not `file://`, which on Windows would have

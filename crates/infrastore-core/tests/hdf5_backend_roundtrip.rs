@@ -79,8 +79,8 @@ fn hdf5_store_round_trip_reopen_and_persist() {
     }
     assert!(store.verify_integrity().unwrap().ok());
 
-    // persist_to must reopen the source afterwards (regression: it used to
-    // hard-code a different backend type and fail on hdf5-backend files).
+    // persist_to must reopen the source afterwards with the backend the file
+    // actually carries; any other backend type fails on an hdf5-backend file.
     let dest = dir.path().join("copy.h5");
     store.persist_to(dest.as_path()).unwrap();
     let copy = open_store(dest.as_path(), true).unwrap();

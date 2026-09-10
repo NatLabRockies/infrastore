@@ -646,8 +646,9 @@ fn dtype_from_numpy_name(name: &str) -> PyResult<core_lib::Dtype> {
 ///
 /// Spelled this way rather than as a plain name (`"float64"`), which numpy
 /// resolves to the *host's* byte order. A `TypedArray`'s bytes are always
-/// little-endian — that is the documented on-disk layout — so decoding them
-/// under the native order would read them backwards on a big-endian host.
+/// little-endian — the core's documented buffer encoding, whatever the HDF5
+/// file holds — so decoding them under the native order would read them
+/// backwards on a big-endian host.
 fn numpy_le_descr(dtype: core_lib::Dtype) -> &'static str {
     match dtype {
         core_lib::Dtype::F64 => "<f8",

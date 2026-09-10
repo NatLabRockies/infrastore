@@ -1,5 +1,5 @@
 //! End-to-end round-trip tests for the in-memory Store. These exercise the
-//! full Store API surface defined in M0.
+//! core Store API surface.
 
 use std::collections::BTreeMap;
 
@@ -114,10 +114,10 @@ fn add_and_get_round_trip() {
 
 /// A series read back compares equal to the one written, field for field.
 ///
-/// This is why `element_type` is not an `Option`: while it was, an ordinary
-/// numeric series was constructed as "undeclared" and read back as
+/// This is why `element_type` is not an `Option`: an optional one would let an
+/// ordinary numeric series be constructed as "undeclared" and read back as
 /// `Scalar(f64)` — two spellings of the same fact, which the derived
-/// `PartialEq` (and every binding's `==`, which delegates to it) called
+/// `PartialEq` (and every binding's `==`, which delegates to it) would call
 /// unequal.
 #[test]
 fn a_series_reads_back_equal_to_the_one_written() {
@@ -808,9 +808,8 @@ fn copy_time_series_rejects_a_duplicate_destination() {
 // ---------------------------------------------------------------------------
 
 /// Deleting one of several associations that share a feature set must not
-/// disturb the survivors' features. Under the old per-association feature rows
-/// with `ON DELETE CASCADE` this was trivially true; with shared rows it is a
-/// real invariant, and a stray cascade would silently blank the survivors.
+/// disturb the survivors' features. Because the rows are shared, this is a real
+/// invariant: a stray cascade would silently blank the survivors.
 #[test]
 fn deleting_one_sharer_leaves_the_others_features_intact() {
     let mut store = create_store(None, true).unwrap();
@@ -880,8 +879,8 @@ fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
 
 /// A derived `DeterministicSingleTimeSeries` has the same features as the
 /// `SingleTimeSeries` it came from, so it reuses the stored set and writes no new
-/// feature rows. This is the property that makes `transform_single_time_series`
-/// stop scaling with feature count.
+/// feature rows. This is the property that keeps `transform_single_time_series`
+/// from scaling with feature count.
 #[test]
 fn transform_reuses_the_sources_feature_set() {
     let mut store = create_store(None, true).unwrap();
@@ -1068,9 +1067,9 @@ fn a_shared_timestamp_vector_is_stored_once_and_swept_when_orphaned() {
 /// The size guard behind interning: a catalog holding many irregular series on
 /// one long time axis must scale with the *number of distinct axes*, not with
 /// rows × timestamps. Storing the vector inline as RFC3339 JSON (24 bytes per
-/// timestamp, as this store used to) would put ~2.4 MB in the catalog here. The
-/// vectors now live in the HDF5 file, so the catalog holds one 32-byte hash per
-/// row and nothing else of the axis.
+/// timestamp) would put ~2.4 MB in the catalog here. The vectors live in the
+/// HDF5 file, so the catalog holds one 32-byte hash per row and nothing else of
+/// the axis.
 #[test]
 fn the_catalog_does_not_scale_with_rows_times_timestamps() {
     let dir = tempfile::tempdir().unwrap();

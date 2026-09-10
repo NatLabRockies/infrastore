@@ -323,7 +323,7 @@ fn the_write_path_refuses_a_malformed_persistent_series() {
 }
 
 // ---------------------------------------------------------------------------
-// Storage sharing: the "no storage change" claim
+// Storage sharing with NonSequentialTimeSeries
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -367,8 +367,8 @@ fn a_persistent_and_a_non_sequential_series_share_one_stored_array() {
 
     // ...over one content-addressed array. `PackGroup` is keyed by the time
     // axis, never by the series type, so identical bytes on identical
-    // breakpoints dedup across the two types. This pins the plan's claim that
-    // the storage layer needed no change at all.
+    // breakpoints dedup across the two types: the persistent type rides on the
+    // non-sequential storage as-is.
     let rows = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].data_hash, rows[1].data_hash);

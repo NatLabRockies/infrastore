@@ -1,4 +1,4 @@
-//! Tests for the forecast read path in `Store::get_time_series`.
+//! Tests for the forecast read path (`Store::read_by_id` / `read_by_ids_range`).
 //!
 //! All cases run against BOTH backends via [`for_each_backend`]: the in-memory
 //! store, and an HDF5 store that is flushed, closed, and reopened read-only
@@ -117,11 +117,11 @@ fn add_forecast(
 
 /// The single row matching `filter`, or the error a caller would raise itself.
 ///
-/// `resolve_metadata` used to be a `Store` method; it is now a listing plus an
-/// exactly-one check, which is what every binding does since the resolver came
-/// out. The filter reads its type through `TimeSeriesType::accepts`, so asking
-/// for `Deterministic` still spans a stored `DeterministicSingleTimeSeries` —
-/// that rule lives in `ListFilter`, not in a separate entry point.
+/// `Store` deliberately has no attribute-to-id resolver: this is a listing plus
+/// an exactly-one check, which is what every binding does. The filter reads its
+/// type through `TimeSeriesType::accepts`, so asking for `Deterministic` spans a
+/// stored `DeterministicSingleTimeSeries` — that rule lives in `ListFilter`, not
+/// in a separate entry point.
 fn resolve_one(store: &Store, filter: ListFilter) -> Result<TimeSeriesMetadata, TimeSeriesError> {
     let mut rows = store.list_metadata(filter)?;
     match rows.len() {
@@ -2136,8 +2136,9 @@ fn single_window_transform_at_a_smaller_interval_keeps_it() {
 // TransformPolicy: the rules InfrastructureSystems.jl opts into.
 //
 // Every test above runs with `TransformPolicy::default()` — the permissive
-// behavior. These cover the opted-in rules, which are what moved out of the
-// InfrastructureSystems.jl per-series validation loop and into the core.
+// behavior. These cover the opted-in rules: the checks InfrastructureSystems.jl
+// asks for, run once in the core over the catalog rather than per series in
+// the client.
 // ---------------------------------------------------------------------------
 
 /// Add one `SingleTimeSeries` of `len` hourly points starting at `initial`.
@@ -2216,9 +2217,9 @@ fn normalize_single_window_stores_the_zero_interval() {
     assert_eq!(det.interval, Period::zero());
 }
 
-/// An interval longer than the horizon would leave gaps between windows. The
-/// permissive policy derives it anyway (the historical core behavior); IS's
-/// policy is not what rejects it — the check is unconditional.
+/// An interval longer than the horizon would leave gaps between windows. It is
+/// refused under every policy: IS's policy is not what rejects it — the check
+/// is unconditional.
 #[test]
 fn an_interval_longer_than_the_horizon_is_rejected() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -2243,7 +2244,7 @@ fn an_interval_longer_than_the_horizon_is_rejected() {
 
 /// `require_uniform_forecast_grid` rejects a transform whose derived grid
 /// disagrees with a forecast already stored at the same (resolution, interval).
-/// This is the check that was `check_params_compatibility` in IS.
+/// It is the core's form of IS's `check_params_compatibility`.
 #[test]
 fn uniform_grid_policy_rejects_a_count_mismatch_with_a_stored_forecast() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -2326,7 +2327,7 @@ fn uniform_grid_policy_rejects_resolutions_that_derive_different_counts() {
 }
 
 /// Series at one resolution that disagree on `(initial_timestamp, length)` are
-/// rejected before anything is written — the grid check that replaced IS's
+/// rejected before anything is written — the grid check that stands in for IS's
 /// per-series count/initial-timestamp loop. This one is unconditional: it is a
 /// property of the static data, not a client rule.
 #[test]
@@ -2483,12 +2484,12 @@ fn a_dry_run_validates_without_writing() {
 ///
 /// `WindowSlot` caches a *block* of windows when one window is too large to
 /// read the whole count at once. The HDF5 backend clears the destination buffer
-/// before the lookup that can return `NotFound`, and `read_window` used to
-/// propagate that error without clearing `cached` — so the slot went on
-/// advertising a range over an emptied buffer. The next read landing inside that
-/// range skipped the I/O and indexed the empty slice, turning a removed array
-/// into an out-of-range panic rather than the `NotFound` the failed read had
-/// already reported.
+/// before the lookup that can return `NotFound`, so `read_window` must drop
+/// `cached` before a read that can fail: otherwise the slot goes on advertising
+/// a range over an emptied buffer, and the next read landing inside that range
+/// skips the I/O and indexes the empty slice — turning a removed array into an
+/// out-of-range panic rather than the `NotFound` the failed read already
+/// reported.
 #[test]
 fn a_failed_window_read_invalidates_the_block_cache() {
     let dir = tempfile::tempdir().unwrap();
@@ -2544,8 +2545,8 @@ fn a_failed_window_read_invalidates_the_block_cache() {
         "the array is gone, so this must fail"
     );
 
-    // Now read a window back inside the originally cached range. This is the
-    // one that used to panic; it must report the same error instead.
+    // Now read a window back inside the originally cached range. A stale cache
+    // would turn this read into a panic; it must report the same error instead.
     let near = initial + Duration::hours(1);
     assert!(
         store.forecast_read(&mut reader, near).is_err(),
@@ -2556,14 +2557,14 @@ fn a_failed_window_read_invalidates_the_block_cache() {
 /// A zero-width `time_range` selects nothing, and that is an answer, not a fault.
 ///
 /// `resolve_windows` returns an empty selection for `end == start`, and the
-/// reconstruction then rebuilt the forecast with `count = 0`. For a
-/// zero-interval single-window forecast — the encoding
-/// `transform_single_time_series` writes under `normalize_single_window` — that
-/// tripped `validate_forecast_periods`, whose zero-interval allowance was keyed
-/// on exactly one window. `Store::get_time_series` maps a constructor failure to
-/// `IntegrityError`, so a well-formed query on an intact store reported that the
-/// store was corrupt, and only for this encoding: the same query against a
-/// positive-interval forecast returned an empty forecast successfully.
+/// read path rebuilds the forecast with `count = 0`, mapping a constructor
+/// failure to `IntegrityError`. For a zero-interval single-window forecast —
+/// the encoding `transform_single_time_series` writes under
+/// `normalize_single_window` — `validate_forecast_periods` must therefore allow
+/// the zero interval for no windows as well as for one. Keyed on exactly one
+/// window, it would report a well-formed query on an intact store as a corrupt
+/// store, and only for this encoding: the same query against a
+/// positive-interval forecast returns an empty forecast successfully.
 #[test]
 fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -2590,7 +2591,7 @@ fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
         )
         .unwrap();
 
-    // Several windows, positive interval — the control that always worked.
+    // Several windows, positive interval — the control.
     let many = Deterministic::new(
         initial,
         Duration::hours(1),
@@ -2642,11 +2643,11 @@ fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
 ///
 /// `array_hash` covers dtype, shape and bytes — not the logical element type —
 /// so byte-identical arrays share a `data_hash` by design. The reader's slot
-/// dedup keyed on `(data_hash, WindowRead)` and omitted `element_type`, so the
-/// two collapsed into one slot and whichever entry arrived second was handed the
-/// first one's meaning. `entry_slot(i).element_type()` is the only place a
-/// caller learns how to decode a window, so the wrong answer there is silently
-/// wrong values rather than an error.
+/// dedup therefore keys on `element_type` as well as `(data_hash, WindowRead)`;
+/// without it the two would collapse into one slot and whichever entry arrived
+/// second would be handed the first one's meaning. `entry_slot(i).element_type()`
+/// is the only place a caller learns how to decode a window, so the wrong answer
+/// there is silently wrong values rather than an error.
 #[test]
 fn identical_bytes_under_different_element_types_do_not_share_a_slot() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

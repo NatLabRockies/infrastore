@@ -107,11 +107,11 @@ fn an_in_memory_catalog_discards_changes_when_the_store_is_dropped() {
         store.flush().unwrap();
     }
 
-    // Mode-1 semantics: the arrays are on disk but nothing names them. Reopening
-    // attached creates a fresh, unstamped catalog beside a stamped HDF5 file, and
-    // the paired-stamp check now refuses that rather than presenting the arrays
-    // as an empty store — an abandoned scratch half-artifact is exactly the case
-    // where "opens fine, contains nothing" is the wrong answer.
+    // In-memory semantics: the arrays are on disk but nothing names them.
+    // Reopening attached creates a fresh, unstamped catalog beside a stamped HDF5
+    // file, and the paired-stamp check refuses that rather than presenting the
+    // arrays as an empty store — an abandoned scratch half-artifact is exactly
+    // the case where "opens fine, contains nothing" is the wrong answer.
     let err = open_store(&scratch, false)
         .err()
         .expect("a half-artifact must not open");
@@ -166,7 +166,7 @@ fn opening_with_an_in_memory_catalog_requires_the_catalog_file() {
 }
 
 // ---------------------------------------------------------------------------
-// The mode-1 round trip
+// The scratch-directory round trip
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -363,7 +363,7 @@ fn sqlite_sidecar(sqlite: &std::path::Path, suffix: &str) -> std::path::PathBuf 
 }
 
 // ---------------------------------------------------------------------------
-// Operations that predate `CatalogMode`, run in the mode that came second
+// General store operations, run with the catalog in RAM
 // ---------------------------------------------------------------------------
 
 /// Compaction rewrites the array half and sweeps the catalog. With the catalog
@@ -573,9 +573,7 @@ fn a_read_only_store_can_still_save_elsewhere() {
 
 /// The arrays-only half of the same asymmetry. `persist_arrays_to` writes the
 /// caller's destination and refuses the store's own file, so like `persist_to`
-/// it needs no write access to the source — it once carried `persist_catalog`'s
-/// read-only guard by mirroring that function's shape rather than its
-/// semantics.
+/// it needs no write access to the source.
 #[test]
 fn a_read_only_store_can_still_save_its_arrays_elsewhere() {
     let dir = tempfile::tempdir().unwrap();
@@ -676,8 +674,9 @@ fn a_read_only_in_memory_catalog_writes_nothing_back() {
 /// A WAL-mode catalog needs its `-shm` index, and SQLite creates that sidecar
 /// even for a read-only connection. On media that refuses the write — a
 /// read-only mount, a shared archive, a directory this process does not own —
-/// creating it fails and, before the `immutable=1` fallback, took the whole open
-/// with it: a complete, uncorrupted artifact that could not be opened at all.
+/// creating it fails, and without the `immutable=1` fallback that would take the
+/// whole open with it: a complete, uncorrupted artifact that could not be opened
+/// at all.
 #[cfg(unix)]
 #[test]
 fn a_store_on_read_only_media_still_opens() {
@@ -794,10 +793,10 @@ fn an_unstamped_artifact_still_opens() {
 
 /// One stamped half and one unstamped is a mismatch, not a legacy artifact.
 ///
-/// This is the hole the pre-stamp migration window left open: a `persist_to`
-/// interrupted between its two renames, onto a destination whose previous pair
-/// predated stamping, leaves a freshly stamped HDF5 file beside an unstamped
-/// catalog. Skipping the check there would silently pair new arrays with an old
+/// This is the case unstamped artifacts leave open: a `persist_to` interrupted
+/// between its two renames, onto a destination whose previous pair predated
+/// stamping, leaves a freshly stamped HDF5 file beside an unstamped catalog.
+/// Skipping the check there would silently pair new arrays with an old
 /// catalog — the exact failure the stamp exists to prevent.
 #[test]
 fn one_stamped_half_is_a_mismatch() {

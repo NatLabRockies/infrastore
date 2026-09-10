@@ -3,9 +3,9 @@
 //! dense forecasts `Deterministic` / `Probabilistic` / `Scenarios` (windowed
 //! standalone). The packed (`sts_*`) path is exercised in `round_trip.rs`,
 //! `api_additions.rs`, and `disk_roundtrip.rs`; standalone arrays reclaim
-//! differently (HDF5 cannot reclaim the space in place, so the last-reference
-//! case leaves a tombstoned dataset rather than a reusable slot) and were
-//! previously only checked at the reader-slot level, never through a delete.
+//! differently (the last-reference case unlinks the dataset rather than freeing
+//! a reusable slot, and HDF5 cannot return the space in place), so they need
+//! coverage through a delete of their own.
 //!
 //! `count_array_references` deliberately tallies only `SingleTimeSeries` /
 //! `DeterministicSingleTimeSeries`, so the observable here is
@@ -161,7 +161,7 @@ fn scenarios_shares_and_reclaims_standalone_array() {
 }
 
 // --- Deletion-path coverage for standalone arrays: `remove_by_filter` and
-// `remove_time_series_bulk` were only proven to reclaim packed arrays. --------
+// `remove_by_ids` must reclaim a standalone array as they do a packed one. ----
 
 #[test]
 fn remove_by_filter_reclaims_standalone_array() {
@@ -204,8 +204,8 @@ fn remove_bulk_reclaims_shared_standalone_only_when_last_reference_gone() {
     assert_eq!(store.num_distinct_arrays().unwrap(), 0);
 }
 
-// --- dtype sweep on the standalone refcount path. Every existing dedup/refcount
-// test uses f64; content addressing hashes raw bytes, so exercise a signed int
+// --- dtype sweep on the standalone refcount path. The dedup/refcount tests
+// above use f64; content addressing hashes raw bytes, so exercise a signed int
 // and a bool array end to end through share -> decrement -> reclaim. -----------
 
 fn nonseq_typed(data: TypedArray) -> TimeSeriesData {

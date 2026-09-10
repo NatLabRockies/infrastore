@@ -2,7 +2,7 @@
 //! `rollback_transaction`.
 //!
 //! The interesting cases are the ones a per-operation transaction cannot express.
-//! A single `add_time_series_bulk` was already all-or-nothing, so what these
+//! A single `add_time_series_bulk` is all-or-nothing on its own, so what these
 //! tests pin down is the *span*: several operations rolling back together, and —
 //! the capability that does not exist outside a transaction — a **removal** being
 //! undone. That one works because the array store is content-addressed and can
@@ -11,9 +11,10 @@
 //! data is still present.
 //!
 //! Both backends are exercised where the distinction matters: `MemoryBackend`
-//! drops array bytes on `remove_array`, while the HDF5 backend tombstones and
-//! leaves the variable until `compact`. Deferring frees is what keeps the two
-//! behaving identically under rollback.
+//! drops array bytes on `remove_array`, while the HDF5 backend unlinks a
+//! standalone dataset or zero-fills a packed column for reuse, and keeps the
+//! file's space until `compact`. Deferring frees is what keeps the two behaving
+//! identically under rollback.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
@@ -213,9 +214,9 @@ fn deferred_free_is_skipped_when_the_array_is_referenced_again() {
     });
 }
 
-/// Mixed adds and removals unwind together — the case the per-operation
-/// transactions could not express, and the reason a client no longer needs a
-/// compensating-removal undo log.
+/// Mixed adds and removals unwind together — the case per-operation
+/// transactions cannot express, and what spares a client a compensating-removal
+/// undo log.
 #[test]
 fn rollback_undoes_a_mixed_add_and_remove_span() {
     each_backend(|store, backend| {
@@ -434,11 +435,11 @@ fn rollback_survives_a_reopen() {
 /// The array an inner span wrote goes away when that span rolls back.
 ///
 /// The catalog half of this is pinned above; this is the physical half, and it
-/// needs a signal the catalog cannot give. An inner rollback used to unwind the
-/// rows while leaving the bytes in the file: `commit_transaction` only consults
-/// `pending_free`, so nothing ever swept the inner span's `staged_hashes`. The
-/// orphan was invisible to `verify_integrity`, which walks only
-/// catalog-referenced arrays, and survived until someone ran `compact`.
+/// needs a signal the catalog cannot give. `commit_transaction` only consults
+/// `pending_free`, so an inner rollback that unwound the rows without sweeping
+/// the span's `staged_hashes` would leave the bytes in the file with no row
+/// referencing them — an orphan invisible to `verify_integrity`, which walks only
+/// catalog-referenced arrays, and reclaimable only by `compact`.
 #[test]
 fn an_inner_rollback_removes_the_arrays_that_span_wrote() {
     each_backend(|store, backend| {

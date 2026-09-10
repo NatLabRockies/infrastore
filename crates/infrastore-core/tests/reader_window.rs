@@ -228,7 +228,7 @@ fn the_window_arguments_that_mean_nothing_here_are_errors() {
 #[test]
 fn no_window_is_the_grid_the_series_share() {
     // The delegation is exact: `build_static_reader` is this call with an empty
-    // window, so a uniform store behaves as it always did.
+    // window, so a uniform store gets the same reader either way.
     let mut s = store();
     hourly(&mut s, 1, "a", 0, 24);
     hourly(&mut s, 2, "b", 0, 24);

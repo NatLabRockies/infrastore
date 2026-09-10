@@ -11,10 +11,9 @@ The SQLite catalog path is the HDF5 path with `.sqlite` appended to the file nam
 authoritative description of both. For the rationale behind the split, see the
 [Storage Model](../explanation/storage-model.md).
 
-The array file is a **plain HDF5 file**, written directly against libhdf5 — not a NetCDF4 file.
-Earlier releases wrote it through netcdf-c; the layout below is unchanged, but the file no longer
-carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only files it wrote itself
-(see `storage_backend` below). The `.h5` extension is a convention — the store never inspects it.
+The array file is a **plain HDF5 file**, written directly against libhdf5. `Store::open` accepts
+only files it wrote itself (see `storage_backend` below). The `.h5` extension is a convention — the
+store never inspects it.
 
 ## Format Version
 
@@ -39,9 +38,7 @@ reopening reuse the same filter. It is **not** part of the compatibility contrac
 
 `storage_backend` marks the file as one infrastore wrote. `Store::open` checks it before reading
 anything else and rejects a file that lacks it with `InvalidParameter` — this is what distinguishes
-an infrastore store from an arbitrary HDF5 file, and it is why stores written by the older
-netcdf-backed releases are refused rather than misread. Such a store has to be regenerated; there is
-no in-place migration.
+an infrastore store from an arbitrary HDF5 file, so a foreign file is refused rather than misread.
 
 `catalog_generation` pairs this file with exactly one catalog; the same value lives in the catalog's
 [`catalog_identity`](#catalog_identity) table. `Store::open` compares the two and rejects a mismatch
@@ -189,10 +186,17 @@ whole seconds.
 ## Arrays Are Typed and N-Dimensional
 
 Every stored array is a **`TypedArray`**: an element `dtype`, a `shape` `[length, k1, k2, …]` whose
-first axis is time and whose trailing axes are a fixed per-step element shape, and the raw
-row-major, little-endian element bytes. The supported dtypes and their stable integer codes (shared
-with the bindings and the C ABI). Codes 0–5 are the original set and never move; new widths are
-appended:
+first axis is time and whose trailing axes are a fixed per-step element shape, and the row-major
+element values.
+
+Byte order differs between the file and everything outside it. In the HDF5 file each dataset's
+datatype records its byte order, which is the native order of the host that wrote it, and libhdf5
+converts on every read. Outside the file, a `TypedArray`'s buffer is always little-endian: that is
+what the content hash covers and what every binding and the C ABI exchange. A reader using its own
+HDF5 tools gets correct values from any host's file without knowing either fact.
+
+The supported dtypes and their stable integer codes (shared with the bindings and the C ABI). Codes
+0–5 are the original set and never move; new widths are appended:
 
 | Code | dtype  | Width | Code | dtype | Width |
 | ---- | ------ | ----- | ---- | ----- | ----- |
@@ -243,10 +247,8 @@ time axes in a sibling group of their own:
 ```
 
 Datasets carry **no dimension scales and no dimension names** — shape is read straight off the HDF5
-dataspace. (The netcdf-backed releases created a named dimension per axis, `{dataset}_t`,
-`{dataset}_c`, and so on; those objects are gone.) On open the backend recovers each packed
-dataset's column count from the second extent of its dataspace, which is how per-dataset widths
-round-trip.
+dataspace. On open the backend recovers each packed dataset's column count from the second extent of
+its dataspace, which is how per-dataset widths round-trip.
 
 The hash companion `{dataset}_h` is a `(cols, 64)` array of `u8` holding each column's 64 lowercase
 hex characters as raw bytes — not an HDF5 string dataset. **An all-zero row marks a free slot.**
@@ -299,10 +301,11 @@ transaction therefore produces exactly the datasets one bulk add of the same ite
 long as the span reaches its commit without materializing early**; only an un-transactioned single
 add takes the default width.
 
+The buffer is the store's, not the file's: nothing on disk records it, and a reopen never sees one.
 The byte ceiling below and an early materialization are what can break that equivalence: crossing
-the ceiling, or asking a buffered array for its physical location, writes the span out as it stands.
-Each split costs an extra dataset and nothing else — the datasets are still block-written and
-chunk-aligned.
+the ceiling, or asking a buffered array for its physical location (`Store::locate_array`, which
+takes `&mut self` for that reason), writes the span out as it stands. Each split costs an extra
+dataset and nothing else — the datasets are still block-written and chunk-aligned.
 
 Two limits keep that buffer from being unbounded, and both simply write a block out early — the same
 spill a too-wide batch already performs, costing an extra dataset and nothing else:

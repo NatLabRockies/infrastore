@@ -80,9 +80,7 @@ fn fixture(name: &str) -> serde_json::Value {
 /// Insertion order is deliberately fixed so the catalog's autoincrement `id`
 /// column lands on known values: the DST source (1), the derived DST (2), then
 /// the six fixtures in file order (3-8, skipping the SA fixture which lives in
-/// a different table). The original hand-written fixtures used a different id
-/// numbering (101-106); those were adjusted to the ids the store genuinely
-/// assigns, per the task's fixture-correction allowance.
+/// a different table).
 fn build_fixture_store() -> Store {
     let mut store = create_store(None, true).expect("in-memory store should initialize");
 
@@ -91,7 +89,7 @@ fn build_fixture_store() -> Store {
     // interval to derive 23 windows ((24 - 2) / 1 + 1 = 23), matching the
     // deterministic_single_time_series fixture. `transform_single_time_series`
     // clones every other descriptive column from the source verbatim
-    // (`store.rs`'s `..src.clone()`), so units/quantity_kind/unit_system are
+    // (`store.rs`'s `..src`), so units/quantity_kind/unit_system are
     // set here to match what the fixture expects on the derived row.
     let dst_source = SingleTimeSeries::new(
         ts(2030, 1, 1, 0, 0, 0),
@@ -787,12 +785,11 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
 // The golden tests above pin the *export* spelling of all six types, and the
 // id tests in `association_ids.rs` pin one `Deterministic` row through an
 // import. Neither covers the rest of the descriptive surface on the way back
-// in: before these, no test had ever seen `units`, `quantity_kind`,
-// `unit_system`, `component_field`, `application_data`, `percentiles`, a
-// non-`f64` dtype, a non-scalar `element_type`, a calendar `Period`, a
-// sub-second `initial_timestamp`, or three of the four `TimeReference`
-// spellings survive `import_time_series_associations_openapi`. `Probabilistic`
-// and `Scenarios` rows had never been imported at all.
+// in, so these carry `units`, `quantity_kind`, `unit_system`,
+// `component_field`, `application_data`, `percentiles`, a non-`f64` dtype, a
+// non-scalar `element_type`, a calendar `Period`, a sub-second
+// `initial_timestamp`, every `TimeReference` spelling, and a `Probabilistic`
+// and a `Scenarios` row through `import_time_series_associations_openapi`.
 
 /// One fully-populated row per importable [`TimeSeriesData`] variant, as
 /// `(owner_id, owner_type, data, features)`.

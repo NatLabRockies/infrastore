@@ -90,10 +90,11 @@ pub struct MetadataStore {
 
 /// Timestamp vectors read back from the array file, memoized by content hash.
 ///
-/// The read paths resolve one association at a time — `get_by_key` per key —
-/// so a bulk read of N `NonSequentialTimeSeries` on one time axis fetched that
-/// axis N times. Measured on 200 series over a 7,508-instant year, that was
-/// ~70% of the whole call, for a vector it had already read 199 times.
+/// A read by id resolves one association at a time — `get_by_id` per id — so
+/// reading N `NonSequentialTimeSeries` on one time axis series by series would
+/// fetch that axis N times. Measured on 200 series over a 7,508-instant year,
+/// the repeated fetch is ~70% of the whole call, for a vector already read 199
+/// times.
 ///
 /// This can be a plain memo with no invalidation because timestamp vectors are
 /// **content-addressed and immutable**: a hash always maps to the same values,
@@ -101,7 +102,7 @@ pub struct MetadataStore {
 /// a small one suffices — the cache exists to collapse "one axis, read once per
 /// row", not to be a general row cache. A store holds a handful of distinct
 /// axes; series that do not share one miss anyway, and pay exactly what they
-/// paid before.
+/// would without it.
 ///
 /// One consequence worth naming: a hit is served without touching the store, so
 /// if a vector were deleted *after* this process read it, the integrity error
@@ -849,9 +850,8 @@ impl MetadataFilter {
 impl MetadataStore {
     /// Wrap an already-initialized connection, resolving the additive-table
     /// flags once. Every open funnels through here so a new additive table is
-    /// probed on all of them or none — the three call sites drifted apart
-    /// otherwise, and a flag left `false` on one of them reads as "this store
-    /// has no such rows".
+    /// probed on all of them or none: a flag left `false` on one of them reads
+    /// as "this store has no such rows".
     fn from_connection(conn: Connection, read_only: bool) -> Result<Self> {
         let has_supplemental_attribute_table =
             table_exists(&conn, "supplemental_attribute_associations")?;
@@ -1009,8 +1009,7 @@ impl MetadataStore {
             // time in that fsync. WAL guarantees the database stays consistent
             // either way; what NORMAL gives up is durability of the last few
             // commits on an OS crash or power loss, which this store accepts:
-            // the artifact is rebuilt from serialized systems, and the prior
-            // metadata store held everything in process memory.
+            // the artifact is rebuilt from serialized systems.
             conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         }
         // `prepare_cached` keys on SQL text, and `MetadataFilter` renders a
@@ -1167,8 +1166,8 @@ impl MetadataStore {
         // statement truncates the sub-journal on close -- a front-to-back walk
         // of a chunk list when the catalog is in memory, over a journal that
         // grows with every page the transaction has touched. A batched load
-        // under one transaction went quadratic on it: the tenth batch of 10k
-        // rows was fifty times slower than the first. `last_insert_rowid()` is
+        // under one transaction goes quadratic on it: the tenth batch of 10k
+        // rows runs fifty times slower than the first. `last_insert_rowid()` is
         // per-connection and reports the most recent rowid insert, so it must
         // be read before the feature-set insert below, which would clobber it;
         // `tests/bulk_add_in_transaction.rs` pins the cost.
@@ -1352,10 +1351,8 @@ impl MetadataStore {
     /// stored type, or `None` if the catalog holds no such row — the caller
     /// decides whether a stale reference is an error.
     ///
-    /// The id is the primary key, so this names exactly one row: unlike
-    /// [`Self::delete_by_key`], whose NULL-interval wildcard can sweep a whole
-    /// forecast family, a removal by reference removes only what the reference
-    /// points at.
+    /// The id is the primary key, so this names exactly one row: a removal by
+    /// reference removes only what the reference points at.
     ///
     /// `expected_owner`, when given, is a guard: the row is deleted only if it
     /// belongs to that owner, and otherwise nothing is deleted and
@@ -1474,7 +1471,7 @@ impl MetadataStore {
     ) -> Result<usize> {
         // A collision (the new owner already holds an identical association)
         // fires the unique index on the UPDATE; surface the spec error rather
-        // than a raw rusqlite error (REVIEW_FOLLOWUPS.md item 5).
+        // than a raw rusqlite error.
         tx.execute(
             "UPDATE time_series_associations SET owner_id = ?1
              WHERE owner_id = ?2 AND owner_category = ?3",
@@ -1520,11 +1517,10 @@ impl MetadataStore {
 
     /// Like [`Self::list`], but without hydrating the timestamp vectors.
     ///
-    /// For callers that only need each row's *identity* — building a
-    /// an identity, which never carries the vector. An irregular series
-    /// comes back with `timestamps: None` and its axis unread, which is what
-    /// keeps a key listing from fetching every axis the match spans out of the
-    /// array file only to discard it.
+    /// For callers that only need each row's *identity*, which never carries
+    /// the vector. An irregular series comes back with `timestamps: None` and
+    /// its axis unread, which is what keeps an identity listing from fetching
+    /// every axis the match spans out of the array file only to discard it.
     ///
     /// Not for a caller that will write the row back: [`Self::insert`] derives
     /// `timestamps_hash` from `timestamps`, so re-inserting an unhydrated row
@@ -1648,9 +1644,9 @@ impl MetadataStore {
         let mut timestamps_by_hash: HashMap<[u8; 32], Vec<DateTime<Utc>>> = HashMap::new();
         if let Some(vectors) = vectors {
             // Serve what the memo already holds and go to the file only for the
-            // rest. A keyed read resolves one row at a time, so this is what
+            // rest. A read by id resolves one row at a time, so this is what
             // stops a sweep over a cohort from re-reading its shared axis once
-            // per key.
+            // per series.
             for (_, row) in &rows {
                 let Some(hash) = row.timestamps_hash else {
                     continue;
@@ -1943,8 +1939,8 @@ impl MetadataStore {
     /// Every row named by `ids`, in catalog order and without duplicates —
     /// callers that need them in *their* order reorder by [`TimeSeriesMetadata::id`].
     ///
-    /// One query rather than one per id, which is what makes a bulk read by
-    /// reference cost the same as a bulk read by key.
+    /// One query per chunk of ids rather than one per id, so a bulk read by
+    /// reference costs what a filtered listing does.
     pub fn list_by_ids(
         &self,
         ids: &[i64],
@@ -2220,9 +2216,9 @@ impl MetadataStore {
     /// One grouped query; types the core does not recognize are skipped.
     ///
     /// The `ORDER BY` is explicit rather than incidental: `GROUP BY` alone
-    /// returns rows in whatever order the grouping used, which changed when the
-    /// column became an integer code. Pinning it keeps the output stable for
-    /// callers that compare whole result lists.
+    /// returns rows in whatever order the grouping happens to use, which
+    /// depends on the column's storage form and is no contract. Pinning it
+    /// keeps the output stable for callers that compare whole result lists.
     pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT time_series_type, COUNT(*) FROM time_series_associations
@@ -2285,9 +2281,9 @@ impl MetadataStore {
     /// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
     /// length)` with the association count. One `GROUP BY` query.
     pub fn static_summary(&self) -> Result<Vec<StaticSummaryRow>> {
-        // An `IN` list rather than a `BETWEEN`: the static codes stopped being
-        // contiguous when `PersistentTimeSeries` was appended as 6 — see
-        // `TimeSeriesType::static_codes`. `idx_ts_type` serves either shape.
+        // An `IN` list rather than a `BETWEEN`: the static codes are not
+        // contiguous, since `PersistentTimeSeries` is 6, after the forecasts —
+        // see `TimeSeriesType::static_codes`. `idx_ts_type` serves either shape.
         //
         // Interpolated rather than bound, unlike the rest of this module. The
         // values come straight off the enum as `i64`, never from a caller, so
@@ -2698,9 +2694,9 @@ impl MetadataStore {
         // `component_type` is a denormalized label carried for filtering, so a
         // move has to bring it up to date or the moved rows keep describing the
         // component they came from: filtering by the destination's real type
-        // missed them, filtering by the source's type returned them under the
-        // destination's id, and `supplemental_attribute_summary` split one
-        // component across two contradictory type buckets.
+        // would miss them, filtering by the source's type would return them
+        // under the destination's id, and `supplemental_attribute_summary`
+        // would split one component across two contradictory type buckets.
         //
         // The destination's type is taken from the rows it already has. When it
         // has none the catalog has no other record of it — these rows become its
@@ -3137,8 +3133,9 @@ fn parse_feature_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Featu
 
 /// Map a SQLite UNIQUE-index constraint violation to the spec's
 /// [`TimeSeriesError::DuplicateTimeSeries`], passing every other error through.
-/// Shared by the `INSERT` and `UPDATE` paths where the association uniqueness
-/// index can fire (`rename`, `replace_owner`).
+/// Used by the `UPDATE` in [`MetadataStore::replace_owner`], where the
+/// association uniqueness index fires if the new owner already holds an
+/// identical series.
 fn map_unique_violation(e: rusqlite::Error) -> TimeSeriesError {
     match e {
         rusqlite::Error::SqliteFailure(err, _)
@@ -3809,11 +3806,10 @@ mod index_plan_tests {
     //! Guards on the query planner's index choices.
     //!
     //! The five secondary indexes in `schema::DDL` (`idx_ts_type`, `idx_name`,
-    //! `idx_owner_type`, `idx_category_owner`, `idx_interval`) were added after
-    //! measuring 3–34x speedups on a 405k-row catalog — see the long comment
-    //! beside them. Those measurements live in a comment; nothing stopped a
-    //! later schema edit from quietly returning a hot predicate to a full table
-    //! scan.
+    //! `idx_owner_type`, `idx_category_owner`, `idx_interval`) each earn their
+    //! place with a 3–34x speedup measured on a 405k-row catalog — see the long
+    //! comment beside them. A comment cannot stop a later schema edit from
+    //! quietly returning a hot predicate to a full table scan; these tests can.
     //!
     //! Each test below applies the real DDL to a fresh in-memory database, runs
     //! `EXPLAIN QUERY PLAN` for one hot query *shape*, and asserts the expected
@@ -3955,8 +3951,8 @@ mod index_plan_tests {
 
     #[test]
     fn data_hash_lookup_uses_idx_hash() {
-        // Regression side: `idx_hash` predates the five above and drives array
-        // reference counting on every delete.
+        // `idx_hash` is not one of the five filter indexes above; it drives
+        // array reference counting on every delete.
         assert_uses_index(
             "SELECT * FROM time_series_associations WHERE data_hash = ?",
             "idx_hash",
@@ -3993,8 +3989,8 @@ mod index_plan_tests {
 
     #[test]
     fn the_full_identity_lookup_uses_the_unique_index() {
-        // The hot single-key read: `get_by_key` resolves one row by its whole
-        // identity and must land on the unique index, not scan.
+        // One row by its whole identity — the write path's duplicate probe —
+        // must land on the unique index, not scan.
         assert_uses_index(
             "SELECT * FROM time_series_associations
              WHERE owner_id = ? AND owner_category = ? AND time_series_type = ?

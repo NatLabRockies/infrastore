@@ -106,8 +106,8 @@ fn saved_store(path: &std::path::Path) {
 ///
 /// Creating truncates the HDF5 file but only *opens* the catalog, then stamps
 /// both halves with one fresh generation. Without the guard, pointing a build
-/// script at a path that already holds a save left an empty array file paired
-/// with the old catalog's rows — a store that opens cleanly, reports every
+/// script at a path that already holds a save would leave an empty array file
+/// paired with the old catalog's rows — a store that opens cleanly, reports every
 /// series still present, and has nothing behind any of them. No crash required.
 #[test]
 fn creating_over_a_saved_store_is_refused() {
@@ -236,8 +236,8 @@ fn open_copy_leaves_the_original_alone() {
 ///
 /// SQLite in WAL mode holds committed transactions in the sidecar until a
 /// checkpoint, so a writer that died leaves rows the main database does not have
-/// yet. Copying `<src>.sqlite` with `fs::copy` dropped them — and dropped them
-/// silently, because the copy then opened cleanly and simply listed fewer
+/// yet. Copying `<src>.sqlite` with `fs::copy` would drop them — and drop them
+/// silently, because the copy then opens cleanly and simply lists fewer
 /// series. The catalog half goes through `VACUUM INTO` instead, which reads
 /// through committed WAL content.
 #[test]

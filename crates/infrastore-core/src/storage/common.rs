@@ -45,9 +45,10 @@ pub const DEFAULT_COLS_PER_DATASET: usize = 1000;
 /// wider than the cap spill into additional datasets.
 pub(crate) const MAX_CHUNK_BYTES: usize = 1 << 20; // 1 MiB
 
-/// Ceiling on the bytes a backend may hold in *unwritten* packed blocks across
-/// every pool at once — the memory a transaction's buffered adds occupy before
-/// its commit writes them (see `Hdf5Backend`'s pending blocks).
+/// Default ceiling on the bytes the store's write buffer may hold in
+/// *unwritten* packed blocks across every pool at once — the memory a
+/// transaction's buffered adds occupy before its commit writes them (see
+/// `crate::write_buffer`).
 ///
 /// A ceiling is required, not merely nice: a packed single add outside a
 /// transaction is O(1) in memory, and buffering makes a span O(its own bytes).

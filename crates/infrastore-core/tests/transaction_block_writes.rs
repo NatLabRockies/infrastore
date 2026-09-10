@@ -23,9 +23,9 @@
 //! budget — so a long enough span writes blocks out early instead of growing
 //! without limit. The per-pool cap is the chunk budget and not the growth
 //! pool's thousand columns on purpose: a bulk add issued inside a transaction is
-//! buffered the same way, and a thousand-column cap cut a wide one into ten
-//! times the datasets it writes outside a transaction, which a columnar read
-//! then pays for chunk by chunk.
+//! buffered the same way, and a thousand-column cap would cut a wide one into
+//! ten times the datasets it writes outside a transaction, which a columnar
+//! read then pays for chunk by chunk.
 //!
 //! Chunk shapes below are `(rows, cols)` with `rows > 1` wherever one timestamp
 //! row would fall under `MIN_CHUNK_BYTES`. At 24 f64 steps that is every layout
@@ -112,10 +112,6 @@ fn add_singly_in_a_transaction(path: &Path, owners: std::ops::Range<i64>) {
 
 /// The whole point: N single adds inside one transaction and one bulk add of
 /// the same N items produce the same datasets, byte for byte in structure.
-///
-/// Before this, the transaction loop produced a single 1000-column pool chunked
-/// `(1, 1000)` — the growth pool — while the bulk add produced one N-column
-/// dataset chunked `(1, N)`.
 #[test]
 fn single_adds_in_a_transaction_match_a_bulk_add_of_the_same_items() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,8 +145,8 @@ fn single_adds_in_a_transaction_match_a_bulk_add_of_the_same_items() {
     assert!(store.verify_integrity().unwrap().ok());
 }
 
-/// The un-transactioned single add is untouched: it still claims a growth pool
-/// sized for a cohort it hopes to see, and still fills one slot per call.
+/// The single add outside a transaction claims a growth pool sized for a
+/// cohort it hopes to see, and fills one slot per call.
 #[test]
 fn a_single_add_outside_a_transaction_still_fills_a_growth_pool() {
     use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
@@ -178,11 +174,11 @@ fn a_single_add_outside_a_transaction_still_fills_a_growth_pool() {
 
 /// A one-item `add_time_series_bulk` outside a transaction is the single add.
 ///
-/// It used to size a dataset to the batch — one column, an eight-byte chunk —
-/// once per call, which is what the Julia binding's `add_time_series!` does on
-/// every series it adds: nineteen calls left nineteen datasets `…_PT1H__0`
-/// through `…__18`. Inside a transaction it instead coalesces, which is the
-/// better answer and the one the delegation cannot give.
+/// Sizing a dataset to the batch would give every call a one-column dataset of
+/// its own, and the Julia binding's `add_time_series!` makes exactly that call
+/// for every series it adds: nineteen calls would leave nineteen datasets
+/// `…_PT1H__0` through `…__18`. Inside a transaction it coalesces instead,
+/// which is the better answer and the one the delegation cannot give.
 #[test]
 fn one_item_bulk_adds_fill_a_slot_outside_a_transaction_and_coalesce_inside_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -258,12 +254,10 @@ fn a_one_item_bulk_add_guard_fills_a_slot_outside_a_transaction() {
 ///
 /// This is the shape the feature is most often used in: "several operations
 /// atomic together" is usually a removal and a replacement, or one add beside
-/// some catalog work, not a bulk ingest. Sizing a dataset to it would chunk
-/// `(1, 1)`, giving a scalar `f64` series an eight-byte chunk and one chunk per
-/// timestep — the same per-chunk overhead that made nineteen one-item bulk adds
-/// write a 36 MB file, which is what the delegation above exists to avoid.
-/// Nineteen 30,500-step series added in nineteen separate transactions measured
-/// 36 MB written that way against 5.9 MB through the pool.
+/// some catalog work, not a bulk ingest. Sizing a dataset to it would give
+/// every such transaction a one-column dataset of its own — the layout the
+/// delegation above exists to avoid — where the growth pool shares one dataset
+/// across every series at the resolution.
 ///
 /// From two columns up the block is what a bulk add of the same items writes,
 /// and stays that way — that is the invariant this file's first test pins.
@@ -374,10 +368,10 @@ fn kinds(path: &Path) -> BTreeMap<String, Vec<Vec<usize>>> {
 /// `resolve_irregular_layouts` settles that bet before the write from the
 /// requests it can see. Inside a span it cannot see them: each add is one
 /// request against a file holding no pool for the axis -- and because a
-/// standalone array never *becomes* a pool, the next add saw exactly the same
-/// thing. Six series on one timeline came out as six standalone datasets where
-/// the bulk add of them writes one `(12, 6)` cohort. The bet is now settled
-/// where the answer is known, in the block.
+/// standalone array never *becomes* a pool, the next add would see exactly the
+/// same thing, and six series on one timeline would come out as six standalone
+/// datasets where the bulk add of them writes one `(12, 6)` cohort. So the bet
+/// is settled where the answer is known, in the block.
 #[test]
 fn irregular_singles_in_a_span_pool_like_a_bulk_add_of_them() {
     let dir = tempfile::tempdir().unwrap();
@@ -675,16 +669,15 @@ fn an_inner_rollback_drops_only_its_own_arrays_from_the_block() {
 }
 
 /// A transaction abandoned by dropping the store — the shape a killed process
-/// leaves — no longer strands the arrays it was still holding. They were never
-/// written, so there is nothing to strand: `compact` used to be the only way to
-/// reclaim the columns such a span had already filled.
+/// leaves — strands none of the arrays it was still holding. They were never
+/// written, so there is nothing to strand and nothing for `compact` to reclaim.
 ///
 /// The guarantee is exactly that, and no wider: it covers what is *still
 /// buffered* when the store goes away. A span that spilled a block first — by
 /// filling a pool to its width cap, crossing the byte budget, flushing, or
 /// asking for a physical location — has written those arrays, and an
-/// abandonment after that leaves them behind for `compact`, as every add
-/// already did before any of this.
+/// abandonment after that leaves them behind for `compact`, as it does for any
+/// add outside a transaction.
 #[test]
 fn an_abandoned_transaction_leaves_no_orphan_arrays() {
     let dir = tempfile::tempdir().unwrap();
@@ -723,8 +716,8 @@ fn an_abandoned_transaction_leaves_no_orphan_arrays() {
 /// One of the two ceilings on that width is the per-chunk byte budget, which a
 /// wide element shape makes small enough to cross in a test: `f64` elements of
 /// `[1024]` are 8 KiB each, which caps a 1 MiB timestamp-row chunk at 128
-/// columns. The other is the global byte budget, exercised in the backend's own
-/// tests. What is *not* a ceiling is the growth pool's thousand columns: a
+/// columns. The other is the global byte budget, exercised in the write
+/// buffer's own tests. What is *not* a ceiling is the growth pool's thousand columns: a
 /// scalar `f64` span of 1,002 stays one block, exactly as the bulk add of the
 /// same 1,002 writes one dataset.
 #[test]
@@ -780,10 +773,10 @@ fn a_scalar_span_wider_than_the_growth_pool_stays_one_block() {
 ///
 /// This is the shape the Julia binding's transaction takes — it stages its
 /// adds client-side and commits them as bulk adds of ten thousand inside an
-/// open transaction — and it is where a growth-pool-width cap on the buffer
-/// was first felt: a hundred-thousand-series store came out as a hundred
-/// datasets of a thousand columns instead of ten of ten thousand, and every
-/// per-timestep read across it paid the tenfold chunk count.
+/// open transaction — so a growth-pool-width cap on the buffer would cut a
+/// hundred-thousand-series store into a hundred datasets of a thousand columns
+/// instead of ten of ten thousand, and every per-timestep read across it would
+/// pay the tenfold chunk count.
 #[test]
 fn a_bulk_add_inside_a_transaction_writes_the_dataset_it_writes_outside_one() {
     const TOTAL: i64 = 1_200;
@@ -1034,10 +1027,10 @@ fn an_in_memory_store_records_the_budget_without_acting_on_it() {
     );
 }
 
-/// The budget lives in the backend, and two paths swap the backend under a live
-/// handle: `compact` and a `persist_to` back over the store's own file both have
-/// to close the HDF5 file so a rename can replace it. Each has to carry the
-/// figure across, or the "belongs to this handle" the setter documents lasts
+/// Two paths swap the backend under a live handle: `compact` and a `persist_to`
+/// back over the store's own file both close the HDF5 file so a rename can
+/// replace it. The budget belongs to the store, not the backend, so it has to
+/// survive both, or the "belongs to this handle" the setter documents lasts
 /// only until the next maintenance call.
 #[test]
 fn a_backend_swap_keeps_the_budget_the_caller_set() {

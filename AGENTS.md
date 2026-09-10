@@ -181,10 +181,9 @@ cargo run -p infrastore-server -- --config my_server.toml
 
 - A persisted store is an HDF5 file plus a SQLite catalog at `<store-path>.sqlite`. They are one
   logical artifact and must be moved, copied, and deleted together. The file is written directly
-  against libhdf5 (via `hdf5-metno`), not through netcdf-c; the extension is conventionally `.h5`
-  but nothing enforces it. Identity comes from the root attribute `storage_backend = "hdf5"`, and
-  `Store::open` rejects a file that lacks it — including stores written by the removed netcdf
-  backend.
+  against libhdf5 (via `hdf5-metno`); the extension is conventionally `.h5` but nothing enforces it.
+  Identity comes from the root attribute `storage_backend = "hdf5"`, and `Store::open` rejects a
+  file that lacks it.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
   contract, checked in **three tiers** (`Current` / `Upgradable` / `Incompatible`), not by equality.
   Any incompatible HDF5 layout, dtype encoding, timestamp encoding, or hashing change must bump it,

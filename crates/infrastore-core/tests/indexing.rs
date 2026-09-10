@@ -1,4 +1,5 @@
-//! Focused coverage for array indexing in `Store::get_time_series`.
+//! Focused coverage for array indexing in the `Store` read path (`read_by_id`,
+//! `read_by_ids_range`).
 //!
 //! These tests target the three layers of index arithmetic a returned slice
 //! depends on, all of which must agree:
@@ -63,7 +64,7 @@ fn single_6(initial: DateTime<Utc>) -> SingleTimeSeries {
 
 /// Several distinct series sharing one packed dataset must each read back their
 /// OWN values, both as a full read and a sub-range. Catches column-offset bugs
-/// (`col..col+1` in `packed_extents`) and cross-column contamination.
+/// (`col..col+1` in `packed_ranges`) and cross-column contamination.
 #[test]
 fn cross_contamination_across_packed_columns() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -126,8 +127,8 @@ fn cross_contamination_across_packed_columns() {
 
 /// A multidimensional (per-step element shape) series stored alongside another
 /// in the same dataset must slice correctly: time sub-range AND a non-zero
-/// column AND element dims interact in `packed_extents`. This is the most
-/// complex extent computation and was previously read only in full.
+/// column AND element dims interact in `packed_ranges`. This is the most
+/// complex extent computation, so it is read as a sub-range as well as in full.
 #[test]
 fn multidim_slice_at_nonzero_column() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -425,9 +426,9 @@ fn length_one_series_slicing() {
     );
 }
 
-/// Regression: a far-future `end` (here `initial + i64::MAX` nanoseconds)
-/// must clamp to the series length in the ceiling-division arithmetic in
-/// `get_time_series` without overflow. Expect the full series, no panic.
+/// A far-future `end` (here `initial + i64::MAX` nanoseconds) must clamp to
+/// the series length in the range read's ceiling-division arithmetic without
+/// overflow. Expect the full series, no panic.
 #[test]
 fn far_future_end_does_not_overflow() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

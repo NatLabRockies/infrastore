@@ -1,6 +1,7 @@
 //! High-level `Store` composing the storage backend and metadata store.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -16,7 +17,7 @@ use crate::metadata::{
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
     ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
-    MemoryBackend, PackGroup, StorageBackend, WriteMode,
+    MemoryBackend, PackGroup, StorageBackend, check_dtype, slice_rows, write_window_block,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::element_type::ElementType;
@@ -29,6 +30,7 @@ use crate::types::time_series::{
     Descriptors, Deterministic, NonSequentialTimeSeries, PersistentTimeSeries, Probabilistic,
     Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
 };
+use crate::write_buffer::{PoolKey, WriteBuffer, pool_key};
 
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
@@ -62,7 +64,8 @@ pub struct ListFilter {
     ///
     /// This is the constructive half of the mixed-selection rules. A selection
     /// that spans both groups has no single valid time bound and no single
-    /// spelling for a shared timestamp axis, so [`Store::bulk_read`] and
+    /// spelling for a shared timestamp axis, so [`Store::read_by_ids_range`],
+    /// a [`Store::read_by_ids`] whose window names a start, and
     /// [`Store::build_static_reader`] reject it; this is how a caller builds a
     /// coherent one instead. It is deliberately a binary predicate rather than
     /// an exact match on a reference: the unset rows are part of the zoned
@@ -141,8 +144,6 @@ impl ListFilter {
         self.component_field = Some(field.into());
         self
     }
-    /// Keep only the zoneless series (`true`) or only those that accept a zoned
-    /// bound (`false`). See [`Self::zoneless`].
     /// Keep only the series whose grid starts at `initial_timestamp`. See
     /// [`Self::initial_timestamp`].
     pub fn initial_timestamp(mut self, initial_timestamp: chrono::DateTime<chrono::Utc>) -> Self {
@@ -155,6 +156,8 @@ impl ListFilter {
         self.length = Some(length);
         self
     }
+    /// Keep only the zoneless series (`true`) or only those that accept a zoned
+    /// bound (`false`). See [`Self::zoneless`].
     pub fn zoneless(mut self, zoneless: bool) -> Self {
         self.zoneless = Some(zoneless);
         self
@@ -228,9 +231,9 @@ impl From<ListFilter> for MetadataFilter {
 /// reason it exists. A range says "whatever lies between these bounds", so a
 /// bound past the end of the series is a smaller answer; a window says "these
 /// exact steps", so it is a mistake. A caller that asked for 24 steps and
-/// silently got 3 has a bug the store can see and the caller cannot — which is
-/// why every binding that reads by name has grown its own copy of this
-/// arithmetic, off the row it had to fetch first.
+/// silently got 3 has a bug the store can see and the caller cannot. Checking it
+/// here also spares every binding its own copy of this arithmetic, off a row it
+/// would have to fetch first.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReadWindow {
     /// First timestamp to read; the series' own start when unset. For a
@@ -708,9 +711,9 @@ impl TransformPlan {
         let mut interval_normalized = false;
 
         for grid in grids {
-            // The wording matches what InfrastructureSystems.jl raised before
-            // this check moved into the store; `compute_h`'s own message is not
-            // appended, as it restates the same two periods.
+            // The wording is the one InfrastructureSystems.jl users already know
+            // for this condition; `compute_h`'s own message is not appended, as
+            // it restates the same two periods.
             let h = compute_h(horizon, grid.resolution).map_err(|_| {
                 TimeSeriesError::InvalidParameter(format!(
                     "horizon {} is not evenly divisible by resolution {}",
@@ -947,9 +950,9 @@ struct OpenTxn {
     staged_timestamps: Vec<[u8; 32]>,
     /// The lengths of both staged lists as each nesting level was opened, so a
     /// rollback can tell which writes belong to the level it is unwinding.
-    /// Without it an inner rollback unwound the catalog but left its writes in
-    /// the file: the outer commit only consults the pending-free sets, so the
-    /// bytes stayed with no row referencing them — invisible to
+    /// Without it an inner rollback would unwind the catalog but leave its
+    /// writes in the file: the outer commit only consults the pending-free sets,
+    /// so the bytes would stay with no row referencing them — invisible to
     /// `verify_integrity`, which walks only catalog-referenced objects, and
     /// reclaimable only by `compact`.
     marks: Vec<Mark>,
@@ -1000,8 +1003,9 @@ pub enum CatalogMode {
     #[default]
     Attached,
     /// The catalog is held in `:memory:`, loaded from `<store>.sqlite` on open
-    /// and written back only by [`Store::persist_to`]. Mutations pay no
-    /// journaling and no fsync, and **nothing survives a crash**.
+    /// and written back only by [`Store::persist_to`] or
+    /// [`Store::persist_catalog`]. Mutations pay no journaling and no fsync,
+    /// and **nothing survives a crash**.
     ///
     /// For a consumer that builds a store in a scratch directory beside its own
     /// in-RAM state and only cares about durability at an explicit save: a crash
@@ -1011,10 +1015,9 @@ pub enum CatalogMode {
     InMemory,
 }
 
-/// The catalog placement that reproduces pre-[`CatalogMode`] behavior for a
-/// given `in_memory` flag: an in-memory store has always held its catalog in
-/// RAM, and an on-disk one has always kept it in `<path>.sqlite`. Keeps the
-/// constructors that predate the enum meaning exactly what they used to.
+/// The catalog placement an `in_memory` flag implies, for the constructors that
+/// take the flag rather than a [`CatalogMode`]: an in-memory store holds its
+/// catalog in RAM, and an on-disk one keeps it in `<path>.sqlite`.
 fn default_catalog(in_memory: bool) -> CatalogMode {
     if in_memory {
         CatalogMode::InMemory
@@ -1119,6 +1122,9 @@ pub struct Store {
     catalog: CatalogMode,
     /// `Some` while a cross-operation transaction is open.
     txn: Option<OpenTxn>,
+    /// The packed arrays an open transaction has accepted and not yet written.
+    /// Empty outside a transaction; its byte budget outlives any one span.
+    write_buffer: WriteBuffer,
     /// Holds `file_path` in [`OPEN_ARTIFACTS`] for this store's lifetime. Last
     /// field on purpose: it drops after `backend` has closed the file.
     _open_guard: Option<OpenGuard>,
@@ -1186,6 +1192,7 @@ impl Store {
                 file_path: None,
                 catalog,
                 txn: None,
+                write_buffer: WriteBuffer::new(),
                 _open_guard: None,
             });
         }
@@ -1214,6 +1221,7 @@ impl Store {
             file_path: Some(file_path.to_path_buf()),
             catalog,
             txn: None,
+            write_buffer: WriteBuffer::new(),
             _open_guard: Some(open_guard),
         })
     }
@@ -1334,9 +1342,9 @@ impl Store {
     ///
     /// With [`CatalogMode::InMemory`] the `<path>.sqlite` file is read into RAM
     /// and then left alone; mutations never reach it, and only
-    /// [`Self::persist_to`] writes them back. Opening this way requires the
-    /// catalog file to exist — unlike [`CatalogMode::Attached`], which creates
-    /// an empty one when it is missing.
+    /// [`Self::persist_to`] or [`Self::persist_catalog`] writes them back.
+    /// Opening this way requires the catalog file to exist — unlike
+    /// [`CatalogMode::Attached`], which creates an empty one when it is missing.
     ///
     /// Caution: with `read_only=false` this does **not** copy the HDF5 half, so
     /// mutations land in `path` itself and an interrupted write damages the
@@ -1351,9 +1359,9 @@ impl Store {
     /// and the other not is [`TimeSeriesError::MismatchedArtifact`] as surely as
     /// two different stamps, because every path that writes a stamp writes both
     /// halves together. A lone stamp therefore means one half was replaced,
-    /// copied, or created without its partner — including the case that first
-    /// motivated the check, a `persist_to` interrupted between its two renames
-    /// onto a destination that predates stamping.
+    /// copied, or created without its partner — including a `persist_to`
+    /// interrupted between its two renames onto a destination that predates
+    /// stamping.
     pub fn open_with_catalog(path: &Path, read_only: bool, catalog: CatalogMode) -> Result<Self> {
         // One handle per artifact per process, read-only ones included: a
         // reader's column index is as stale as a writer's -- see `StoreInUse`.
@@ -1414,7 +1422,7 @@ impl Store {
         };
         if backend.pending_format_upgrade() {
             // `CatalogMode::InMemory` migrated a *copy*: the catalog on disk is
-            // untouched until `persist_to`, so re-stamping the array file here
+            // untouched until it is persisted, so re-stamping the array file here
             // would break the pair the next open sees. Only an attached
             // catalog has actually been upgraded in place.
             if catalog == CatalogMode::Attached {
@@ -1423,10 +1431,9 @@ impl Store {
         }
         // Re-checked against the opened catalog, which is the connection the
         // rest of the session actually uses. The preflight above reads a
-        // separate handle, so this closes the gap between the two -- and it is
-        // the check that has always been here. A migration cannot change the
-        // generation (migrating is not a save), so on any ordinary path the two
-        // agree and this is free.
+        // separate handle, so this closes the gap between the two. A migration
+        // cannot change the generation (migrating is not a save), so on any
+        // ordinary path the two agree and this is free.
         check_generation_pair(backend.generation(), metadata.generation()?)?;
         Ok(Self {
             backend,
@@ -1435,6 +1442,7 @@ impl Store {
             file_path: Some(path.to_path_buf()),
             catalog,
             txn: None,
+            write_buffer: WriteBuffer::new(),
             _open_guard: Some(open_guard),
         })
     }
@@ -1508,6 +1516,7 @@ impl Store {
             file_path: Some(path.to_path_buf()),
             catalog,
             txn: None,
+            write_buffer: WriteBuffer::new(),
             _open_guard: Some(open_guard),
         })
     }
@@ -1555,17 +1564,6 @@ impl Store {
         self.txn.is_some()
     }
 
-    /// How a packed array put by this call must be written: buffered for the
-    /// block writer while a transaction is open, straight into the file
-    /// otherwise. See [`WriteMode`] and [`Self::begin_transaction`].
-    fn write_mode(&self) -> WriteMode {
-        if self.in_transaction() {
-            WriteMode::Deferred
-        } else {
-            WriteMode::Immediate
-        }
-    }
-
     /// Begin a transaction spanning any number of subsequent operations, so that
     /// adds, removals, and transforms either all take effect or none do.
     ///
@@ -1601,29 +1599,30 @@ impl Store {
     /// is durable until its outermost commit, so a packed single add inside one
     /// owes the file nothing yet: instead of filling one slot of a
     /// thousand-column growth pool — a read-modify-write of every timestamp-row
-    /// chunk in the pool, for one column — it accumulates into a pending block
-    /// per pool, and the block is written with the same block writer a bulk add
-    /// uses. The result is the dataset a single [`Self::add_time_series_bulk`]
-    /// of the same items would have produced: same names, same widths, same
-    /// chunking. A block is written out at the outermost commit, when a read
-    /// needs a physical position for one of its arrays ([`Self::locate_array`],
-    /// or an explicit [`Self::flush`] — an ordinary value read is served from
-    /// the block), and when it hits either of the bounds below.
+    /// chunk in the pool, for one column — it joins a block per pool in the
+    /// store's write buffer, and the block is written with the same block
+    /// writer a bulk add uses. The result is the dataset a single
+    /// [`Self::add_time_series_bulk`] of the same items would have produced:
+    /// same names, same widths, same chunking. A block is written out at the
+    /// outermost commit, when a read needs a physical position for one of its
+    /// arrays ([`Self::locate_array`], or an explicit [`Self::flush`] — an
+    /// ordinary value read is served from the block), and when it hits either
+    /// of the bounds below.
     ///
     /// Measured on 19 hourly `f64` `SingleTimeSeries` of 30,500 steps added one
     /// at a time inside one transaction, against an on-disk store through the
-    /// Python binding, release build: ~10.2 s for that loop before, ~0.17 s now,
-    /// and the file 6.0 MB before against 3.3 MB after — one 1000-column pool
-    /// against the single 19-column dataset the bulk add writes.
+    /// Python binding, release build: ~0.17 s and a 3.3 MB file, against
+    /// ~10.2 s and 6.0 MB when each add fills a growth-pool slot instead — the
+    /// single 19-column dataset the bulk add writes, against one 1000-column
+    /// pool.
     ///
     /// **A transaction around a single packed add is not this.** A block of one
     /// fills a growth-pool slot instead, exactly as the same add outside a
-    /// transaction does, because sizing a dataset to one column gives a scalar
-    /// `f64` series an eight-byte chunk per timestep — the mistake
-    /// [`Self::add_time_series_bulk`] already refuses for a batch of one. Two
-    /// or more is a block, and is what the bulk add of those items writes.
+    /// transaction does, for the reason [`Self::add_time_series_bulk`] refuses
+    /// to size a dataset to a batch of one. Two or more is a block, and is what
+    /// the bulk add of those items writes.
     ///
-    /// The price is memory: a pool's pending block holds its not-yet-written
+    /// The price is memory: a pool's buffered block holds its not-yet-written
     /// arrays, which is the same memory the block writer allocates for the
     /// equivalent bulk add. It is bounded twice — per pool at the width the
     /// block writer spills a batch at (one chunk row: 131,072 columns of scalar
@@ -1682,7 +1681,7 @@ impl Store {
             // before the pending frees are taken out of the transaction below,
             // so a flush failure leaves the bookkeeping intact for a retry or a
             // rollback rather than dropping candidates that were never freed.
-            self.backend.flush()?;
+            self.flush_arrays()?;
         }
         // Decide what to free *before* releasing, while the transaction's view of
         // the catalog is still the one the commit is about to make permanent.
@@ -1716,7 +1715,7 @@ impl Store {
         }
         self.txn = None;
         for hash in &to_free {
-            self.backend.remove_array(hash)?;
+            self.remove_array(hash)?;
         }
         for hash in &axes_to_free {
             self.backend.remove_timestamps(hash)?;
@@ -1766,7 +1765,7 @@ impl Store {
                 timestamp_references_in_tx,
             )?;
             for hash in &to_free {
-                self.backend.remove_array(hash)?;
+                self.remove_array(hash)?;
             }
             for hash in &axes_to_free {
                 self.backend.remove_timestamps(hash)?;
@@ -1799,7 +1798,7 @@ impl Store {
         // those arrays, so the data must stay.
         self.txn = None;
         for hash in &to_free {
-            self.backend.remove_array(hash)?;
+            self.remove_array(hash)?;
         }
         for hash in &axes_to_free {
             self.backend.remove_timestamps(hash)?;
@@ -1886,7 +1885,7 @@ impl Store {
             }
             Err(e) => {
                 for hash in &staged.arrays {
-                    let _ = self.backend.remove_array(hash);
+                    let _ = self.remove_array(hash);
                 }
                 for hash in &staged.timestamps {
                     let _ = self.backend.remove_timestamps(hash);
@@ -1914,7 +1913,7 @@ impl Store {
                 txn.pending_free.insert(hash);
                 Ok(())
             }
-            None => self.backend.remove_array(&hash),
+            None => self.remove_array(&hash),
         }
     }
 
@@ -1929,6 +1928,258 @@ impl Store {
             }
             None => self.backend.remove_timestamps(&hash),
         }
+    }
+
+    // ---- the array store, seen through the write buffer ----------------------
+    //
+    // Inside a transaction a packed array is accepted into `write_buffer` and
+    // reaches the backend only when its block is written, so every path that
+    // asks the backend about a hash goes through one of these, which look in
+    // the buffer first. Outside a transaction the buffer is empty and each is
+    // the backend call it wraps.
+
+    /// Whether `hash` is stored: in the file, or accepted by the open
+    /// transaction and not yet written.
+    fn holds_array(&self, hash: &[u8; 32]) -> Result<bool> {
+        Ok(self.write_buffer.contains(hash) || self.backend.contains(hash)?)
+    }
+
+    /// Store an array, buffering a packed one while a transaction is open.
+    /// `Ok(false)` if the store already held it (content addressing), `Ok(true)`
+    /// if this call stored it — the caller stages exactly those for rollback.
+    fn put_array(
+        &mut self,
+        hash: &[u8; 32],
+        data: &TypedArray,
+        group: PackGroup,
+        layout: ArrayLayout,
+    ) -> Result<bool> {
+        let in_transaction = self.in_transaction();
+        put_array_into(
+            &mut self.write_buffer,
+            &mut *self.backend,
+            in_transaction,
+            hash,
+            data,
+            group,
+            layout,
+        )
+    }
+
+    /// Store a block of same-shaped packed arrays, staging every one this call
+    /// stored. Inside a transaction each joins the pool's block in turn, which
+    /// is what lets a run of small batches — a binding whose single add *is* a
+    /// one-item batch — coalesce into the dataset one batch of them all would
+    /// write. Staged as they are accepted, so a failure part-way leaves the
+    /// earlier ones for [`Self::settle`] to unwind.
+    fn put_packed_block(
+        &mut self,
+        hashes: &[[u8; 32]],
+        arrays: &[&TypedArray],
+        group: PackGroup,
+        staged: &mut StagedWrites,
+    ) -> Result<()> {
+        if self.in_transaction() {
+            for (hash, array) in hashes.iter().zip(arrays) {
+                // Also catches a hash repeated within this block: the first
+                // occurrence buffers it.
+                if self.put_array(hash, array, group, ArrayLayout::Packed)? {
+                    staged.arrays.push(*hash);
+                }
+            }
+            return Ok(());
+        }
+        let written = self.backend.put_packed_block(hashes, arrays, group)?;
+        for (hash, written) in hashes.iter().zip(written) {
+            if written {
+                staged.arrays.push(*hash);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop an array from wherever it is: the buffer if it is still there, the
+    /// backend otherwise. The unwind path for a rollback and a failed write.
+    fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
+        if self.write_buffer.remove(hash) {
+            return Ok(());
+        }
+        self.backend.remove_array(hash)
+    }
+
+    /// Write the buffer out, then flush the file: afterwards everything put so
+    /// far is on disk. This is what makes the outermost commit write a span's
+    /// adds as one block per pool.
+    fn flush_arrays(&mut self) -> Result<()> {
+        self.write_buffer.write_all(&mut *self.backend)?;
+        self.backend.flush()
+    }
+
+    fn get_array(&self, hash: &[u8; 32], dtype: Dtype) -> Result<TypedArray> {
+        if let Some(array) = self.write_buffer.get(hash) {
+            check_dtype(hash, array.dtype, dtype)?;
+            return Ok(array.clone());
+        }
+        self.backend.get_array(hash, dtype)
+    }
+
+    fn get_slice(&self, hash: &[u8; 32], dtype: Dtype, range: Range<usize>) -> Result<TypedArray> {
+        if let Some(array) = self.write_buffer.get(hash) {
+            check_dtype(hash, array.dtype, dtype)?;
+            return slice_rows(array, range);
+        }
+        self.backend.get_slice(hash, dtype, range)
+    }
+
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
+        if let Some(array) = self.write_buffer.get(hash) {
+            return Ok(array.shape.clone());
+        }
+        self.backend.array_shape(hash)
+    }
+
+    fn read_window_block_into(
+        &self,
+        hash: &[u8; 32],
+        dtype: Dtype,
+        count_axis: usize,
+        window_start: usize,
+        len: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        if let Some(array) = self.write_buffer.get(hash) {
+            check_dtype(hash, array.dtype, dtype)?;
+            out.clear();
+            return write_window_block(array, count_axis, window_start, len, out);
+        }
+        self.backend
+            .read_window_block_into(hash, dtype, count_axis, window_start, len, out)
+    }
+
+    fn read_range_into(
+        &self,
+        hash: &[u8; 32],
+        dtype: Dtype,
+        start: usize,
+        len: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        if self.write_buffer.contains(hash) {
+            let slice = self.get_slice(hash, dtype, start..start + len)?;
+            out.clear();
+            out.extend_from_slice(&slice.bytes);
+            return Ok(());
+        }
+        self.backend.read_range_into(hash, dtype, start, len, out)
+    }
+
+    /// Whole arrays, one per hash, in `hashes` order. The ones the file holds
+    /// go to the backend as one batch; the buffered ones are cloned out.
+    fn read_arrays(&self, hashes: &[[u8; 32]], dtypes: &[Dtype]) -> Result<Vec<TypedArray>> {
+        if self.write_buffer.is_empty() || !hashes.iter().any(|h| self.write_buffer.contains(h)) {
+            return self.backend.read_arrays(hashes, dtypes);
+        }
+        if dtypes.len() != hashes.len() {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "read_arrays: {} dtypes for {} hashes",
+                dtypes.len(),
+                hashes.len()
+            )));
+        }
+        let (file_hashes, file_dtypes): (Vec<[u8; 32]>, Vec<Dtype>) = hashes
+            .iter()
+            .zip(dtypes)
+            .filter(|(h, _)| !self.write_buffer.contains(h))
+            .map(|(h, d)| (*h, *d))
+            .unzip();
+        let mut from_file = self
+            .backend
+            .read_arrays(&file_hashes, &file_dtypes)?
+            .into_iter();
+        hashes
+            .iter()
+            .zip(dtypes)
+            .map(|(hash, &dtype)| match self.write_buffer.get(hash) {
+                Some(array) => {
+                    check_dtype(hash, array.dtype, dtype)?;
+                    Ok(array.clone())
+                }
+                None => from_file.next().ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(
+                        "read_arrays: fewer arrays returned than hashes asked for".into(),
+                    )
+                }),
+            })
+            .collect()
+    }
+
+    /// One element block per column — row `rows.at(i)` of `hashes[i]` — into
+    /// `out` in `hashes` order, which is what a static reader consumes. The
+    /// columns the file holds are gathered by the backend in one call; a
+    /// buffered column's block is cut out of its array.
+    fn read_rows_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtype: Dtype,
+        rows: Rows<'_>,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let from_backend = |hashes: &[[u8; 32]], rows: Rows<'_>, out: &mut Vec<u8>| match rows {
+            Rows::Uniform(index) => self.backend.read_index_into(hashes, dtype, index, out),
+            Rows::PerColumn(indices) => self.backend.read_indices_into(hashes, dtype, indices, out),
+        };
+        if self.write_buffer.is_empty() || !hashes.iter().any(|h| self.write_buffer.contains(h)) {
+            return from_backend(hashes, rows, out);
+        }
+        let mut file_hashes = Vec::new();
+        let mut file_rows = Vec::new();
+        let mut block = None;
+        for (i, hash) in hashes.iter().enumerate() {
+            match self.write_buffer.get(hash) {
+                Some(array) => {
+                    check_dtype(hash, array.dtype, dtype)?;
+                    block.get_or_insert_with(|| {
+                        array.element_shape().iter().product::<usize>().max(1) * dtype.size()
+                    });
+                }
+                None => {
+                    file_hashes.push(*hash);
+                    file_rows.push(rows.at(i));
+                }
+            }
+        }
+        let block = block.expect("a buffered hash was found above");
+        let mut from_file = Vec::new();
+        let file_rows = match rows {
+            Rows::Uniform(index) => Rows::Uniform(index),
+            Rows::PerColumn(_) => Rows::PerColumn(&file_rows),
+        };
+        from_backend(&file_hashes, file_rows, &mut from_file)?;
+        if from_file.len() != file_hashes.len() * block {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "read_rows: the backend returned {} bytes for {} columns of {block} bytes",
+                from_file.len(),
+                file_hashes.len()
+            )));
+        }
+        out.clear();
+        let mut file_blocks = from_file.chunks_exact(block);
+        for (i, hash) in hashes.iter().enumerate() {
+            match self.write_buffer.get(hash) {
+                Some(array) => {
+                    let row = rows.at(i);
+                    if row >= array.length() {
+                        return Err(TimeSeriesError::InvalidParameter(format!(
+                            "index {row} out of bounds for length {}",
+                            array.length()
+                        )));
+                    }
+                    out.extend_from_slice(&array.bytes[row * block..(row + 1) * block]);
+                }
+                None => out.extend_from_slice(file_blocks.next().expect("counted above")),
+            }
+        }
+        Ok(())
     }
 
     /// The compression policy applied to newly written arrays. For a store
@@ -1947,24 +2198,24 @@ impl Store {
     /// The byte budget an open transaction's buffered adds are held to.
     /// See [`Self::set_write_buffer_bytes`].
     pub fn write_buffer_bytes(&self) -> usize {
-        self.backend.write_buffer_bytes()
+        self.write_buffer.max_bytes()
     }
 
     /// Set the byte budget an open transaction's buffered adds are held to.
     ///
-    /// Inside a transaction a packed add joins a pending block per pool rather
+    /// Inside a transaction a packed add joins a buffered block per pool rather
     /// than filling a growth-pool slot, and the block becomes one dataset at
     /// the commit (see [`Self::begin_transaction`]). This is the ceiling on
     /// what those blocks hold across every pool: cross it and the widest block
     /// is written out early, which costs an extra dataset and nothing else.
     ///
     /// It therefore decides **how wide a dataset a span of single adds can
-    /// produce**, which is the one thing left that
-    /// [`Self::add_time_series_bulk`] does differently — a batch handed over as
-    /// a list is written as one block with no budget applied, because the
-    /// caller is already holding it. Raise this to give a run of single adds
-    /// the same dataset the equivalent bulk add would write; the memory that
-    /// buys is the memory the bulk add's caller was holding anyway.
+    /// produce**, which is the one thing [`Self::add_time_series_bulk`] does
+    /// differently — a batch handed over as a list is written as one block with
+    /// no budget applied, because the caller is already holding it. Raise this
+    /// to give a run of single adds the same dataset the equivalent bulk add
+    /// would write; the memory that buys is the memory the bulk add's caller
+    /// was holding anyway.
     ///
     /// The figure is a property of *this handle*, not of the artifact: nothing
     /// is persisted, and a store reopened elsewhere is back to the default.
@@ -1981,8 +2232,8 @@ impl Store {
     /// already buffered writes blocks out before returning, so the new bound
     /// holds from here rather than from the next add.
     ///
-    /// An in-memory store records the figure and never acts on it: it has no
-    /// datasets to size.
+    /// On an in-memory store the budget still bounds what the buffer holds, but
+    /// it shapes nothing: that backend has no datasets to size.
     ///
     /// # Errors
     ///
@@ -1996,24 +2247,16 @@ impl Store {
                 "write_buffer_bytes must be greater than zero".into(),
             ));
         }
-        self.backend.set_write_buffer_bytes(bytes)
+        self.write_buffer.set_max_bytes(bytes, &mut *self.backend)
     }
 
-    /// Reopen the backend at `path` with `budget` re-applied.
-    ///
-    /// The figure lives in the backend, which is what enforces it, so the
-    /// getter can never report a budget that is not the one in force. The cost
-    /// is that a path swapping the backend under a live handle —
-    /// [`Self::compact`] and a same-path [`Self::persist_to`] both close the
-    /// file so a rename can replace it — must hand the figure to the
-    /// replacement or silently reset the caller's choice to the default.
-    /// Capture it before the swap, since the placeholder does not carry it.
-    ///
-    /// Re-applying to a freshly opened backend cannot evict: its buffer is
-    /// empty.
-    fn reopen_backend(&mut self, path: &Path, budget: usize) -> Result<()> {
+    /// Reopen the backend at `path`. The write buffer, and the budget the
+    /// caller set on it, are this store's rather than the backend's, so a
+    /// swap — [`Self::compact`] and a same-path [`Self::persist_to`] both close
+    /// the file so a rename can replace it — carries both across untouched.
+    fn reopen_backend(&mut self, path: &Path) -> Result<()> {
         self.backend = open_backend(path, self.read_only)?;
-        self.backend.set_write_buffer_bytes(budget)
+        Ok(())
     }
 
     /// Mirrors the spec's `add_time_series` signature; the public surface is
@@ -2113,17 +2356,10 @@ impl Store {
             .iter()
             .map(build_request_parts)
             .collect::<Result<_>>()?;
-        // Read before the savepoint borrows `self.metadata`: it cannot change
-        // during the loop, since opening a transaction is not something an add
-        // does. It also decides whether the irregular layouts are settled now or
-        // left to the block that buffering is about to build.
-        let mode = self.write_mode();
-        resolve_irregular_layouts(
-            &*self.backend,
-            &items,
-            &mut parts,
-            mode == WriteMode::Deferred,
-        );
+        // Whether the irregular layouts are settled now or left to the block
+        // the write buffer is about to build.
+        let in_transaction = self.in_transaction();
+        resolve_irregular_layouts(&*self.backend, &items, &mut parts, in_transaction);
 
         let tx = self.metadata.savepoint()?;
         let mut added = Vec::with_capacity(items.len());
@@ -2141,14 +2377,6 @@ impl Store {
             } = part;
             let data = request_array(item);
 
-            let already_present = self.backend.contains(&hash)?;
-            tracing::debug!(
-                owner = item.owner_id,
-                bytes = data.bytes.len(),
-                packed = layout.is_packed(),
-                already_present,
-                "backend put_array",
-            );
             // The explicit time axis goes in before the row that names it, for
             // the same reason the array does: a committed row must never name
             // something the file does not hold.
@@ -2159,8 +2387,25 @@ impl Store {
                 &mut shared_sets,
                 staged,
             )?;
-            self.backend.put_array(&hash, data, group, layout, mode)?;
-            if !already_present {
+            // Spelled over the fields rather than through `Self::put_array`
+            // because the savepoint above holds `self.metadata`.
+            let written = put_array_into(
+                &mut self.write_buffer,
+                &mut *self.backend,
+                in_transaction,
+                &hash,
+                data,
+                group,
+                layout,
+            )?;
+            tracing::debug!(
+                owner = item.owner_id,
+                bytes = data.bytes.len(),
+                packed = layout.is_packed(),
+                written,
+                "put_array",
+            );
+            if written {
                 staged.arrays.push(hash);
             }
 
@@ -2198,10 +2443,11 @@ impl Store {
     ///
     /// **A batch of one outside a transaction is not a batch.** Sizing a dataset
     /// to the batch is right for a cohort and wrong for a lone series: a batch of
-    /// one would claim a one-column dataset with an eight-byte chunk, and a
-    /// binding whose `add_time_series` *is* a one-item batch — Julia's, through
-    /// the C ABI — produced one such dataset per call: 19 series of 30,500 steps
-    /// left 19 one-column datasets and a 36 MB file. Such a batch therefore
+    /// one would claim a one-column dataset, with its own hash companion, and a
+    /// columnar read pays one hyperslab per dataset per timestep where series
+    /// sharing a pool share one. A binding whose `add_time_series` *is* a
+    /// one-item batch — Julia's, through the C ABI — would get one such dataset
+    /// per call. Such a batch therefore
     /// delegates to the per-column path, which drops the array into the first
     /// free slot of the shared pool, exactly as [`Self::add`] does. The test
     /// sits here rather than in the two public entry points so that both
@@ -2240,13 +2486,7 @@ impl Store {
             .iter()
             .map(build_request_parts)
             .collect::<Result<_>>()?;
-        let mode = self.write_mode();
-        resolve_irregular_layouts(
-            &*self.backend,
-            &items,
-            &mut parts,
-            mode == WriteMode::Deferred,
-        );
+        resolve_irregular_layouts(&*self.backend, &items, &mut parts, self.in_transaction());
         // Shared across the whole call: the timestamp vectors are written in the
         // loop below, the feature sets by `insert_association` further down, and
         // both are deduplicated over the same batch.
@@ -2273,26 +2513,14 @@ impl Store {
                     .entry(pool_key(array, p.group))
                     .or_default()
                     .push(i);
-            } else {
-                let already = self.backend.contains(&p.hash)?;
-                self.backend
-                    .put_array(&p.hash, array, p.group, p.layout, mode)?;
-                if !already {
-                    staged.arrays.push(p.hash);
-                }
+            } else if self.put_array(&p.hash, array, p.group, p.layout)? {
+                staged.arrays.push(p.hash);
             }
         }
         for (pool, idxs) in &packed_groups {
             let hashes: Vec<[u8; 32]> = idxs.iter().map(|&i| parts[i].hash).collect();
             let arrays: Vec<&TypedArray> = idxs.iter().map(|&i| request_array(&items[i])).collect();
-            let written = self
-                .backend
-                .put_packed_block(&hashes, &arrays, pool.3, mode)?;
-            for (j, &i) in idxs.iter().enumerate() {
-                if written[j] {
-                    staged.arrays.push(parts[i].hash);
-                }
-            }
+            self.put_packed_block(&hashes, &arrays, pool.3, staged)?;
         }
 
         // Insert associations in input order; roll the whole batch back on error.
@@ -2325,11 +2553,12 @@ impl Store {
     /// features)`, the tuple `transform_single_time_series` files the view under
     /// beside its source — *and* the array both halves reference. A derived view
     /// shares both with its source, and either alone admits a false match:
-    /// keying on the hash let two owners' byte-identical `SingleTimeSeries`
-    /// stand in for each other, while keying on the family alone pinned a
-    /// `SingleTimeSeries` that merely shares the family with a view copied there
-    /// over a different array — a row [`Self::copy_time_series`] writes on
-    /// purpose. See [`crate::metadata::forecast_family_conflict_on_array`].
+    /// keying on the hash would let two owners' byte-identical
+    /// `SingleTimeSeries` stand in for each other, while keying on the family
+    /// alone would pin a `SingleTimeSeries` that merely shares the family with a
+    /// view copied there over a different array — a row
+    /// [`Self::copy_time_series`] writes on purpose. See
+    /// [`crate::metadata::forecast_family_conflict_on_array`].
     fn check_no_orphaned_dst(
         tx: &rusqlite::Connection,
         removed_sts: impl IntoIterator<Item = crate::metadata::DeletedRow>,
@@ -2382,16 +2611,14 @@ impl Store {
 
     /// Remove every association named by its catalog `id`, in one
     /// all-or-nothing transaction, dropping each underlying array that no
-    /// surviving association references (exactly like
-    /// [`Self::remove_time_series`]). Returns the number of associations
+    /// surviving association references. Returns the number of associations
     /// removed.
     ///
     /// The removal-direction counterpart of [`Self::read_by_ids`]: a consumer
     /// that recorded ids in its own model retires one without reconstructing
     /// the key it was filed under. An id names exactly one row, so this is also
-    /// the precise removal — [`Self::remove_time_series`] takes a key, whose
-    /// NULL interval matches any interval and can therefore sweep a whole
-    /// forecast family.
+    /// the precise removal — a removal by key would have to let a NULL interval
+    /// match any interval, and could therefore sweep a whole forecast family.
     ///
     /// [`TimeSeriesError::NotFound`] if any id names no row, rolling the whole
     /// batch back — a stale reference means the caller's model disagrees with
@@ -2734,7 +2961,7 @@ impl Store {
                     )));
                 }
             }
-            if !self.backend.contains(&meta.data_hash)? {
+            if !self.holds_array(&meta.data_hash)? {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "cannot import '{}' (owner {}): it names array {}, which this store does \
                      not hold. An import writes rows only — the arrays arrive with the \
@@ -2752,12 +2979,12 @@ impl Store {
             // back metadata and data that disagree, a forecast read failing
             // somewhere later with no mention of the import. A declared dtype
             // that lies is already refused on the read path (`check_dtype`);
-            // this is the half that was silent.
+            // this is the half that would otherwise be silent.
             if let Some(length) = meta.length {
                 let mut declared = Vec::with_capacity(meta.element_shape.len() + 1);
                 declared.push(length);
                 declared.extend_from_slice(&meta.element_shape);
-                let stored = self.backend.array_shape(&meta.data_hash)?;
+                let stored = self.array_shape(&meta.data_hash)?;
                 if declared != stored {
                     return Err(TimeSeriesError::InvalidParameter(format!(
                         "cannot import '{}' (owner {}): it declares shape {declared:?} for \
@@ -2857,8 +3084,8 @@ impl Store {
         time_range: Option<TimeRange>,
     ) -> Result<TimeSeriesData> {
         tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
-        // Decision 8: the bound has to be spelled the way the series is, and a
-        // mismatch is refused rather than coerced. Checked once here, before any
+        // The bound has to be spelled the way the series is, and a mismatch is
+        // refused rather than coerced. Checked once here, before any
         // arithmetic, so every type and every entry point gets the same rule.
         let time_range = match time_range {
             Some(range) => {
@@ -2886,9 +3113,8 @@ impl Store {
 
                 let (data, sliced_initial, sliced_length) = match time_range {
                     None => {
-                        let data = self
-                            .backend
-                            .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                        let data =
+                            self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                         (data, initial, length)
                     }
                     Some((start, end)) => {
@@ -2916,7 +3142,7 @@ impl Store {
                             &meta.name,
                             "timestep",
                         )?;
-                        let data = self.backend.get_slice(
+                        let data = self.get_slice(
                             &meta.data_hash,
                             meta.element_type.physical_dtype(),
                             start_idx..end_idx,
@@ -2980,7 +3206,7 @@ impl Store {
                         }
                         let start_idx = timestamps.partition_point(|t| *t < start);
                         let end_idx = timestamps.partition_point(|t| *t < end);
-                        let data = self.backend.get_slice(
+                        let data = self.get_slice(
                             &meta.data_hash,
                             meta.element_type.physical_dtype(),
                             start_idx..end_idx,
@@ -3069,7 +3295,7 @@ impl Store {
                             // this is already at least `start_idx + 1`.
                             (start_idx, timestamps.partition_point(|t| *t < end))
                         };
-                        let data = self.backend.get_slice(
+                        let data = self.get_slice(
                             &meta.data_hash,
                             meta.element_type.physical_dtype(),
                             start_idx..end_idx,
@@ -3082,9 +3308,7 @@ impl Store {
                 Ok(TimeSeriesData::PersistentTimeSeries(series))
             }
             TimeSeriesType::Deterministic => {
-                let arr = self
-                    .backend
-                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Deterministic")?;
                 let resolution = required_resolution(meta, "Deterministic")?;
                 let horizon = required_horizon(meta, "Deterministic")?;
@@ -3115,9 +3339,7 @@ impl Store {
             }
 
             TimeSeriesType::Probabilistic => {
-                let arr = self
-                    .backend
-                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Probabilistic")?;
                 let resolution = required_resolution(meta, "Probabilistic")?;
                 let horizon = required_horizon(meta, "Probabilistic")?;
@@ -3153,9 +3375,7 @@ impl Store {
             }
 
             TimeSeriesType::Scenarios => {
-                let arr = self
-                    .backend
-                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Scenarios")?;
                 let resolution = required_resolution(meta, "Scenarios")?;
                 let horizon = required_horizon(meta, "Scenarios")?;
@@ -3197,9 +3417,7 @@ impl Store {
                 // The stored array is the underlying STS 1-D-like array, shape
                 // [total_len, *E]. Synthesize a Deterministic of shape
                 // [H, count, *E] by gathering windows.
-                let arr = self
-                    .backend
-                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "DeterministicSingleTimeSeries")?;
                 let resolution = required_resolution(meta, "DeterministicSingleTimeSeries")?;
                 let horizon = required_horizon(meta, "DeterministicSingleTimeSeries")?;
@@ -3317,12 +3535,12 @@ impl Store {
     ///
     /// The listing that answers identity and description questions — which
     /// series exist, what type and grid each is, which array each resolves to
-    /// (`data_hash`), and the [`TimeSeriesId`] to address it by. It replaces the
-    /// five key-shaped listings this used to carry (`list_keys`,
-    /// `list_keys_with_hash`, `list_keys_with_id`, `list_array_groups`,
-    /// `get_time_series_keys`): each was this one query projected differently,
-    /// and the row already holds everything they projected. Addressing a set of
-    /// known ids instead is [`Self::list_metadata_by_ids`].
+    /// (`data_hash`), and the [`TimeSeriesId`] to address it by. There is
+    /// deliberately no key-shaped listing beside it (keys alone, keys with
+    /// hashes or ids, array groups): each would be this one query projected
+    /// differently, and the row already holds everything such a projection
+    /// would. Addressing a set of known ids instead is
+    /// [`Self::list_metadata_by_ids`].
     ///
     /// The rows carry no time axis: an irregular series' timestamp vector is the
     /// one part of a row that costs a read per row, and a listing almost never
@@ -3577,9 +3795,11 @@ impl Store {
         // is the reader's decision — see [`StaticReader::read_at`].
         let result = reader.read_at(
             at,
-            |hashes, dtype, index, out| self.backend.read_index_into(hashes, dtype, index, out),
+            |hashes, dtype, index, out| {
+                self.read_rows_into(hashes, dtype, Rows::Uniform(index), out)
+            },
             |hashes, dtype, indices, out| {
-                self.backend.read_indices_into(hashes, dtype, indices, out)
+                self.read_rows_into(hashes, dtype, Rows::PerColumn(indices), out)
             },
         );
         if result.is_err() {
@@ -3631,7 +3851,7 @@ impl Store {
         filter.time_series_type = Some(reported);
         let mut items = Vec::new();
         for m in self.list_with_timestamps(filter)? {
-            let shape = self.backend.array_shape(&m.data_hash)?;
+            let shape = self.array_shape(&m.data_hash)?;
             items.push((m, shape));
         }
         crate::reader::build_forecast_entries(reported, items)
@@ -3673,7 +3893,6 @@ impl Store {
         // slot at build time, so the backend is hit once for all of them. Each
         // slot caches its enclosing chunk block, so stepping the timeline only
         // hits the backend when the window crosses a block boundary.
-        let backend = &*self.backend;
         for slot in reader.slots_mut() {
             // A read served from the cached block does no I/O, so it cannot
             // notice that the forecast's array was removed since the block was
@@ -3684,18 +3903,16 @@ impl Store {
             // array another row still holds keeps reading on every path, cached
             // or not, static or forecast -- a reader does not re-validate its
             // entries against the catalog per timestep.
-            if slot.serves_from_cache(window) && !backend.contains(slot.hash())? {
+            if slot.serves_from_cache(window) && !self.holds_array(slot.hash())? {
                 slot.forget();
                 return Err(TimeSeriesError::NotFound);
             }
             slot.read_window(
                 window,
                 |hash, dtype, count_axis, start, len, out| {
-                    backend.read_window_block_into(hash, dtype, count_axis, start, len, out)
+                    self.read_window_block_into(hash, dtype, count_axis, start, len, out)
                 },
-                |hash, dtype, start, len, out| {
-                    backend.read_range_into(hash, dtype, start, len, out)
-                },
+                |hash, dtype, start, len, out| self.read_range_into(hash, dtype, start, len, out),
             )?;
         }
         Ok(())
@@ -3888,8 +4105,8 @@ impl Store {
         self.materialize_time_series(&meta, time_range)
     }
 
-    /// The shared body of [`Self::bulk_read`] and [`Self::read_by_ids`],
-    /// working from rows both have already resolved.
+    /// The whole-series body of [`Self::read_by_ids`], working from the rows it
+    /// has already resolved.
     fn bulk_read_metas(&self, metas: &[TimeSeriesMetadata]) -> Result<Vec<TimeSeriesData>> {
         // Batch the packed SingleTimeSeries reads; everything else is standalone
         // and reuses the per-key reconstruction.
@@ -3899,7 +4116,6 @@ impl Store {
             .map(|m| (m.data_hash, m.element_type.physical_dtype()))
             .unzip();
         let mut single_arrays = self
-            .backend
             .read_arrays(&single_hashes, &single_dtypes)?
             .into_iter();
 
@@ -3939,11 +4155,10 @@ impl Store {
                     application_data: meta.application_data.clone(),
                 }));
             } else {
-                // Materialize from the row already in hand rather than calling
-                // `get_time_series`, which would look the key up a second time.
-                // For a `NonSequentialTimeSeries` that second lookup also
-                // re-fetched and re-decoded the row's timestamp vector, so a
-                // bulk read of N irregular series did 2N of both.
+                // Materialize from the row already in hand rather than looking
+                // it up a second time: for an irregular series a second lookup
+                // would also re-fetch and re-decode the row's timestamp vector,
+                // so a bulk read of N of them would do 2N of both.
                 out.push(self.materialize_time_series(meta, None)?);
             }
         }
@@ -3993,7 +4208,7 @@ impl Store {
     /// cannot be read.
     pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray> {
         let element_type = self.metadata.element_type_for_hash(hash)?;
-        self.backend.get_array(hash, element_type.physical_dtype())
+        self.get_array(hash, element_type.physical_dtype())
     }
 
     /// Where a content hash's array physically lives in the backing file.
@@ -4005,9 +4220,17 @@ impl Store {
     /// spills into suffixed datasets, so neither the dataset name nor the column
     /// index is derivable from metadata.
     ///
+    /// The one read that cannot be served from an open transaction's write
+    /// buffer: the answer *is* a physical position, and this exists so a caller
+    /// can go and look at the bytes with h5dump. A buffered array is therefore
+    /// written out first, which cuts its pool's block short in exchange for an
+    /// answer that is true of the file — and is why this takes `&mut self`.
+    ///
     /// Errors with [`TimeSeriesError::NotFound`] if no array with that hash is
     /// stored.
-    pub fn locate_array(&self, hash: &[u8; 32]) -> Result<ArrayLocation> {
+    pub fn locate_array(&mut self, hash: &[u8; 32]) -> Result<ArrayLocation> {
+        self.write_buffer
+            .write_holding([*hash], &mut *self.backend)?;
         self.backend.locate(hash)
     }
 
@@ -4246,15 +4469,14 @@ impl Store {
         })
     }
 
-    /// True iff at least one association matches `filter` — the owner-level
-    /// counterpart of [`Self::has_time_series`], answering "does this
-    /// component have any time series (of type T)?" without listing them.
+    /// True iff at least one association matches `filter`, answering "does
+    /// this component have any time series (of type T)?" without listing them.
     ///
-    /// Same covering-index probe as the keyed check (one statement, nothing
-    /// hydrated), so it is safe for hot loops. A `features` filter stays on
-    /// indexes too: the requested set is probed as an exact set by hash first
-    /// (one covering seek when the caller passes the complete feature set),
-    /// with an indexed per-feature subset fallback for partial lists.
+    /// A covering-index probe (one statement, nothing hydrated), so it is safe
+    /// for hot loops. A `features` filter stays on indexes too: the requested
+    /// set is probed as an exact set by hash first (one covering seek when the
+    /// caller passes the complete feature set), with an indexed per-feature
+    /// subset fallback for partial lists.
     pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool> {
         self.metadata.exists(&filter.into())
     }
@@ -4334,10 +4556,10 @@ impl Store {
     /// Looks for any metadata row whose type is a forecast type (and matches the
     /// filters) and returns its `horizon`, `interval`, `count`, and `resolution`.
     /// If none match, returns [`ForecastParameters::default()`]. When multiple
-    /// match, returns the first one found (v0 stores a single coherent forecast
-    /// configuration; callers that need per-type parameters should use
-    /// [`Self::list_metadata`] directly). Both `resolution` and `interval`
-    /// are pushed into the catalog query.
+    /// match, returns the first one found (the answer assumes the store holds
+    /// one coherent forecast configuration; callers that need per-type
+    /// parameters should use [`Self::list_metadata`] directly). Both
+    /// `resolution` and `interval` are pushed into the catalog query.
     pub fn get_forecast_parameters(
         &self,
         resolution: Option<Period>,
@@ -4453,8 +4675,8 @@ impl Store {
         })
     }
 
-    /// Association count grouped by time series type. Replaces a binding-side
-    /// scan-and-group with one catalog query.
+    /// Association count grouped by time series type, in one catalog query so
+    /// no binding has to scan and group.
     pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
         self.metadata.counts_by_type()
     }
@@ -4465,8 +4687,8 @@ impl Store {
     }
 
     /// Distinct owners per category and distinct stored arrays per kind (static
-    /// vs forecast). Replaces a binding-side full scan that grouped owners and
-    /// hashes in memory.
+    /// vs forecast), counted in the catalog so no binding has to scan every row
+    /// and group owners and hashes in memory.
     pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed> {
         const STATIC: [TimeSeriesType; 3] = [
             TimeSeriesType::SingleTimeSeries,
@@ -4991,7 +5213,6 @@ impl Store {
         // to go before the original is replaced (required on Windows, correct
         // everywhere). The placeholder backend is never observed: nothing else
         // runs between the swap and the reopen.
-        let budget = self.backend.write_buffer_bytes();
         drop(std::mem::replace(
             &mut self.backend,
             Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
@@ -5002,7 +5223,7 @@ impl Store {
         }
         // Reopen before surfacing a rename failure, so a failed compaction
         // leaves the store usable instead of stranded on the placeholder.
-        self.reopen_backend(&path, budget)?;
+        self.reopen_backend(&path)?;
         renamed?;
 
         // The `stat` after, taken on the replaced file rather than on the temp
@@ -5038,10 +5259,12 @@ impl Store {
     /// - a catalog row whose `dtype`, `element_shape`, or `length` misdescribes
     ///   the array it points at — the hash addresses the array's own content, so
     ///   an array that matches its hash still passes while the row lies about it;
-    /// - a missing catalog: opening read-write with the `.sqlite` half deleted
-    ///   silently recreates it empty, and the resulting store — zero time series,
-    ///   every array still on disk and now unreachable — verifies clean, because
-    ///   a catalog that references nothing is a clean bill of health here;
+    /// - a missing catalog: an artifact predating the generation stamp, opened
+    ///   read-write with its `.sqlite` half deleted, silently gets an empty one
+    ///   (a stamped artifact is refused instead), and the resulting store — zero
+    ///   time series, every array still on disk and now unreachable — verifies
+    ///   clean, because a catalog that references nothing is a clean bill of
+    ///   health here;
     /// - anything about a stored array or axis the catalog does *not* reference:
     ///   the sweep never reaches it, whatever state it is in.
     ///
@@ -5059,10 +5282,26 @@ impl Store {
     /// `docs/src/reference/file-format.md`).
     pub fn verify_integrity(&self) -> Result<IntegrityReport> {
         let (referenced, mut errors) = self.metadata.referenced_arrays()?;
-        let arrays: Vec<([u8; 32], Dtype)> = referenced
-            .into_iter()
-            .map(|(hash, element_type)| (hash, element_type.physical_dtype()))
-            .collect();
+        // An array an open transaction is still holding is checked where it
+        // is; the backend would report it as a dangling reference.
+        let mut arrays: Vec<([u8; 32], Dtype)> = Vec::with_capacity(referenced.len());
+        for (hash, element_type) in referenced {
+            let dtype = element_type.physical_dtype();
+            match self.write_buffer.get(&hash) {
+                Some(array) => {
+                    let hex = crate::hash::hash_hex(&hash);
+                    if let Err(e) = check_dtype(&hash, array.dtype, dtype) {
+                        errors.push(format!("read error for array {hex}: {e}"));
+                    } else if array_hash(array) != hash {
+                        errors.push(format!(
+                            "hash mismatch: stored={hex} computed={}",
+                            crate::hash::hash_hex(&array_hash(array)),
+                        ));
+                    }
+                }
+                None => arrays.push((hash, dtype)),
+            }
+        }
         let mut report = self.backend.verify(&arrays)?;
         // Catalog-side problems lead: a row too malformed to name an array is
         // why the array-side sweep skipped it.
@@ -5110,7 +5349,7 @@ impl Store {
         // pair (`Self::persist_to` relies on this via the `flush` it opens
         // with).
         self.metadata.checkpoint()?;
-        self.backend.flush()
+        self.flush_arrays()
     }
 
     /// Persist this store's data to `path` (the HDF5 arrays) and its companion
@@ -5232,14 +5471,13 @@ impl Store {
         // nothing else runs in between.
         let own_file = self.file_path.clone().filter(|src| same_file(src, path));
         if let Some(src) = own_file {
-            let budget = self.backend.write_buffer_bytes();
             drop(std::mem::replace(
                 &mut self.backend,
                 Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
             ));
             let swapped = staged
                 .and_then(|()| Self::swap_into_place(&tmp_h5, path, &tmp_sqlite, &sqlite_path));
-            self.reopen_backend(&src, budget)?;
+            self.reopen_backend(&src)?;
             return swapped.inspect_err(|_| Self::clear_temps(&tmp_h5, &tmp_sqlite));
         }
 
@@ -5380,7 +5618,7 @@ impl Store {
         // The arrays have to be on disk before the catalog that names them: a
         // catalog referencing an array still sitting in a write buffer is the
         // dangling-reference state this whole pairing exists to prevent.
-        self.backend.flush()?;
+        self.flush_arrays()?;
 
         let sqlite_path = catalog_sqlite_path(&path);
         let tmp_sqlite = persist_temp_path(&sqlite_path, &temp_tag());
@@ -5576,13 +5814,9 @@ impl Store {
                 layout = ArrayLayout::Standalone;
             }
             let element_type = self.metadata.element_type_for_hash(hash)?;
-            let array = self
-                .backend
-                .get_array(hash, element_type.physical_dtype())?;
-            // Immediate: this is a rewrite of a whole store into a fresh file,
-            // outside any transaction, and every pool was already reserved at
-            // its exact cohort width above.
-            backend.put_array(hash, &array, plan.pool.3, layout, WriteMode::Immediate)?;
+            let array = self.get_array(hash, element_type.physical_dtype())?;
+            // Every pool was already reserved at its exact cohort width above.
+            backend.put_array(hash, &array, plan.pool.3, layout)?;
         }
         Ok(())
     }
@@ -5660,10 +5894,10 @@ impl Drop for BulkAdd<'_> {
 }
 
 /// The persistence inputs derived from one [`AddRequest`]: the array content
-/// hash, the resolution that keys the packed pool, whether the array is packed
-/// (vs. standalone), the metadata row, and the resulting key. Shared by the
-/// per-item write path ([`Store::add_time_series_bulk`]) and the buffered
-/// block-write path ([`Store::bulk_add`]).
+/// hash, the group that keys the packed pool, whether the array is packed
+/// (vs. standalone), and the metadata row. Shared by the per-column write path
+/// ([`Store::add_time_series`]) and the block-write path
+/// ([`Store::add_time_series_bulk`] / [`Store::bulk_add`]).
 struct RequestParts {
     hash: [u8; 32],
     /// The packed pool this array belongs in — its resolution for a regular
@@ -5675,20 +5909,6 @@ struct RequestParts {
     meta: TimeSeriesMetadata,
 }
 
-/// The physical storage layout for a time-series type's backing array.
-///
-/// Both static types pack: their arrays are read a timestamp at a time across
-/// every series, which is exactly what the timestamp-major packed chunking
-/// serves. They differ only in what pools them — see [`PackGroup`] — and an
-/// irregular series can still be demoted to standalone when nothing shares its
-/// time axis (see [`resolve_irregular_layouts`]).
-///
-/// The count-axis choices for dense forecasts mirror the forecast reader's
-/// [`WindowRead::Dense`](crate::reader) slicing (`Deterministic` → axis 1,
-/// `Probabilistic` / `Scenarios` → axis 2), so writes and reads agree on which
-/// axis the windows lie along.
-/// Refuse a pair of halves whose generation stamps disagree.
-///
 /// Key prefix the store keeps for itself in [`Store::set_store_attribute`].
 ///
 /// Nothing writes such a key today. Reserving the namespace before there is
@@ -5717,6 +5937,8 @@ fn validate_store_attribute_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a pair of halves whose generation stamps disagree.
+///
 /// Stamps that disagree mean these files came from different saves — most
 /// likely a `persist_to` interrupted between its two renames. Comparing the
 /// `Option`s directly makes a lone stamp a mismatch too, which is the point:
@@ -5735,6 +5957,18 @@ fn check_generation_pair(h5: Option<String>, sqlite: Option<String>) -> Result<(
     Ok(())
 }
 
+/// The physical storage layout for a time-series type's backing array.
+///
+/// Both static types pack: their arrays are read a timestamp at a time across
+/// every series, which is exactly what the timestamp-major packed chunking
+/// serves. They differ only in what pools them — see [`PackGroup`] — and an
+/// irregular series can still be demoted to standalone when nothing shares its
+/// time axis (see [`resolve_irregular_layouts`]).
+///
+/// The count-axis choices for dense forecasts mirror the forecast reader's
+/// [`WindowRead::Dense`](crate::reader) slicing (`Deterministic` → axis 1,
+/// `Probabilistic` / `Scenarios` → axis 2), so writes and reads agree on which
+/// axis the windows lie along.
 fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
     match ts_type {
         TimeSeriesType::SingleTimeSeries | TimeSeriesType::DeterministicSingleTimeSeries => {
@@ -5754,18 +5988,15 @@ fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
     }
 }
 
-/// Derive the [`RequestParts`] for one request, validating where required
-/// (`NonSequentialTimeSeries` timestamps). The static types are packed; the
-/// forecasts are stored standalone.
 /// Write the explicit time axis of one request into the array file, before the
 /// association row that names it exists.
 ///
-/// A no-op for every type but `NonSequentialTimeSeries`, whose
-/// [`PackGroup::Irregular`] cohort key *is* the vector's content hash. `seen`
-/// collapses the repeats a cohort produces — a batch of ten thousand series on
-/// one axis writes it once — and a vector the store already holds is not written
-/// again. `staged` collects only what this call physically wrote, so a failure
-/// downstream can undo exactly that.
+/// A no-op for every type but the two irregular ones (`NonSequentialTimeSeries`
+/// and `PersistentTimeSeries`), whose [`PackGroup::Irregular`] cohort key *is*
+/// the vector's content hash. `seen` collapses the repeats a cohort produces —
+/// a batch of ten thousand series on one axis writes it once — and a vector the
+/// store already holds is not written again. `staged` collects only what this
+/// call physically wrote, so a failure downstream can undo exactly that.
 fn stage_timestamp_vector(
     backend: &mut dyn StorageBackend,
     group: PackGroup,
@@ -5782,6 +6013,9 @@ fn stage_timestamp_vector(
     Ok(())
 }
 
+/// Derive the [`RequestParts`] for one request, validating where required
+/// (`NonSequentialTimeSeries` timestamps). The static types are packed; the
+/// forecasts are stored standalone.
 fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     // Every write funnels through here (per-column adds and buffered bulk adds
     // alike), which makes it the one place the reserved-feature-name rule has
@@ -5978,12 +6212,8 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     })
 }
 
-/// What a packed pool is keyed by: the array's physical shape plus the time
-/// axis it lies on. Two arrays land in the same HDF5 dataset iff these match.
-type PoolKey = (Dtype, Vec<usize>, usize, PackGroup);
-
-/// One distinct array's placement, as planned by [`Store::persist_to`] before it
-/// rewrites an in-memory store to disk.
+/// One distinct array's placement, as `Store::materialize_into` plans it before
+/// writing the live set into a fresh file.
 struct ArrayPlan {
     layout: ArrayLayout,
     pool: PoolKey,
@@ -6009,15 +6239,6 @@ fn pool_key_of(meta: &TimeSeriesMetadata) -> PoolKey {
     )
 }
 
-fn pool_key(array: &TypedArray, group: PackGroup) -> PoolKey {
-    (
-        array.dtype,
-        array.element_shape().to_vec(),
-        array.length(),
-        group,
-    )
-}
-
 /// Settle each irregular request's layout, demoting the ones whose time axis
 /// nothing else shares back to standalone.
 ///
@@ -6032,16 +6253,17 @@ fn pool_key(array: &TypedArray, group: PackGroup) -> PoolKey {
 ///
 /// Getting it "wrong" costs space, never correctness: reads resolve an array by
 /// content hash and handle either layout, and a group can hold columns of both
-/// (see `Hdf5Backend::read_index_locked`).
+/// (see `Hdf5Backend::read_index_into`).
 ///
 /// `deferred` says a transaction is open, and then this does **nothing**: the
-/// bet is settled later, by `Hdf5Backend::materialize_block`, from the block's
-/// final membership. Settling it here would get it wrong every time, because a
-/// span's cohort is still arriving: each add sees one request and no pool — a
-/// standalone array never makes one — so a cohort added one series at a time
-/// came out as N standalone datasets where the bulk add of it writes one pooled
-/// cohort. Deferring the decision is what makes those two the same file, which
-/// is the whole promise of writing inside a span.
+/// bet is settled later, when the store's write buffer writes the block, from
+/// the block's final membership (see `WriteBuffer`). Settling it here would get
+/// it wrong every time, because a span's cohort is still arriving: each add
+/// sees one request and no pool — a standalone array never makes one — so a
+/// cohort added one series at a time would come out as N standalone datasets
+/// where the bulk add of it writes one pooled cohort. Deferring the decision is
+/// what makes those two the same file, which is the whole promise of writing
+/// inside a span.
 fn resolve_irregular_layouts(
     backend: &dyn StorageBackend,
     items: &[AddRequest],
@@ -6093,18 +6315,17 @@ fn merge_breakpoints(
     union
 }
 
-/// The value array backing a request, regardless of time-series type.
 /// Push the arrays a write put into the backend out of libhdf5's caches
 /// before the catalog row naming them commits.
 ///
 /// The catalog commit is durable on its own (WAL, synchronous), but the
-/// HDF5 half was only flushed at [`Store::flush`], `persist_*`, or
-/// `compact`, so a crash between an add's commit and the next of those
-/// left a committed row naming an array the file never received -- the
-/// dangling reference `verify_integrity` reports, produced by a call that
-/// had returned `Ok`. The order matters and the reverse was already right:
-/// an array with no row is space `compact` reclaims, a row with no array
-/// is a series that cannot be read.
+/// HDF5 half is otherwise flushed only at [`Store::flush`], `persist_*`, or
+/// `compact`. Without this, a crash between an add's commit and the next of
+/// those would leave a committed row naming an array the file never
+/// received -- the dangling reference `verify_integrity` reports, produced
+/// by a call that had returned `Ok`. The order matters: an array with no
+/// row is space `compact` reclaims, a row with no array is a series that
+/// cannot be read.
 ///
 /// Inside a cross-operation transaction the nested commit is not durable
 /// either, so the flush waits for [`Store::commit_transaction`] to do it once
@@ -6117,7 +6338,7 @@ fn merge_breakpoints(
 /// call and lists exactly what this one put into the backend, so an empty pair
 /// is precisely that case. It matters because the flush is not free: a caller
 /// adding series one at a time pays an fsync-shaped cost per call, and a
-/// re-add of data the store already holds paid it for nothing. A call that
+/// re-add of data the store already holds would pay it for nothing. A call that
 /// *did* write still flushes — that is the guarantee above, and the way to
 /// amortize it across many writes is [`Store::begin_transaction`] or a bulk
 /// add, both of which flush once for the whole span.
@@ -6132,6 +6353,50 @@ fn flush_arrays_before_commit(
     backend.flush()
 }
 
+/// Which row each column of a static read wants: one row for every column (the
+/// uniform sweep, which the backend serves with one hyperslab per dataset), or
+/// a row per column (a persistent reader, whose columns sit on independent
+/// breakpoint vectors).
+#[derive(Clone, Copy)]
+enum Rows<'a> {
+    Uniform(usize),
+    PerColumn(&'a [usize]),
+}
+
+impl Rows<'_> {
+    fn at(&self, i: usize) -> usize {
+        match self {
+            Rows::Uniform(index) => *index,
+            Rows::PerColumn(indices) => indices[i],
+        }
+    }
+}
+
+/// The body of [`Store::put_array`], over the fields it touches, so a caller
+/// holding a savepoint on the catalog can still store an array.
+fn put_array_into(
+    write_buffer: &mut WriteBuffer,
+    backend: &mut dyn StorageBackend,
+    in_transaction: bool,
+    hash: &[u8; 32],
+    data: &TypedArray,
+    group: PackGroup,
+    layout: ArrayLayout,
+) -> Result<bool> {
+    if write_buffer.contains(hash) || backend.contains(hash)? {
+        return Ok(false);
+    }
+    if layout.is_packed() && in_transaction {
+        // Nothing is owed the file until the outermost commit, so the array
+        // joins its pool's block and is written with its neighbours — see
+        // `WriteBuffer`.
+        write_buffer.push(*hash, data, group, backend)?;
+        return Ok(true);
+    }
+    backend.put_array(hash, data, group, layout)
+}
+
+/// The value array backing a request, regardless of time-series type.
 fn request_array(item: &AddRequest) -> &TypedArray {
     data_array(&item.data)
 }
@@ -6189,14 +6454,12 @@ fn exclusive_counterpart(ty: TimeSeriesType) -> Option<TimeSeriesType> {
 ///
 /// Every path that writes an association row has to consult this, not just the
 /// add path. The catalog's unique index keys on `time_series_type` and so cannot
-/// enforce the rule, and `copy_time_series`, `replace_owner` and
-/// `rename_time_series` all move an existing row to a *new* family identity —
-/// which is exactly the operation that can put the pair together. They wrote
-/// through `MetadataStore::insert`/`replace_owner`/`rename` and skipped the
-/// check entirely, so all three could reach a state the rest of the code treats
-/// as impossible: `resolve_forecast_key` then reports the family as ambiguous
-/// forever (both candidates share resolution *and* interval, so no filter
-/// narrows it), and `transform_single_time_series` refuses to run again.
+/// enforce the rule, and `copy_time_series` and `replace_owner` both move an
+/// existing row to a *new* family identity — which is exactly the operation that
+/// can put the pair together. Written straight through `MetadataStore`, either
+/// would reach a state the rest of the code treats as impossible: the family is
+/// ambiguous forever (both candidates share resolution *and* interval, so no
+/// filter narrows it), and `transform_single_time_series` refuses to run again.
 ///
 /// The check is bidirectional here because these paths can move *either* member
 /// into the other's family, where a plain add can only ever bring the
@@ -6231,22 +6494,6 @@ fn check_forecast_family_free(
     Ok(())
 }
 
-/// Every invariant a write must hold, for all five addable types, checked at the
-/// one boundary [`build_request_parts`] gives them.
-///
-/// The static types were already validated here; the dense forecasts trusted
-/// their constructors, which is not a boundary — the fields are `pub` and the
-/// types derive `Deserialize`, so a struct literal or a `serde_json::from_str`
-/// reaches the store having met nothing. The result was the failure mode
-/// [`validate_single`]'s comment describes for the static path: a
-/// `Deterministic` whose horizon was not a whole multiple of its resolution, or
-/// whose resolution was zero, was *written* and then failed on every read with
-/// an `IntegrityError` blaming the store for what the caller passed.
-///
-/// Reads deliberately do not go through here. They re-run the same shape and
-/// period checks via the constructors (which is how a genuinely corrupt row is
-/// still caught, as an `IntegrityError`), but they do not apply the millisecond
-/// rule, so an artifact written before it keeps reading back exactly.
 /// The descriptive attributes of a stored row, as the read path hands them back
 /// to a reconstructed series. One place, so a new descriptor cannot be filled in
 /// on some read paths and not others.
@@ -6335,12 +6582,12 @@ fn validate_time_reference(data: &TimeSeriesData) -> Result<()> {
     };
     reference.validate()?;
     // Only a reference that can *disagree* with the UTC calendar is worth
-    // warning about. `is_zoned()` is true for `Utc` too, which made every UTC
-    // series with a monthly period warn about DST drift against the calendar it
-    // is already stepping on -- a warning that cannot come true, on the most
-    // common spelling there is, which teaches the reader to ignore the ones
-    // that can. `Zoneless` is wall clocks held as if UTC, so it steps on its own
-    // calendar as well.
+    // warning about. `is_zoned()` is true for `Utc` too, and keying on it would
+    // warn every UTC series with a monthly period about DST drift against the
+    // calendar it is already stepping on -- a warning that cannot come true, on
+    // the most common spelling there is, which teaches the reader to ignore the
+    // ones that can. `Zoneless` is wall clocks held as if UTC, so it steps on
+    // its own calendar as well.
     if !matches!(
         reference,
         TimeReference::FixedOffset(_) | TimeReference::Zone(_)
@@ -6435,6 +6682,22 @@ fn is_calendar_scale(period: Period) -> bool {
     }
 }
 
+/// Every invariant a write must hold, for every addable type, checked at the
+/// one boundary [`build_request_parts`] gives them.
+///
+/// A constructor is not a boundary — the fields are `pub` and the types derive
+/// `Deserialize`, so a struct literal or a `serde_json::from_str` reaches the
+/// store having met nothing. Trusting the dense forecasts' constructors would
+/// reopen the failure mode [`validate_single`]'s comment describes for the
+/// static path: a `Deterministic` whose horizon is not a whole multiple of its
+/// resolution, or whose resolution is zero, would be *written* and then fail on
+/// every read with an `IntegrityError` blaming the store for what the caller
+/// passed.
+///
+/// Reads deliberately do not go through here. They re-run the same shape and
+/// period checks via the constructors (which is how a genuinely corrupt row is
+/// still caught, as an `IntegrityError`), but they do not apply the millisecond
+/// rule, so an artifact written before it keeps reading back exactly.
 fn validate_data(data: &TimeSeriesData) -> Result<()> {
     let invalid = TimeSeriesError::InvalidParameter;
     validate_array_geometry(data_array(data), data.time_series_type())?;
@@ -6468,15 +6731,14 @@ fn validate_data(data: &TimeSeriesData) -> Result<()> {
 /// type-level check ([`validate_single`], the forecast `validate`s,
 /// [`ElementType::validate_array`]) reasons about the *shape*, and every backend
 /// indexes the buffer by a stride derived from it, so a buffer that disagrees
-/// with its shape was either copied as a prefix and then hashed whole — a
+/// with its shape would be either copied as a prefix and then hashed whole — a
 /// persisted row whose hash does not match its bytes — or indexed past its end.
 ///
 /// A zero-width element dimension (`[24, 0]`) describes no bytes at all, which
 /// the buffer check accepts. Nothing can be read from such a series, and a
-/// `DeterministicSingleTimeSeries` derived from one indexed past its empty
-/// buffer; the on-disk backend refused it with an opaque chunk-layout error and
-/// the in-memory one did not refuse it at all. The time axis (`shape[0]`) may
-/// still be zero: an empty series is a stored fact.
+/// `DeterministicSingleTimeSeries` derived from one would index past its empty
+/// buffer. The time axis (`shape[0]`) may still be zero: an empty series is a
+/// stored fact.
 fn validate_array_geometry(array: &TypedArray, ts_type: TimeSeriesType) -> Result<()> {
     array
         .check_bytes()
@@ -6544,20 +6806,21 @@ fn validate_single(series: &SingleTimeSeries) -> Result<()> {
     }
     // The resolution has to be a period the store can actually represent, which
     // `Period::is_positive` defines as a whole number of milliseconds greater
-    // than zero. `SingleTimeSeries::new` is infallible, so until this check
-    // every forecast constructor rejected such a period while the static path
-    // waved it through, and the result was a series nothing could read back:
+    // than zero. Every forecast constructor rejects any other period, but
+    // `SingleTimeSeries::new` is infallible, so this is the static path's only
+    // line; without it such a series would be written and nothing could read
+    // it back:
     //
-    //   * a negative resolution built a `StaticReader` whose timeline ran
-    //     *backwards*, and whose every `index_at` then failed on its own
+    //   * a negative resolution builds a `StaticReader` whose timeline runs
+    //     *backwards*, and whose every `index_at` then fails on its own
     //     timestamps;
-    //   * zero repeated one instant `length` times;
-    //   * a sub-millisecond resolution encoded as `PT0S` and read back as zero,
-    //     so a sliced read failed on a zero-length step.
+    //   * zero repeats one instant `length` times;
+    //   * a sub-millisecond resolution encodes as `PT0S` and reads back as
+    //     zero, so a sliced read fails on a zero-length step.
     //
-    // All three were writable and none was usable, which is the worst place to
-    // draw the line. Callers wanting a finer grid should scale their unit — a
-    // 500 µs series is a 500-unit series with the unit recorded in `units`.
+    // Writable but unusable is the worst place to draw the line. Callers
+    // wanting a finer grid should scale their unit — a 500 µs series is a
+    // 500-unit series with the unit recorded in `units`.
     if !series.resolution.is_positive() {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "SingleTimeSeries resolution {} is not a positive whole number of milliseconds; \
@@ -6731,8 +6994,7 @@ fn resolve_element_type(item: &AddRequest) -> Result<ElementType> {
 
 /// Open the array backend for an existing store file. The `storage_backend`
 /// root attribute identifies files written by [`Hdf5Backend`]; files without it
-/// (including stores written by the removed netcdf backend) are rejected with
-/// an actionable error instead of being misread.
+/// are rejected with an actionable error instead of being misread.
 ///
 /// Reachability is checked first, and separately, so a typo'd path or an
 /// unreadable directory is reported as the missing file it is rather than as a
@@ -6741,14 +7003,13 @@ fn resolve_element_type(item: &AddRequest) -> Result<ElementType> {
 ///
 /// Past that, the sniff is three-way rather than a boolean, because "this is
 /// not one of our files" and "this file would not open" call for opposite
-/// advice. Only the first can be a netcdf-era store — netcdf4 is HDF5
-/// underneath, so such a file *opens* and merely lacks our attribute. A file
-/// that will not open at all is something else entirely, and the most common
-/// something else is a store another process is holding: HDF5 takes an
+/// advice. The first is an HDF5 file that opens and merely lacks our attribute.
+/// A file that will not open at all is something else entirely, and the most
+/// common something else is a store another process is holding: HDF5 takes an
 /// exclusive lock and does not set `O_CLOEXEC`, so even an unrelated forked
-/// child can keep one alive. Telling that user to re-create the store is advice
-/// to destroy a healthy artifact, so libhdf5's own complaint is passed through
-/// instead of being overwritten by a guess.
+/// child can keep one alive. Telling that user the file is not a store would
+/// be wrong about a healthy artifact, so libhdf5's own complaint is passed
+/// through instead of being overwritten by a guess.
 fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>> {
     use crate::storage::hdf5::BackendSniff;
 
@@ -6762,9 +7023,8 @@ fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>>
         BackendSniff::Ours => {}
         BackendSniff::NotOurs => {
             return Err(TimeSeriesError::InvalidParameter(format!(
-                "{} is not an infrastore hdf5 store (stores written by the removed \
-                 netcdf backend are no longer supported; re-create the store to \
-                 migrate)",
+                "{} is not an infrastore hdf5 store: it is an HDF5 file without the \
+                 `storage_backend` root attribute every store carries",
                 path.display()
             )));
         }
@@ -6944,7 +7204,7 @@ fn sync_parent_dir(_path: &Path) -> Result<()> {
 /// over the original: a sibling of `data_path`, so the two are on one
 /// filesystem and the swap is a plain atomic rename. `tag` makes the name unique
 /// per compaction — see [`temp_tag`], including why a leftover from an
-/// interrupted compaction is now left in place rather than swept by the next one.
+/// interrupted compaction is left in place rather than swept by the next one.
 fn repack_temp_path(data_path: &Path, tag: &str) -> PathBuf {
     let mut p = data_path.to_path_buf();
     let new_name = match p.file_name().and_then(|n| n.to_str()) {
@@ -7073,9 +7333,9 @@ fn require_anchorable_slice(
 /// the bounds form, and the rule it enforces — a start must be a window
 /// boundary, because there is no partial window to return — has nothing to say
 /// about a bound that precedes every window: there is no partial window there,
-/// only no window at all. Rejecting it made a range wider than the data fail,
-/// which is exactly the range a bulk export asks for. The [`ReadWindow`] form
-/// still *checks* its start, in `ReadWindow::resolve_forecast`, and never
+/// only no window at all. Rejecting it would make a range wider than the data
+/// fail, which is exactly the range a bulk export asks for. The [`ReadWindow`]
+/// form still *checks* its start, in `ReadWindow::resolve_forecast`, and never
 /// reaches here with one it has not already held to a boundary.
 ///
 /// The selected run is finally held to [`Period::sub_grid_is_anchorable`]: a
@@ -7409,8 +7669,8 @@ mod resolve_windows_tests {
         ));
     }
 
-    /// The pre-optimization walk over every window: the binary search has to
-    /// agree with it everywhere, since the range it picks is what a caller's
+    /// The reference walk over every window: the binary search has to agree
+    /// with it everywhere, since the range it picks is what a caller's
     /// `time_range` read returns.
     fn linear_scan(
         window_start: impl Fn(usize) -> DateTime<Utc>,
@@ -7581,10 +7841,10 @@ mod pending_format_upgrade_tests {
         );
     }
 
-    /// `persist_to`'s copy branch clones the array file byte for byte, stamp
-    /// included, while writing a *migrated* catalog beside it. Without the
-    /// stamping step the destination is a fresh artifact born already stale,
-    /// and nothing there would ever fix it.
+    /// `persist_to` writes a *migrated* catalog beside the arrays it publishes,
+    /// so the array file it writes has to carry the current stamp too.
+    /// Otherwise the destination is a fresh artifact born already stale, and
+    /// nothing there would ever fix it.
     #[test]
     fn persist_to_stamps_the_copy_it_publishes() {
         let dir = tempfile::tempdir().unwrap();

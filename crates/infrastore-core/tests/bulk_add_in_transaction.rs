@@ -158,8 +158,8 @@ fn list_keys_with_id_reports_the_ids_the_writes_handed_back() {
     }
     assert!(by_owner.is_empty());
 
-    // One listing now carries the id beside the hash, where the array-group
-    // listing used to be a separate projection of the same query.
+    // One listing carries the id beside the hash, so a caller grouping rows by
+    // array needs no second query to learn their ids.
     let groups = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(groups.len(), added.len());
     assert!(

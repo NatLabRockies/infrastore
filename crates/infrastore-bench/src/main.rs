@@ -86,6 +86,11 @@ struct CommonArgs {
 struct AddArgs {
     #[command(flatten)]
     common: CommonArgs,
+
+    /// Add each series with a single `add` inside one transaction, instead of
+    /// one `add_time_series_bulk` — the write-buffer path.
+    #[arg(long)]
+    transaction: bool,
 }
 
 #[derive(Args, Clone)]
@@ -96,6 +101,11 @@ struct ReadArgs {
     /// Simulation steps to benchmark (default: --length).
     #[arg(long)]
     steps: Option<usize>,
+
+    /// Sweep the SingleTimeSeries with a `StaticReader` (one columnar read per
+    /// step) instead of `read_by_ids_range`.
+    #[arg(long)]
+    reader: bool,
 }
 
 #[derive(Args, Clone)]
@@ -106,6 +116,14 @@ struct AllArgs {
     /// Simulation steps to benchmark (default: --length).
     #[arg(long)]
     steps: Option<usize>,
+
+    /// See `add --transaction`.
+    #[arg(long)]
+    transaction: bool,
+
+    /// See `read --reader`.
+    #[arg(long)]
+    reader: bool,
 }
 
 fn main() -> Result<(), Error> {
@@ -114,12 +132,22 @@ fn main() -> Result<(), Error> {
     match cli.command {
         Command::Add(args) => run_add(&args)?,
         Command::Read(args) => run_read(&args)?,
-        Command::All(AllArgs { common, steps }) => {
+        Command::All(AllArgs {
+            common,
+            steps,
+            transaction,
+            reader,
+        }) => {
             run_add(&AddArgs {
                 common: common.clone(),
+                transaction,
             })?;
             println!();
-            run_read(&ReadArgs { common, steps })?;
+            run_read(&ReadArgs {
+                common,
+                steps,
+                reader,
+            })?;
         }
     }
     Ok(())
@@ -354,8 +382,13 @@ fn sep() {
 fn run_add(args: &AddArgs) -> Result<(), Error> {
     let c = &args.common;
 
+    let label = if args.transaction {
+        "single adds in one transaction"
+    } else {
+        "Bulk add"
+    };
     sep();
-    println!("Bulk add: SingleTimeSeries");
+    println!("{label}: SingleTimeSeries");
     println!(
         "  count={}, length={} timesteps (1h resolution), storage={}",
         c.count,
@@ -371,20 +404,20 @@ fn run_add(args: &AddArgs) -> Result<(), Error> {
 
     let mut handle = create_store(c, "add_sts")?;
     let t = Instant::now();
-    let _ = handle.store.add_time_series_bulk(sts_reqs)?;
+    add_requests(&mut handle.store, sts_reqs, args.transaction)?;
     let t_add = t.elapsed();
 
     println!();
     println!("  build requests:     {}", fmt_dur(t_build));
     println!(
-        "  add_time_series_bulk: {}   ({}, {})",
+        "  add: {}   ({}, {})",
         fmt_dur(t_add),
         fmt_throughput(c.count, t_add),
         fmt_bw(sts_bytes, t_add),
     );
 
     sep();
-    println!("Bulk add: Deterministic");
+    println!("{label}: Deterministic");
     println!(
         "  count={}, length={} windows (horizon={}h, interval=1h), storage={}",
         c.count,
@@ -401,19 +434,33 @@ fn run_add(args: &AddArgs) -> Result<(), Error> {
 
     let mut handle = create_store(c, "add_det")?;
     let t = Instant::now();
-    let _ = handle.store.add_time_series_bulk(det_reqs)?;
+    add_requests(&mut handle.store, det_reqs, args.transaction)?;
     let t_add = t.elapsed();
 
     println!();
     println!("  build requests:     {}", fmt_dur(t_build));
     println!(
-        "  add_time_series_bulk: {}   ({}, {})",
+        "  add: {}   ({}, {})",
         fmt_dur(t_add),
         fmt_throughput(c.count, t_add),
         fmt_bw(det_bytes, t_add),
     );
     sep();
 
+    Ok(())
+}
+
+/// One bulk add, or one `add` per request inside a single transaction.
+fn add_requests(store: &mut Store, reqs: Vec<AddRequest>, transaction: bool) -> Result<(), Error> {
+    if !transaction {
+        let _ = store.add_time_series_bulk(reqs)?;
+        return Ok(());
+    }
+    store.begin_transaction()?;
+    for req in reqs {
+        let _ = store.add(req)?;
+    }
+    store.commit_transaction()?;
     Ok(())
 }
 
@@ -434,7 +481,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         actual_steps,
         storage_label(c),
     );
-    println!("  total get_time_series calls: {}", c.count * actual_steps);
+    println!("  total component reads: {}", c.count * actual_steps);
     if !c.in_memory {
         println!("  (store reopened read-only between write and read phases)");
     }
@@ -449,18 +496,34 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         flush_and_reopen(handle)?
     };
 
-    let keys = sts_ids(&handle.store, c.count)?;
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
     let mut step_times: Vec<StdDuration> = Vec::with_capacity(actual_steps);
-    for step in 0..actual_steps {
-        let t_start = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
-        let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
-        let t0 = Instant::now();
-        let _ = handle
-            .store
-            .read_by_ids_range(&keys, (t_start, t_end).into())?;
-        step_times.push(t0.elapsed());
+    if args.reader {
+        println!("  (StaticReader sweep: one columnar read per step)");
+        let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
+        let mut reader = handle.store.build_static_reader(
+            ListFilter::new()
+                .time_series_type(TimeSeriesType::SingleTimeSeries)
+                .resolution(hour),
+        )?;
+        for step in 0..actual_steps {
+            let at = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
+            let t0 = Instant::now();
+            handle.store.static_read(&mut reader, at)?;
+            step_times.push(t0.elapsed());
+        }
+    } else {
+        let keys = sts_ids(&handle.store, c.count)?;
+        for step in 0..actual_steps {
+            let t_start = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
+            let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
+            let t0 = Instant::now();
+            let _ = handle
+                .store
+                .read_by_ids_range(&keys, (t_start, t_end).into())?;
+            step_times.push(t0.elapsed());
+        }
     }
 
     println!();
@@ -476,7 +539,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         actual_steps,
         storage_label(c),
     );
-    println!("  total get_time_series calls: {}", c.count * actual_steps);
+    println!("  total component reads: {}", c.count * actual_steps);
     println!(
         "  note: each call fetches the full [{}×{}] array from storage, then slices to 1 window",
         DET_HORIZON_H, c.length,

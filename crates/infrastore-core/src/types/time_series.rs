@@ -169,18 +169,15 @@ impl TimeSeriesType {
     /// The storage codes of the static types, for a summary query that wants
     /// "all static rows".
     ///
-    /// A *list*, not a range. The static types were codes 0-1 and the forecast
-    /// types 2-5, two contiguous blocks a `BETWEEN` could select — until
-    /// `PersistentTimeSeries` was appended as 6 rather than inserted, because
-    /// the codes are an on-disk contract and renumbering is not available. The
-    /// static group is therefore non-contiguous and its consumers render
-    /// `WHERE time_series_type IN (…)`. `idx_ts_type` serves that as happily as
-    /// it served the range.
+    /// A *list*, not a range. The static types are codes 0-1 and 6, around the
+    /// forecast types' 2-5: `PersistentTimeSeries` is appended rather than
+    /// inserted, because the codes are an on-disk contract and renumbering is
+    /// not available. The static group is therefore non-contiguous and its
+    /// consumers render `WHERE time_series_type IN (…)`, which `idx_ts_type`
+    /// serves as well as it would a range.
     ///
     /// `code_groups_partition_cleanly` asserts that this and
-    /// [`Self::forecast_codes`] are disjoint and together cover every variant,
-    /// which is the property the old contiguity assertion was really standing
-    /// in for.
+    /// [`Self::forecast_codes`] are disjoint and together cover every variant.
     pub fn static_codes() -> &'static [i64] {
         // Written out rather than derived from `is_forecast()` at call time:
         // these are on-disk codes, so seeing the literals here is the point.
@@ -1561,14 +1558,13 @@ fn validate_forecast_periods(
     check(horizon, "horizon")?;
     // `count <= 1`, not `count == 1`: the interval is the step *between* windows,
     // so a forecast with one window has none to take and a forecast with none at
-    // all has none either. Restricting the allowance to exactly one window made
-    // a legitimate query on a zero-interval single-window forecast fail —
-    // `resolve_windows` returns an empty selection for a zero-width `time_range`,
-    // and rebuilding that as `count = 0` tripped this check, which
-    // `Store::get_time_series` reports as `IntegrityError`. A caller asking a
-    // well-formed question about an intact store was told the store was corrupt,
-    // and only for the zero-interval encoding: the same query against a
-    // positive-interval forecast returned an empty result.
+    // all has none either. The zero-window case is live: `resolve_windows`
+    // returns an empty selection for a zero-width `time_range`, and the read
+    // path rebuilds that as `count = 0` and reports a failure here as
+    // `IntegrityError`. Limiting the allowance to exactly one window would tell
+    // a caller asking a well-formed question about an intact store that the
+    // store is corrupt, and only for the zero-interval encoding: the same query
+    // against a positive-interval forecast returns an empty result.
     if !(interval.is_positive() || count <= 1 && interval.is_zero()) {
         return Err(
             "interval must be strictly positive (zero is allowed only for a forecast with at \
@@ -2358,9 +2354,9 @@ mod tests {
     fn code_groups_partition_cleanly() {
         // The summary queries select "all static" / "all forecast" with one
         // `IN` list each, which is correct exactly while the two lists are
-        // disjoint and together cover every type. They used to be contiguous
-        // ranges too; appending `PersistentTimeSeries` as code 6 ended that,
-        // and the partition is the property that actually mattered.
+        // disjoint and together cover every type. With `PersistentTimeSeries`
+        // appended as code 6 the static group is not a contiguous range, so the
+        // partition is the property to pin.
         let statics = TimeSeriesType::static_codes();
         let forecasts = TimeSeriesType::forecast_codes();
         for t in ALL_TYPES {

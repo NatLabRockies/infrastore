@@ -10,10 +10,10 @@
 //! row. Nothing else in the store would notice, which is why these assertions
 //! are here rather than left to the surfaces that read the id back.
 //!
-//! These reach into the sidecar catalog with `rusqlite` directly. The id is not
-//! yet on the public API — that arrives with the write and read surfaces — so
-//! the DDL is currently the whole contract, and it is exactly what needs
-//! pinning.
+//! Some of these reach into the sidecar catalog with `rusqlite` directly: the
+//! never-reissued guarantee lives in the DDL (`AUTOINCREMENT` and SQLite's
+//! `sqlite_sequence` high-water mark), which no read through the public API can
+//! show, so the DDL itself is what needs pinning.
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
@@ -32,7 +32,7 @@ fn series(name: &str) -> SingleTimeSeries {
 
 /// The catalog id of the series `name` on `owner`.
 ///
-/// The identify half, posed as the filter a `KeyIdentity` used to be. It asserts
+/// The identify half: a `KeyIdentity`'s fields, posed as a filter. It asserts
 /// exactly one match, so a fixture that starts producing two fails here rather
 /// than silently addressing whichever row came back first.
 fn id_of(store: &Store, owner: i64, name: &str) -> TimeSeriesId {
@@ -163,7 +163,7 @@ fn every_association_table_declares_autoincrement() {
 /// Deleting the highest-numbered row and adding another does not hand the new
 /// row the old one's id.
 ///
-/// This is the whole point of the change, and the one behavior a bare
+/// This is the whole point of `AUTOINCREMENT`, and the one behavior a bare
 /// `INTEGER PRIMARY KEY` gets wrong: it assigns `max(rowid) + 1`, so the id of
 /// a deleted top row is immediately reused.
 #[test]
@@ -481,7 +481,7 @@ fn an_id_collision_and_an_identity_collision_are_different_errors() {
         other => panic!("expected DuplicateAssociationId, got {other:?}"),
     }
 
-    // Same series added twice: still the identity collision it always was.
+    // Same series added twice: an identity collision, not an id one.
     let err = source
         .add(AddRequest::new(
             1,
@@ -498,9 +498,9 @@ fn an_id_collision_and_an_identity_collision_are_different_errors() {
 
 /// A copy is a new row and gets a new id.
 ///
-/// Regression guard. `copy_time_series` reads the source's metadata, edits the
-/// owner in place, and re-inserts it — so the source's id rode along, making
-/// every copy an explicit-id insert of an id that was by definition already
+/// `copy_time_series` reads the source's metadata, edits the owner in place, and
+/// re-inserts it — so unless the id is cleared, the source's rides along, making
+/// every copy an explicit-id insert of an id that is by definition already
 /// taken.
 #[test]
 fn a_copy_gets_its_own_id() {
@@ -542,9 +542,9 @@ fn a_copy_gets_its_own_id() {
 
 /// A derived `DeterministicSingleTimeSeries` is a new row and gets a new id.
 ///
-/// Regression guard, and the subtler of the two: the transform builds the
-/// derived row with `..src`, which fills in every field it does not name — the
-/// source's id included, invisibly, with no compiler error to catch it.
+/// The subtler of the two paths: the transform builds the derived row with
+/// `..src`, which fills in every field it does not name — the source's id
+/// included, invisibly, with no compiler error to catch it.
 #[test]
 fn a_derived_view_gets_its_own_id() {
     let mut store = create_store(None, true).unwrap();
@@ -670,7 +670,7 @@ fn a_write_reports_the_id_it_used() {
 /// it refuses an id a *live* row holds and nothing else, so a document carrying
 /// a retired id would make a stale reference resolve to a different series. An
 /// imported id must therefore sit above the counter, which is also what the
-/// `DuplicateAssociationId` message has said all along.
+/// `DuplicateAssociationId` message says.
 #[test]
 fn an_imported_id_cannot_reissue_a_deleted_one() {
     // Source rows at 1 and 2; the document names both.
@@ -740,8 +740,8 @@ fn attach(component_id: i64, attribute_id: i64) -> SupplementalAttributeAssociat
     }
 }
 
-/// Attaching reports the id, a read reports the same one, and an explicit id is
-/// honored over this table's own stream.
+/// Attaching reports the id, a read reports the same one, and an id carried on
+/// the way in is ignored in favor of this table's own stream.
 #[test]
 fn attaching_reports_its_id() {
     let mut store = create_store(None, true).unwrap();
@@ -823,9 +823,9 @@ fn an_association_id_is_outside_equality_and_hashing() {
 /// The exported attribute-association JSON carries no id, so it still parses
 /// through an importer that denies unknown fields.
 ///
-/// The struct gained an `id` and the export used to be its serde derive, which
-/// would have put the field on the wire and had the import reject it — an
-/// export its own importer refuses.
+/// The struct carries an `id`, so an export that was simply its serde derive
+/// would put the field on the wire and have the import reject it — an export its
+/// own importer refuses.
 #[test]
 fn the_attribute_association_wire_form_carries_no_id() {
     let mut store = create_store(None, true).unwrap();
@@ -1011,8 +1011,7 @@ fn a_removal_by_id_takes_only_the_row_it_names() {
 /// A stale id fails the whole batch and rolls it back: the rows named beside it
 /// are still there afterwards.
 ///
-/// The all-or-nothing rule is the same one `remove_time_series_bulk`
-/// follows, and it matters more by reference than by key — a caller removing by
+/// The all-or-nothing rule matters more by reference than by key — a caller removing by
 /// id is working from its own recorded references, so one that no longer
 /// resolves says the model disagrees with the store, not that this particular
 /// removal is a no-op.
@@ -1339,8 +1338,8 @@ fn a_document_round_trips_with_its_ids() {
 }
 /// A read by reference scales past one `IN (...)` list. Each id is a bound
 /// variable, and the predicate is bound more than once per statement, so a
-/// model-sized set once tripped SQLite's variable limit where the keyed read
-/// of the same series did not.
+/// model-sized set bound as a single list would trip SQLite's variable limit
+/// where the keyed read of the same series does not.
 #[test]
 fn a_read_by_ids_spans_many_query_chunks() {
     let mut store = create_store(None, true).unwrap();
@@ -1678,14 +1677,9 @@ fn an_import_refuses_a_row_whose_array_is_absent() {
     assert_eq!(empty.list_metadata(ListFilter::default()).unwrap().len(), 0);
 }
 
-/// A `NonSequentialTimeSeries` cannot be imported: its timestamp vector is
-/// content-addressed in the catalog and deliberately absent from the wire form,
-/// so no document holds enough to rebuild the row. Refused with a message that
-/// says so, rather than written with the wrong time axis.
-/// An irregular row takes part in the id round trip like any other type. It used
-/// to be refused outright, because its time axis was not on the wire; the axis is
-/// now located by `timestamps_uri`, so the only thing standing between this
-/// document and this store is that the store has already issued the id.
+/// An irregular row takes part in the id round trip like any other type. Its
+/// time axis is located by `timestamps_uri`, so the only thing standing between
+/// this document and this store is that the store has already issued the id.
 ///
 /// The locator's own contract — required, and required to resolve — is pinned in
 /// `json_only_restore.rs`, which is where a document meets a store that has *not*

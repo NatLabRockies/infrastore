@@ -6,7 +6,7 @@
 //! which is why their arrays are kept in the compacted/packed on-disk format
 //! (one timestamp across all columns of a packed dataset is a single hyperslab).
 //!
-//! # Design (locked 2026-06-25)
+//! # Design
 //!
 //! * **One timeline per reader** — with one exception, below. Every column
 //!   shares one time axis: for `SingleTimeSeries` a regular grid the build
@@ -401,13 +401,13 @@ impl StaticReader {
     /// A read is one operation over the whole reader, so its failure has to
     /// leave the whole reader empty. `StaticGroup::fill` already clears the
     /// group it is filling, but that is per group, and it is the groups it does
-    /// *not* reach that are the problem: a failure part way through left the
-    /// groups already filled holding the **new** timestamp's values while the
-    /// rest held the **previous** read's, and the recorded read timestamp still
-    /// named the previous one — so a caller that ignored the error read two
-    /// different instants side by side, both labeled as the earlier one.
-    /// Resolving the timestamp can fail before any group is touched at all,
-    /// which is the same hazard with none of them updated.
+    /// *not* reach that are the problem: a failure part way through would leave
+    /// the groups already filled holding the **new** timestamp's values while
+    /// the rest still hold the **previous** read's, with the recorded read
+    /// timestamp still naming the previous one — so a caller that ignored the
+    /// error would read two different instants side by side, both labeled as
+    /// the earlier one. Resolving the timestamp can fail before any group is
+    /// touched at all, which is the same hazard with none of them updated.
     ///
     /// [`Store::static_read`] therefore calls this on the error path of
     /// [`Self::read_at`], which is the one path every failure inside a read
@@ -570,8 +570,8 @@ impl StaticReader {
                     // A group whose columns all sit at the reader's own index
                     // takes the uniform read; one shifted by a window scatters,
                     // exactly as a persistent group does. `row_offsets` is empty
-                    // for every non-windowed reader, so this is the same single
-                    // branch the hot path always took.
+                    // for every non-windowed reader, so its hot path always takes
+                    // the uniform branch.
                     if group.row_offsets.is_empty() {
                         group.fill(|hashes, dtype, out| uniform(hashes, dtype, index, out))?;
                     } else {
@@ -887,13 +887,13 @@ pub(crate) fn window_timeline(
 ///
 /// Takes borrowed rows, in one pass. The forecast reader holds its rows beside
 /// their read plans rather than in a slice, and collecting them into a
-/// `Vec<TimeSeriesMetadata>` to call this deep-copied every name, feature map
-/// and element shape in the selection — on the path documented as the one you
-/// build once and sweep many times.
+/// `Vec<TimeSeriesMetadata>` to call this would deep-copy every name, feature
+/// map and element shape in the selection — on the path documented as the one
+/// you build once and sweep many times.
 ///
-/// `what` names the reader being built, because both readers share this and a
-/// mixed forecast cohort was being told that a `StaticReader` had failed --
-/// pointing at an API the caller never invoked.
+/// `what` names the reader being built, because both readers share this, and
+/// an error naming the other one would point a mixed forecast cohort at an API
+/// the caller never invoked.
 fn cohort_time_reference<'a>(
     what: &str,
     rows: impl IntoIterator<Item = &'a TimeSeriesMetadata>,
@@ -1346,8 +1346,8 @@ impl WindowSlot {
         // the dtype rather than inferring one from what it stored.
         let dtype = self.element_type.physical_dtype();
         // Cleared before the read: the derived path fails before it touches the
-        // buffer, so without this a failed read left `window()` serving the
-        // previous window as if it were the one asked for.
+        // buffer, so without this a failed read would leave `window()` serving
+        // the previous window as if it were the one asked for.
         self.filled = false;
         match self.read {
             WindowRead::Dense { count_axis } => {
@@ -1359,11 +1359,11 @@ impl WindowSlot {
                     // may clear `self.block` and then fail — the HDF5 backend
                     // does exactly that, emptying `out` before the lookup that
                     // returns `NotFound` — and leaving `cached` set across that
-                    // failure left the slot advertising a range it no longer
-                    // held. The next read landing in that range then skipped the
-                    // I/O and `gather_window` indexed an empty buffer, turning a
-                    // removed array into an out-of-range panic instead of the
-                    // `NotFound` the failing read had already reported.
+                    // failure would leave the slot advertising a range it no
+                    // longer holds. The next read landing in that range would
+                    // skip the I/O and `gather_window` would index an empty
+                    // buffer, turning a removed array into an out-of-range panic
+                    // instead of the `NotFound` the failing read already reported.
                     self.cached = None;
                     read_block(
                         &self.hash,
@@ -1720,11 +1720,12 @@ pub(crate) fn build_forecast_entries(
     // Keyed on the element type as well as the array and its read shape. A slot
     // carries the `element_type` its window bytes are to be read under, and
     // `array_hash` covers dtype, shape and bytes but *not* that logical type —
-    // so two forecasts holding byte-identical arrays under different declared
-    // element types collapsed into one slot, and whichever arrived second was
-    // handed the first one's meaning. `entry_slot(i).element_type()` is the only
-    // place a caller learns how to decode a window, so the wrong answer there is
-    // silently wrong values, not an error.
+    // so on the hash alone, two forecasts holding byte-identical arrays under
+    // different declared element types would collapse into one slot, and
+    // whichever arrived second would be handed the first one's meaning.
+    // `entry_slot(i).element_type()` is the only place a caller learns how to
+    // decode a window, so the wrong answer there is silently wrong values, not
+    // an error.
     let mut slot_of: HashMap<([u8; 32], WindowRead, ElementType), usize> = HashMap::new();
     let mut entries = Vec::with_capacity(items.len());
     for (m, shape) in items {
@@ -1824,9 +1825,9 @@ fn grid_of(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Period, usize)> {
 /// uniqueness index deliberately allows one owner to hold the same name at the
 /// same resolution under different `features_hash` values — scenarios of one
 /// variable — so series that agree on everything else are a normal state, not a
-/// pathological one. Without features in the key those rows tied, and since
-/// `sort_by` is stable and the catalog query carries no `ORDER BY`, their column
-/// positions fell through to whatever row order SQLite happened to produce.
+/// pathological one. Without features in the key those rows would tie, and
+/// since `sort_by` is stable and the catalog query carries no `ORDER BY`, their
+/// column positions would fall through to whatever row order SQLite produces.
 /// That is not stable across index choices, catalog rebuilds, or SQLite
 /// versions, so a consumer caching "column j is component X" could read another
 /// component's values with nothing reporting an error.
@@ -1865,8 +1866,8 @@ mod tests {
     /// The `owner_id` of the column a reader placed at `col`.
     ///
     /// A group carries ids, not keys, so a column maps back to its series
-    /// through the catalog. That is the point of the change: the id resolves to
-    /// the row as it is *now*, where a key snapshot froze it at build time.
+    /// through the catalog. That is the point: the id resolves to the row as it
+    /// is *now*, where a key snapshot would freeze it at build time.
     fn col_owner(store: &Store, g: &StaticGroup, col: usize) -> i64 {
         store
             .get_metadata_by_id(g.ids()[col])
@@ -2223,7 +2224,7 @@ mod tests {
         );
         // The message is prose a caller reads, so the source wrapping must not
         // survive into it. This one exists twice -- `StaticReader::index_at` and
-        // `index_on_timeline` -- and only one copy had its continuations.
+        // `index_on_timeline` -- and each copy needs its own continuations.
         assert!(
             !err.to_string().contains("  "),
             "the message carries the source's own indentation: {err}"

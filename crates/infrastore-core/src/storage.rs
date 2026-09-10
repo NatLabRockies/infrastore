@@ -1,7 +1,7 @@
 //! Storage backend abstraction.
 //!
 //! The [`StorageBackend`] trait is the only seam between the public API and
-//! the actual array-storage implementation. v0 ships two implementations:
+//! the actual array-storage implementation. There are two implementations:
 //! [`MemoryBackend`] (in-memory) and [`Hdf5Backend`] (HDF5 on disk).
 
 use std::ops::Range;
@@ -15,7 +15,7 @@ pub mod common;
 pub mod hdf5;
 pub mod memory;
 
-pub(crate) use common::{MAX_PENDING_BYTES, PackGroup};
+pub(crate) use common::PackGroup;
 
 // The concrete backends and the trait seam are internal: the public surface is
 // `Store`, which owns a boxed backend. (The `common` module stays `pub` so
@@ -53,13 +53,15 @@ pub enum Compression {
 /// mutually readable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArrayLayout {
-    /// Column-pack with other same-shaped arrays (`SingleTimeSeries` and the
-    /// backing array of a `DeterministicSingleTimeSeries`). Chunked
-    /// timestamp-major so a read across series at one timestamp is one chunk.
+    /// Column-pack with other same-shaped arrays on the same time axis
+    /// (`SingleTimeSeries`, the backing array of a
+    /// `DeterministicSingleTimeSeries`, and irregular series sharing an axis).
+    /// Chunked timestamp-major so a read across series at one timestamp is one
+    /// chunk.
     Packed,
     /// Standalone multi-dimensional variable chunked as a single whole-array
-    /// chunk. Used for `NonSequentialTimeSeries`, which is read whole or by an
-    /// axis-0 time range.
+    /// chunk. Used for an irregular series whose time axis nothing else
+    /// shares, which is read whole or by an axis-0 time range.
     Standalone,
     /// Standalone, but chunked in bounded blocks along `count_axis` so that
     /// reading one forecast window — a size-1 slice on that axis — decompresses
@@ -73,36 +75,6 @@ impl ArrayLayout {
     pub(crate) fn is_packed(self) -> bool {
         matches!(self, ArrayLayout::Packed)
     }
-}
-
-/// Whether a packed write must land in the file before it returns, or may be
-/// buffered and written with the block writer later.
-///
-/// [`WriteMode::Deferred`] is what a caller passes while a
-/// [`Store::begin_transaction`](crate::Store::begin_transaction) span is open.
-/// Nothing the transaction wrote is durable until its outermost commit anyway,
-/// so a single add inside one is free to accumulate into a per-pool pending
-/// block and be written together with its neighbours — which is what makes a
-/// loop of single adds produce the same datasets, widths, and chunking as one
-/// [`Store::add_time_series_bulk`](crate::Store::add_time_series_bulk) of the
-/// same items instead of filling one growth-pool slot at a time.
-///
-/// The mode is a *hint about timing*, never about content: a deferred array is
-/// visible to every read the moment it is accepted (backends that buffer serve
-/// it from the buffer, or write the block out first), it counts as stored for
-/// [`StorageBackend::contains`], and [`StorageBackend::remove_array`] unwinds it
-/// like any other. Only the standalone layouts ignore it — they are their own
-/// dataset, so there is nothing to coalesce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WriteMode {
-    /// Write into the file before returning. The mode outside a transaction,
-    /// and the only one a backend without a buffer implements.
-    Immediate,
-    /// May be buffered and written by [`StorageBackend::materialize_pending`],
-    /// by [`StorageBackend::flush`], or when the buffer reaches a bound the
-    /// backend sets on it — a column width per pool, and a byte ceiling across
-    /// all of them, so that buffering cannot grow without limit.
-    Deferred,
 }
 
 impl Default for Compression {
@@ -284,17 +256,16 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// (native forecasts, and irregular series on an unshared axis), differing
     /// only in how the variable is chunked.
     ///
-    /// `mode` says whether the bytes must reach the file before this returns;
-    /// see [`WriteMode`]. It changes when a packed array is written, never
-    /// whether it is stored: a [`WriteMode::Deferred`] put that returns `true`
-    /// is stored as far as every other method on this trait is concerned.
+    /// The bytes are in the backend when this returns. What an open
+    /// transaction has accepted but not yet written lives in the store's
+    /// write buffer (`crate::write_buffer`), never here: a backend knows
+    /// physical positions only.
     fn put_array(
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
         group: PackGroup,
         layout: ArrayLayout,
-        mode: WriteMode,
     ) -> Result<bool>;
 
     /// Whether a packed pool for `group` at this `(dtype, element_shape,
@@ -303,8 +274,10 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// The write path asks before packing an irregular series: a pool is a win
     /// only once several columns share it (its timestamp-major chunking spreads
     /// one array over `length` chunks), so a series whose time axis nothing else
-    /// uses is better off standalone. The default is `false` — a backend with no
-    /// packed representation has no pools to join.
+    /// uses is better off standalone. Answers for the file only; a block the
+    /// store's write buffer is still holding is the store's to count. The
+    /// default is `false` — a backend with no packed representation has no
+    /// pools to join.
     fn has_pack_group(
         &self,
         _dtype: Dtype,
@@ -318,51 +291,29 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// Insert a block of same-shaped packed arrays in one operation.
     ///
     /// `hashes[i]` is the content hash of `arrays[i]`; every array must share one
-    /// `(dtype, element_shape, length)` and the given `group` (the caller —
-    /// the buffered bulk-add — guarantees this by grouping). Hashes already
-    /// stored, and duplicates within the block, are written only once (content
-    /// addressing); the returned `Vec<bool>` is aligned to `hashes` and is `true`
-    /// for each input that this call physically wrote (so the caller can stage it
-    /// for rollback).
+    /// `(dtype, element_shape, length)` and the given `group` (the callers — the
+    /// bulk add and the store's write buffer — guarantee this by grouping).
+    /// Hashes already stored, and duplicates within the block, are written only
+    /// once (content addressing); the returned `Vec<bool>` is aligned to
+    /// `hashes` and is `true` for each input that this call physically wrote (so
+    /// the caller can stage it for rollback).
     ///
-    /// The default loops [`Self::put_array`] with `packed = true`. The on-disk
-    /// backend overrides it to create batch-sized datasets and fill whole chunks
-    /// with one timestamp-row write per chunk, avoiding the per-column
-    /// read-modify-write that the timestamp-major chunking imposes on single adds.
-    ///
-    /// `mode` carries the same meaning it has on [`Self::put_array`]. A
-    /// [`WriteMode::Deferred`] block joins the pending block for its pool rather
-    /// than claiming a dataset of its own, which is what lets a run of small
-    /// batches inside one transaction — a binding whose single add *is* a
-    /// one-item batch — coalesce into the dataset a single batch of them all
-    /// would have produced.
+    /// The default loops [`Self::put_array`] with [`ArrayLayout::Packed`]. The
+    /// on-disk backend overrides it to create batch-sized datasets and fill
+    /// whole chunks with one timestamp-row write per chunk, avoiding the
+    /// per-column read-modify-write that the timestamp-major chunking imposes on
+    /// single adds.
     fn put_packed_block(
         &mut self,
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
         group: PackGroup,
-        mode: WriteMode,
     ) -> Result<Vec<bool>> {
         hashes
             .iter()
             .zip(arrays)
-            .map(|(hash, data)| self.put_array(hash, data, group, ArrayLayout::Packed, mode))
+            .map(|(hash, data)| self.put_array(hash, data, group, ArrayLayout::Packed))
             .collect()
-    }
-
-    /// Write out everything a [`WriteMode::Deferred`] put buffered, so that
-    /// afterwards no array this backend holds is still in a pending location.
-    ///
-    /// Called by [`Self::flush`] (which must do this *first*, so the file flush
-    /// covers the blocks it writes) and by any read that needs a buffered array
-    /// to have a physical position. A backend that never buffers has nothing to
-    /// do, which is the default.
-    ///
-    /// Failure leaves the pending state intact and retryable: the transaction
-    /// that owns those writes is still open, and rolling it back must still find
-    /// its arrays to unwind.
-    fn materialize_pending(&self) -> Result<()> {
-        Ok(())
     }
 
     /// Fetch the full array for `hash`, decoding its bytes as `dtype`.
@@ -578,10 +529,6 @@ pub(crate) trait StorageBackend: Send + Sync {
     fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport>;
 
     /// Flush any in-memory state to disk (no-op for in-memory backends).
-    ///
-    /// Implementations that buffer deferred writes must call
-    /// [`Self::materialize_pending`] before flushing the file, so a flush is
-    /// still the point at which everything put so far is on disk.
     fn flush(&mut self) -> Result<()>;
 
     /// This file's generation stamp, pairing it with exactly one catalog.
@@ -642,23 +589,6 @@ pub(crate) trait StorageBackend: Send + Sync {
     fn compression(&self) -> Compression {
         Compression::None
     }
-
-    /// The byte budget the pending blocks of an open transaction are held to,
-    /// and through it the width one packed dataset reaches. See
-    /// [`Self::set_write_buffer_bytes`].
-    fn write_buffer_bytes(&self) -> usize {
-        MAX_PENDING_BYTES
-    }
-
-    /// Set that budget. Takes effect from the next deferred put; a buffer
-    /// already over the new figure is written out before this returns, so the
-    /// bound holds from the moment it is set rather than from the next add.
-    ///
-    /// A backend that does not buffer records the figure and never acts on it,
-    /// so a caller reads back what it set either way.
-    fn set_write_buffer_bytes(&mut self, _bytes: usize) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Reject a read whose caller-supplied dtype disagrees with one the backend
@@ -675,6 +605,28 @@ pub(crate) fn check_dtype(hash: &[u8; 32], stored: Dtype, requested: Dtype) -> R
         )));
     }
     Ok(())
+}
+
+/// The rows `range` of `array` (its first axis), as an array of the same
+/// dtype and element shape. Refuses a range outside the array.
+pub(crate) fn slice_rows(array: &TypedArray, range: Range<usize>) -> Result<TypedArray> {
+    let len = array.length();
+    if range.start > range.end || range.end > len {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "slice {range:?} out of bounds for length {len}"
+        )));
+    }
+    let row_bytes = array.element_shape().iter().product::<usize>() * array.dtype.size();
+    let bytes = array.bytes[range.start * row_bytes..range.end * row_bytes].to_vec();
+    let mut shape = array.shape.clone();
+    if let Some(first) = shape.first_mut() {
+        *first = range.end - range.start;
+    }
+    Ok(TypedArray {
+        dtype: array.dtype,
+        shape,
+        bytes,
+    })
 }
 
 /// Copy the contiguous block of `len` windows starting at `start` along

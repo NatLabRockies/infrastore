@@ -180,10 +180,9 @@ fn in_memory_persist_round_trip() {
 }
 
 /// Persisting an in-memory store must preserve each array's storage layout:
-/// dense forecasts and non-sequential series stay standalone (the forecast
-/// window read path rejects packed arrays), while `SingleTimeSeries` stays
-/// packed. Regression test: `persist_to` used to write every array packed,
-/// which broke `forecast_read` on the reopened store.
+/// dense forecasts and non-sequential series stay standalone, while
+/// `SingleTimeSeries` stays packed, and every read path — forecast window,
+/// static reader, whole series — works on the reopened store.
 #[test]
 fn in_memory_persist_preserves_forecast_window_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -367,8 +366,8 @@ fn compression_policies_round_trip() {
 
 /// A read-only open must not require write permission on either artifact:
 /// stores on read-only media (or shared, permission-locked deployments) must
-/// still be readable. Regression test: the array side used to open in append
-/// mode regardless of `read_only`, which failed on write-protected files.
+/// still be readable. The array side must honor `read_only` too, since an
+/// append-mode open fails on a write-protected file.
 #[test]
 fn read_only_open_works_on_write_protected_files() {
     let dir = tempfile::tempdir().unwrap();
@@ -996,10 +995,10 @@ fn non_sequential_persistent_round_trip() {
     assert!(store.verify_integrity().unwrap().ok());
 }
 
-/// A store written in an older on-disk format is rejected on open with a clear
-/// diagnostic, rather than being misread. `DATA_FORMAT_VERSION` is bumped only
-/// for backward-incompatible changes, so any mismatch means this build cannot
-/// read the file — there is no in-place upgrade.
+/// A store written in an older, incompatible on-disk format is rejected on open
+/// with a clear diagnostic, rather than being misread. A stamp below
+/// `MIN_UPGRADABLE_VERSION` marks a change no in-place upgrade can fix, so this
+/// build cannot read the file.
 #[test]
 fn opening_a_store_from_an_older_format_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
@@ -1153,8 +1152,8 @@ fn verify_integrity_reports_a_hash_mismatch_when_stored_bytes_are_corrupted() {
     // `verify_integrity` recomputes each array's content hash and compares it
     // with the hash recorded alongside it in the file. Perturbing one stored
     // element without touching the recorded hash is exactly the corruption the
-    // check exists to catch — and until now nothing anywhere produced a
-    // *failing* report, so the error-reporting path was untested.
+    // check exists to catch, and it is what drives the error-reporting path to
+    // produce a *failing* report.
     let (_dir, path, _key) = store_on_disk();
     let dataset = packed_data_variable(&path);
 
@@ -1185,12 +1184,11 @@ fn verify_integrity_reports_a_hash_mismatch_when_stored_bytes_are_corrupted() {
 
 #[test]
 fn verify_integrity_reports_a_catalog_hash_that_names_no_stored_array() {
-    // This was FINDING F3 (TEST_COVERAGE_PLAN.md §9): `verify_integrity` used to
-    // delegate straight to the storage backend, which walked only its own hash
-    // index, so a `data_hash` corrupted in the SQLite catalog went unreported
-    // even though every read of that key failed. The sweep is now driven from
-    // the catalog — the only half that records what an array's bytes mean — so
-    // the two artifacts are checked against each other.
+    // The sweep is driven from the catalog — the only half that records what an
+    // array's bytes mean — so the two artifacts are checked against each other.
+    // A sweep that walked only the storage backend's own hash index would leave
+    // a `data_hash` corrupted in the SQLite catalog unreported even though every
+    // read of that key fails.
     let (_dir, path, key) = store_on_disk();
 
     {
@@ -1214,8 +1212,8 @@ fn verify_integrity_reports_a_catalog_hash_that_names_no_stored_array() {
         "the diagnostic must name the array: {:?}",
         report.errors
     );
-    // And the key genuinely no longer resolves, which is what the report used
-    // to leave unsurfaced.
+    // And the key genuinely no longer resolves, which is what the report has to
+    // surface.
     assert!(
         store
             .read_by_id(key, infrastore_core::ReadWindow::full())
@@ -1258,9 +1256,9 @@ fn opening_a_store_whose_sqlite_half_is_missing_errors() {
     // The two files are one logical store, and the paired generation stamp is
     // what enforces it. A read-write open still *creates* the missing catalog,
     // but the fresh one is unstamped while the HDF5 half is stamped, so the pair
-    // is rejected. Before that check this read back as an empty store with the
-    // arrays sitting unreachable on disk — a torn artifact presenting itself as
-    // a valid, empty one.
+    // is rejected. Without that check this would read back as an empty store
+    // with the arrays sitting unreachable on disk — a torn artifact presenting
+    // itself as a valid, empty one.
     let (_dir, path, _key) = store_on_disk();
     std::fs::remove_file(sqlite_path_of(&path)).unwrap();
 
@@ -1340,11 +1338,11 @@ fn opening_a_directory_as_a_store_is_rejected() {
 #[test]
 fn opening_a_nonexistent_path_is_rejected_as_a_missing_file() {
     // Not merely "is_err": the *kind* of error is the point. Reachability is
-    // checked before the `storage_backend` attribute, because
-    // `is_hdf5_backend_file` answers `false` both for a file that is not a
-    // store and for a path where there is no file at all. Reported through the
-    // latter, a typo'd path came back as a netcdf-era store needing migration —
-    // advice about a file that does not exist.
+    // checked before the `storage_backend` attribute, because the backend sniff
+    // cannot tell a path with no file at all from a file that is not a store or
+    // will not open. Reported through the sniff, a typo'd path would come back
+    // with advice (not a store, release another process's lock) about a file
+    // that does not exist.
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("does_not_exist.h5");
 
@@ -1371,9 +1369,9 @@ fn opening_a_nonexistent_path_is_rejected_as_a_missing_file() {
 
 #[test]
 fn opening_a_store_from_a_newer_format_is_rejected() {
-    // The version check is exact equality in both directions: a store written
-    // by a *newer* build is just as unreadable as an older one, and must say so
-    // rather than being parsed hopefully.
+    // The version check rejects in both directions: a store written by a
+    // *newer* build is just as unreadable as one older than the upgradable
+    // floor, and must say so rather than being parsed hopefully.
     let (_dir, path, _key) = store_on_disk();
     set_format_attr(&path, "99.0.0");
 
@@ -1449,8 +1447,8 @@ fn the_format_check_runs_before_the_catalog_half_is_opened() {
     }
 
     // And the rejected open left no catalog behind: bailing before the catalog
-    // is touched means a bad path no longer creates an empty `.sqlite` beside
-    // the file it refused to open.
+    // is touched means a bad path does not create an empty `.sqlite` beside the
+    // file it refused to open.
     assert!(!sqlite_path_of(&path).exists());
 }
 
@@ -1593,12 +1591,11 @@ fn bulky_forecast(base: f64) -> Deterministic {
 
 #[test]
 fn compact_reports_the_shrink_a_caller_can_measure() {
-    // Regression: `compact` opens with a flush, and HDF5 *does* hand back
-    // blocks a removal freed at the end of the file, truncating as it flushes.
-    // Sizing the file after that flush credited the call with nothing for space
-    // it had just reclaimed — a report of 0 bytes on a file that visibly
-    // shrank. The report has to match what the caller sees: stat, compact,
-    // stat.
+    // `compact` opens with a flush, and HDF5 *does* hand back blocks a removal
+    // freed at the end of the file, truncating as it flushes. Sizing the file
+    // after that flush would credit the call with nothing for space it had just
+    // reclaimed — a report of 0 bytes on a file that visibly shrank. The report
+    // has to match what the caller sees: stat, compact, stat.
     //
     // The shape that produces it: a bulk-written packed pool (sized to the
     // batch, so a small hash companion) with the standalone forecast last in
@@ -1889,11 +1886,11 @@ fn repack_temp_of(h5: &std::path::Path) -> std::path::PathBuf {
 /// Compaction stages through a uniquely named sibling, so a leftover from an
 /// interrupted one neither blocks it nor gets written over.
 ///
-/// The staging name used to be a fixed `<store>.h5.repack`, which self-cleaned
-/// but meant two writers stage through one path — and the same fixed-name
-/// reasoning applied to `persist_to`, where nothing locks the destination at
-/// all. The trade for uniqueness is that an abandoned temp now survives:
-/// nothing can distinguish it from a concurrent staging still in flight.
+/// A fixed `<store>.h5.repack` would self-clean, but would make two writers stage
+/// through one path — and the same fixed-name reasoning applies to `persist_to`,
+/// where nothing locks the destination at all. The trade for uniqueness is that
+/// an abandoned temp survives: nothing can distinguish it from a concurrent
+/// staging still in flight.
 #[test]
 fn compact_stages_through_a_unique_temp_and_leaves_a_stale_one_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -1992,16 +1989,15 @@ fn compact_drops_a_dataset_the_catalog_does_not_reference() {
 }
 
 /// A file that will not open is not the same complaint as a file of the wrong
-/// kind, and only one of them warrants "re-create the store".
+/// kind.
 ///
-/// Both used to arrive as `false` from a boolean sniff, so a store another
-/// process was holding — HDF5 takes an exclusive lock on one it is writing, and
-/// does not set `O_CLOEXEC`, so even an unrelated forked child can keep one
-/// alive — was reported as a netcdf-era artifact needing migration. That is
-/// advice to destroy a perfectly healthy store, given for a condition that
-/// clears on its own.
+/// A boolean sniff would answer `false` for both, so a store another process is
+/// holding — HDF5 takes an exclusive lock on one it is writing, and does not set
+/// `O_CLOEXEC`, so even an unrelated forked child can keep one alive — would be
+/// reported as not being a store at all. That is wrong about a perfectly healthy
+/// store, for a condition that clears on its own.
 #[test]
-fn a_file_that_will_not_open_is_not_reported_as_a_store_needing_migration() {
+fn a_file_that_will_not_open_is_not_reported_as_a_foreign_file() {
     let dir = tempfile::tempdir().unwrap();
     let rubbish = dir.path().join("rubbish.h5");
     std::fs::write(&rubbish, b"certainly not hdf5").unwrap();
@@ -2015,8 +2011,8 @@ fn a_file_that_will_not_open_is_not_reported_as_a_store_needing_migration() {
         "say what actually happened: {message}"
     );
     assert!(
-        !message.contains("re-create the store"),
-        "and do not tell the user to destroy it: {message}"
+        !message.contains("is not an infrastore hdf5 store"),
+        "and do not call it a foreign file: {message}"
     );
     // libhdf5's own diagnostic is carried through, which is what names the real
     // cause -- a lock, a truncation, a permission problem.
@@ -2031,9 +2027,8 @@ fn a_file_that_will_not_open_is_not_reported_as_a_store_needing_migration() {
         "point at the likely cause: {message}"
     );
 
-    // The migration advice still reaches the case it belongs to: a real HDF5
-    // file without our root attribute, which is the shape a netcdf-era store
-    // has.
+    // The foreign-file message still reaches the case it belongs to: a real
+    // HDF5 file without our root attribute.
     let foreign = dir.path().join("foreign.h5");
     hdf5_metno::File::create(&foreign).unwrap();
     let Err(err) = open_store(foreign.as_path(), true) else {
@@ -2044,7 +2039,7 @@ fn a_file_that_will_not_open_is_not_reported_as_a_store_needing_migration() {
         message.contains("is not an infrastore hdf5 store"),
         "{message}"
     );
-    assert!(message.contains("netcdf"), "{message}");
+    assert!(message.contains("storage_backend"), "{message}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2113,9 +2108,9 @@ fn a_shared_time_axis_is_one_i64_dataset_in_the_array_file() {
     let expected: Vec<i64> = stamps.iter().map(|t| t.timestamp_millis()).collect();
     assert_eq!(millis, expected);
 
-    // Nothing of the vector is in the catalog: the column that used to resolve
-    // into a `timestamp_sets` table is a bare locator now, and that table is
-    // gone.
+    // Nothing of the vector is in the catalog: the row's `timestamps_hash` is a
+    // bare locator, and there is no `timestamp_sets` table for it to resolve
+    // into.
     let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
