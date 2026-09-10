@@ -1106,7 +1106,10 @@ row-major, little-endian bytes. Little-endian describes the buffer, not the HDF5
 datasets record their own byte order.
 
 ```rust
-pub enum Dtype { F64, F32, I64, I32, U64, Bool }   // codes 0..=5; size() = 8/4/8/4/8/1
+pub enum Dtype {
+    F64, F32, I64, I32, U64, Bool,   // codes 0..=5;  size() = 8/4/8/4/8/1
+    I16, I8, U32, U16, U8,           // codes 6..=10; size() = 2/1/4/2/1
+}
 
 pub struct TypedArray {
     pub dtype: Dtype,

@@ -481,7 +481,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         actual_steps,
         storage_label(c),
     );
-    println!("  total get_time_series calls: {}", c.count * actual_steps);
+    println!("  total component reads: {}", c.count * actual_steps);
     if !c.in_memory {
         println!("  (store reopened read-only between write and read phases)");
     }
@@ -539,7 +539,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         actual_steps,
         storage_label(c),
     );
-    println!("  total get_time_series calls: {}", c.count * actual_steps);
+    println!("  total component reads: {}", c.count * actual_steps);
     println!(
         "  note: each call fetches the full [{}×{}] array from storage, then slices to 1 window",
         DET_HORIZON_H, c.length,

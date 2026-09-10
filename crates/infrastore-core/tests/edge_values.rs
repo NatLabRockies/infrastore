@@ -1026,8 +1026,7 @@ fn feature_value_equality_hashing_and_ordering_agree() {
     // its bit pattern, and that hash is what the uniqueness index keys on. A
     // derived `PartialEq` would give IEEE semantics instead, so `0.0 == -0.0`
     // would compare equal while hashing differently — breaking the `Hash`
-    // contract all the way up through `Features`, `KeyIdentity` and
-    // `TimeSeriesId`.
+    // contract all the way up through `Features` and `KeyIdentity`.
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
