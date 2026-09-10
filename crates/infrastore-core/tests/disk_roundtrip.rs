@@ -570,8 +570,8 @@ fn spill_into_new_dataset_past_capacity() {
     let path = dir.path().join("store.h5");
 
     // Need DEFAULT + 1 distinct arrays of identical (length, resolution) so they
-    // compete for the same dataset family. Single `add_time_series` calls take the
-    // per-column path, which packs into a shared default-width dataset and spills
+    // compete for the same dataset family. A single `add_time_series` fills a slot
+    // of a shared default-width dataset, which spills
     // once it fills. (A managed bulk batch would instead create one batch-sized
     // dataset and not spill.) To keep the test fast we use small length=4.
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

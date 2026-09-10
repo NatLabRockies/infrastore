@@ -2980,8 +2980,8 @@ mod tests {
 
     /// More than DEFAULT_COLS_PER_DATASET series in one group spill into a second
     /// packed dataset; the row read must gather across the dataset boundary.
-    /// Single `add_time_series` calls take the per-column path, which packs into a
-    /// shared default-width dataset and spills once full (a managed bulk batch
+    /// A single `add_time_series` fills a slot of a shared default-width dataset,
+    /// which spills once full (a managed bulk batch
     /// would instead size one dataset to the batch).
     #[test]
     fn static_reader_spans_spilled_datasets() {
