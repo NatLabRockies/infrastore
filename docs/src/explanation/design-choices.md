@@ -158,6 +158,14 @@ the growth pool's thousand columns because a bulk add inside a transaction is bu
 narrower cap gave it ten times the datasets — and a columnar read ten times the chunks — of the same
 add outside one.
 
+One failure the mechanism cannot see coming is SQLite ending the transaction itself: a statement
+that fails on a full disk or an I/O error can roll the whole transaction back, savepoints included,
+and the store's bookkeeping does not learn of it. So the store reads it off the connection after the
+fact — nesting levels still recorded while the connection is back in autocommit — and from then on
+refuses every write and the commit until `rollback_transaction` discards the dead transaction, every
+level at once. The alternative, letting the next write open an implicit transaction of its own and
+commit on its own, would make part of the span durable behind the caller's back.
+
 The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
 until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy
 timeout. The buffer holds its not-yet-written arrays in memory — the same memory the equivalent bulk

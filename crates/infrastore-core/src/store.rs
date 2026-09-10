@@ -949,20 +949,22 @@ struct OpenTxn {
     /// What this transaction physically wrote, in write order. Removed on
     /// rollback — unreachable once the catalog rolls back, and leaving it would
     /// orphan bytes no association references.
-    written: StagedWrites,
+    written: FileObjects,
     /// What removals inside this transaction left unreferenced. The free is
     /// deferred to the outermost commit: while the transaction is open the
     /// bytes must survive, because a rollback restores the catalog rows that
     /// point at them.
-    pending_free: StagedWrites,
+    pending_free: FileObjects,
 }
 
-/// A set of arrays and explicit time axes in the array file: what one write
-/// call physically put there, what a transaction wrote, or what a removal left
-/// unreferenced.
+/// A set of objects in the array file — arrays and explicit time axes — named
+/// by content hash. The type carries no role of its own; the binding that
+/// holds one does: `staged` is what one write call physically put there,
+/// `written` what a transaction has, `pending_free` and `garbage` what a
+/// removal left unreferenced.
 ///
-/// The two are kept apart because liveness is a different question for each:
-/// an array is referenced through `data_hash`, an axis through
+/// The two kinds are kept apart because liveness is a different question for
+/// each: an array is referenced through `data_hash`, an axis through
 /// `timestamps_hash`.
 ///
 /// For a write, only what the call *wrote* is recorded. Content addressing
@@ -970,12 +972,12 @@ struct OpenTxn {
 /// of those would delete data the call did not create — so both backends
 /// report whether a put was a write, and only those land here.
 #[derive(Debug, Default)]
-struct StagedWrites {
+struct FileObjects {
     arrays: Vec<[u8; 32]>,
     timestamps: Vec<[u8; 32]>,
 }
 
-impl StagedWrites {
+impl FileObjects {
     fn is_empty(&self) -> bool {
         self.arrays.is_empty() && self.timestamps.is_empty()
     }
@@ -988,20 +990,20 @@ impl StagedWrites {
     }
 
     /// Everything recorded since `mark`, taken out of `self`.
-    fn split_off(&mut self, mark: Mark) -> StagedWrites {
-        StagedWrites {
+    fn split_off(&mut self, mark: Mark) -> FileObjects {
+        FileObjects {
             arrays: self.arrays.split_off(mark.arrays),
             timestamps: self.timestamps.split_off(mark.timestamps),
         }
     }
 
-    fn append(&mut self, other: StagedWrites) {
+    fn append(&mut self, other: FileObjects) {
         self.arrays.extend(other.arrays);
         self.timestamps.extend(other.timestamps);
     }
 }
 
-/// How much of each [`StagedWrites`] list belonged to the enclosing nesting
+/// How much of each [`FileObjects`] list belonged to the enclosing nesting
 /// level. See [`OpenTxn::marks`].
 #[derive(Debug, Clone, Copy)]
 struct Mark {
@@ -1032,12 +1034,12 @@ fn unreferenced_in(
 
 /// The part of `candidates` the catalog no longer references, both kinds
 /// counted in one savepoint against the catalog as the caller has just left it.
-fn unreferenced(metadata: &mut MetadataStore, candidates: &StagedWrites) -> Result<StagedWrites> {
+fn unreferenced(metadata: &mut MetadataStore, candidates: &FileObjects) -> Result<FileObjects> {
     if candidates.is_empty() {
-        return Ok(StagedWrites::default());
+        return Ok(FileObjects::default());
     }
     let tx = metadata.savepoint()?;
-    let out = StagedWrites {
+    let out = FileObjects {
         arrays: unreferenced_in(&tx, &candidates.arrays, references_to_in_tx)?,
         timestamps: unreferenced_in(&tx, &candidates.timestamps, timestamp_references_in_tx)?,
     };
@@ -1647,6 +1649,23 @@ impl Store {
     /// Calls nest: an inner [`Self::begin_transaction`] opens a nested savepoint,
     /// and only the outermost commit makes anything durable.
     ///
+    /// # Abandoning one
+    ///
+    /// Dropping the store with a transaction open rolls the catalog back
+    /// (SQLite does that when the connection closes) and discards the arrays
+    /// the write buffer was holding, whose rows go with the catalog. What the
+    /// span had already written to the file stays as orphans for
+    /// [`Self::compact`] to reclaim. Nothing it did becomes visible.
+    ///
+    /// SQLite can also end a transaction on its own: a statement failing with
+    /// `SQLITE_FULL`, `SQLITE_IOERR`, `SQLITE_NOMEM`, `SQLITE_BUSY`, or
+    /// `SQLITE_INTERRUPT` may roll the whole transaction back, every nesting
+    /// level included. The failing call reports its error as usual, and from
+    /// then on every write and [`Self::commit_transaction`] refuse with
+    /// [`TimeSeriesError::InvalidParameter`] until [`Self::rollback_transaction`]
+    /// is called, which discards the dead transaction whole — an enclosing
+    /// level's own rollback then finds no transaction open.
+    ///
     /// # Cost
     ///
     /// A transaction is how a caller adding many series amortizes the per-add
@@ -1708,6 +1727,7 @@ impl Store {
     ///
     /// [`TimeSeriesError::ReadOnlyStore`] if the store is read-only.
     pub fn begin_transaction(&mut self) -> Result<()> {
+        self.check_transaction_alive()?;
         let depth = self.txn.marks.len();
         // Refuses a read-only store.
         self.metadata
@@ -1727,9 +1747,13 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`TimeSeriesError::InvalidParameter`] if no transaction is open.
+    /// [`TimeSeriesError::InvalidParameter`] if no transaction is open, or if
+    /// SQLite has already rolled the open one back (see
+    /// [`Self::begin_transaction`]); the latter is cleared by
+    /// [`Self::rollback_transaction`].
     pub fn commit_transaction(&mut self) -> Result<()> {
         let level = self.innermost_level()?;
+        self.check_transaction_alive()?;
         if level > 0 {
             // The level's writes survive into the enclosing one, so its mark is
             // simply dropped rather than acted on.
@@ -1742,14 +1766,32 @@ impl Store {
         // `flush_before_commit`, which deferred to here. Everything up to the
         // release leaves the bookkeeping in place, so a failure there leaves a
         // transaction the caller can commit again or roll back.
-        self.flush_arrays()?;
-        // Decide what to free *before* releasing, while the transaction's view of
-        // the catalog is still the one the commit is about to make permanent.
+        //
+        // What to free is decided first: against the transaction's view of the
+        // catalog, which is the one the release is about to make permanent,
+        // and before the flush, so an array the span both wrote and orphaned
+        // is not written out only to be removed again.
         let garbage = unreferenced(&mut self.metadata, &self.txn.pending_free)?;
+        // A span that wrote nothing to the file — catalog work only, or adds
+        // of arrays the store already held — owes it no flush. The buffer only
+        // ever holds a subset of `written`, so it is empty then too.
+        if !self.txn.written.is_empty() {
+            // The garbage stays buffered rather than being dropped: until the
+            // release lands the transaction can still fail and be rolled back,
+            // which restores the rows that name it.
+            let skip: HashSet<[u8; 32]> = garbage.arrays.iter().copied().collect();
+            self.write_buffer
+                .write_all_except(&skip, &mut *self.backend)?;
+            self.backend.flush()?;
+        }
         self.metadata
             .execute_txn_stmt(&format!("RELEASE {};", Self::txn_savepoint(level)))?;
         self.txn = OpenTxn::default();
         self.remove_writes(&garbage);
+        debug_assert!(
+            self.write_buffer.is_empty(),
+            "the write buffer belongs to the transaction and must not outlive it"
+        );
         tracing::debug!(
             freed = garbage.arrays.len(),
             axes_freed = garbage.timestamps.len(),
@@ -1768,11 +1810,25 @@ impl Store {
     /// retry, which would roll back the *enclosing* level. The leftovers are
     /// orphans [`Self::compact`] reclaims.
     ///
+    /// A transaction SQLite has already rolled back on its own (see
+    /// [`Self::begin_transaction`]) is discarded whole here, every level at
+    /// once, since none of it exists any more; this is the one call that
+    /// clears that state.
+    ///
     /// # Errors
     ///
     /// [`TimeSeriesError::InvalidParameter`] if no transaction is open.
     pub fn rollback_transaction(&mut self) -> Result<()> {
         let level = self.innermost_level()?;
+        if self.transaction_was_forced_back() {
+            let txn = std::mem::take(&mut self.txn);
+            tracing::warn!(
+                levels = txn.marks.len(),
+                "transaction had been rolled back by SQLite; discarding it"
+            );
+            self.unwind_written(txn.written);
+            return Ok(());
+        }
         let name = Self::txn_savepoint(level);
         // ROLLBACK TO rewinds to the savepoint but leaves it on the stack, so it
         // must be released to actually pop this nesting level.
@@ -1787,39 +1843,41 @@ impl Store {
         }
         // The catalog has unwound this level, so what it wrote is unreachable
         // and must go now: an outer commit only ever looks at `pending_free`
-        // and would strand it in the file. `unreferenced` rechecks each one
-        // rather than trusting the list, so a hash that predates this level,
-        // or that an enclosing level also wrote, is kept.
-        match unreferenced(&mut self.metadata, &written) {
-            Ok(garbage) => {
-                self.remove_writes(&garbage);
-                tracing::debug!(
-                    level,
-                    removed = garbage.arrays.len(),
-                    axes_removed = garbage.timestamps.len(),
-                    "transaction rolled back"
-                );
-            }
-            Err(e) => {
-                // Without the counts nothing is removed from the file — an
-                // orphan there is `compact`'s. The buffer is another matter: an
-                // array left in it outlives the transaction, and a later add of
-                // the same hash would take it as stored, skip the flush, and
-                // commit a row whose bytes exist only in RAM. Every array this
-                // level buffered is one only its own, now unwound, rows named —
-                // anything older was already held and never staged — so they go
-                // without a count.
-                for hash in &written.arrays {
-                    self.write_buffer.remove(hash);
-                }
-                tracing::warn!(
-                    level,
-                    error = %e,
-                    "transaction rolled back; could not decide which of its writes to remove"
-                );
-            }
-        }
+        // and would strand it in the file.
+        self.unwind_written(written);
+        tracing::debug!(level, "transaction rolled back");
         Ok(())
+    }
+
+    /// Remove what a rolled-back level wrote from the array file and the write
+    /// buffer.
+    ///
+    /// Nothing older than the level can name any of it: a hash lands in a
+    /// level's `written` only if neither the buffer nor the file held it when
+    /// the level put it, and every row inserted since is one the rollback has
+    /// just unwound. The buffered arrays go on that argument alone — and must,
+    /// because one left behind outlives the transaction, and a later add of
+    /// the same hash would take it as stored, skip the flush, and commit a row
+    /// whose bytes exist only in RAM. The ones already in the file are counted
+    /// against the catalog first anyway: deleting is irreversible and the count
+    /// is a few indexed lookups. A count that cannot be had leaves them in the
+    /// file as orphans for `compact`.
+    fn unwind_written(&mut self, mut written: FileObjects) {
+        written
+            .arrays
+            .retain(|hash| !self.write_buffer.remove(hash));
+        match unreferenced(&mut self.metadata, &written) {
+            Ok(garbage) => self.remove_writes(&garbage),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not decide which of a rolled-back transaction's writes to remove; \
+                 left in the file for compaction"
+            ),
+        }
+        debug_assert!(
+            self.in_transaction() || self.write_buffer.is_empty(),
+            "the write buffer belongs to the transaction and must not outlive it"
+        );
     }
 
     /// Refuse `action` while a transaction is open: the file operations that
@@ -1830,6 +1888,30 @@ impl Store {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "cannot {action} while a transaction is open; commit or roll back first"
             )));
+        }
+        Ok(())
+    }
+
+    /// Whether the open transaction is one SQLite has already rolled back on
+    /// its own (see [`Self::begin_transaction`]). Nothing here sees that
+    /// happen, so it is read off the connection after the fact: marks still
+    /// standing while the connection is back in autocommit.
+    fn transaction_was_forced_back(&self) -> bool {
+        self.in_transaction() && self.metadata.in_autocommit()
+    }
+
+    /// Refuse to open a transaction or write while the open transaction is one
+    /// SQLite has rolled back. A write would land in an implicit transaction of
+    /// its own and commit on its own, outside the span the caller believes is
+    /// open; only [`Self::rollback_transaction`] clears the state.
+    fn check_transaction_alive(&self) -> Result<()> {
+        if self.transaction_was_forced_back() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "the open transaction was rolled back by SQLite after a failed statement, so \
+                 nothing it did remains; call rollback_transaction to discard it before \
+                 writing again"
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -1852,7 +1934,7 @@ impl Store {
     /// catalog rolls itself back through the savepoint's `Drop`, and the file
     /// has no transaction to enlist, so the unwinding has to be explicit and has
     /// to cover the `?` exits.
-    fn settle<T>(&mut self, staged: StagedWrites, result: Result<T>) -> Result<T> {
+    fn settle<T>(&mut self, staged: FileObjects, result: Result<T>) -> Result<T> {
         match result {
             Ok(value) => {
                 // Outside a transaction there is nothing to hand them to: the
@@ -1873,7 +1955,7 @@ impl Store {
     /// outermost commit when a transaction is open — while it is, a rollback can
     /// still restore the rows that reference those bytes, so they have to
     /// survive.
-    fn free_or_defer(&mut self, garbage: StagedWrites) {
+    fn free_or_defer(&mut self, garbage: FileObjects) {
         if self.in_transaction() {
             self.txn.pending_free.append(garbage);
         } else {
@@ -1888,7 +1970,7 @@ impl Store {
     /// already failing with its own error — so a removal failure cannot change
     /// the outcome, and reporting it would misreport that outcome. What is left
     /// behind is an orphan, which `compact` reclaims.
-    fn remove_writes(&mut self, writes: &StagedWrites) {
+    fn remove_writes(&mut self, writes: &FileObjects) {
         let failed = writes
             .arrays
             .iter()
@@ -1915,6 +1997,7 @@ impl Store {
         &mut self,
         write: impl FnOnce(&rusqlite::Connection) -> Result<T>,
     ) -> Result<T> {
+        self.check_transaction_alive()?;
         let tx = self.metadata.savepoint()?;
         let out = write(&tx)?;
         tx.commit()?;
@@ -2309,7 +2392,7 @@ impl Store {
     /// this call stored are removed again (see [`Self::settle`]).
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     fn add_requests(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesId>> {
-        let mut staged = StagedWrites::default();
+        let mut staged = FileObjects::default();
         let result = self.add_requests_staged(&items, &mut staged);
         self.settle(staged, result)
     }
@@ -2321,11 +2404,12 @@ impl Store {
     fn add_requests_staged(
         &mut self,
         items: &[AddRequest],
-        staged: &mut StagedWrites,
+        staged: &mut FileObjects,
     ) -> Result<Vec<TimeSeriesId>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
+        self.check_transaction_alive()?;
         if items.is_empty() {
             return Ok(Vec::new());
         }
@@ -2541,7 +2625,7 @@ impl Store {
             // are counted after them too, so a hash referenced only by other
             // rows removed in the same batch is reclaimed as well.
             Self::check_no_orphaned_dst(tx, removed_sts)?;
-            let garbage = StagedWrites {
+            let garbage = FileObjects {
                 arrays: unreferenced_in(tx, &removed_hashes, references_to_in_tx)?,
                 timestamps: Vec::new(),
             };
@@ -2603,7 +2687,7 @@ impl Store {
             tracing::warn!(error = %e, "cleared time series; time axes left for compaction");
             Vec::new()
         });
-        self.free_or_defer(StagedWrites { arrays, timestamps });
+        self.free_or_defer(FileObjects { arrays, timestamps });
         Ok(count)
     }
 
@@ -5767,7 +5851,7 @@ fn stage_timestamp_vector(
     group: PackGroup,
     timestamps: Option<&[chrono::DateTime<chrono::Utc>]>,
     seen: &mut SharedSetCache,
-    staged: &mut StagedWrites,
+    staged: &mut FileObjects,
 ) -> Result<()> {
     let (PackGroup::Irregular(hash), Some(timestamps)) = (group, timestamps) else {
         return Ok(());
@@ -6051,7 +6135,7 @@ fn merge_breakpoints(
 /// *did* write still flushes — that is the guarantee above, and the way to
 /// amortize it across many writes is [`Store::begin_transaction`] or a bulk
 /// add, both of which flush once for the whole span.
-fn flush_before_commit(backend: &mut dyn StorageBackend, staged: &StagedWrites) -> Result<()> {
+fn flush_before_commit(backend: &mut dyn StorageBackend, staged: &FileObjects) -> Result<()> {
     if staged.is_empty() {
         return Ok(());
     }
@@ -7563,5 +7647,87 @@ mod pending_format_upgrade_tests {
             store.persist_catalog().expect("persist catalog");
         });
         assert_eq!(stamp_of(&path), CUR);
+    }
+}
+
+#[cfg(test)]
+mod forced_rollback_tests {
+    //! A transaction SQLite ends on its own — a statement failing with
+    //! `SQLITE_FULL` or an I/O error can roll the whole thing back, savepoints
+    //! included — leaves the store's marks standing on a connection back in
+    //! autocommit. The store has to notice, refuse to write until the caller
+    //! discards the dead transaction, and come out usable. A bare `ROLLBACK`
+    //! on the connection stands in for the disk filling up: it takes the
+    //! transaction down the same way.
+
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    fn add(store: &mut Store, owner: i64, base: f64) -> Result<TimeSeriesId> {
+        let vals: Vec<f64> = (0..8).map(|i| base + i as f64).collect();
+        store.add_time_series(
+            owner,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+                Duration::hours(1),
+                TypedArray::from_f64(vec![8], &vals),
+                "load",
+            )),
+            Features::new(),
+        )
+    }
+
+    fn refused<T>(result: Result<T>) -> bool {
+        matches!(result, Err(TimeSeriesError::InvalidParameter(_)))
+    }
+
+    fn count(store: &Store) -> usize {
+        store.list_metadata(ListFilter::new()).unwrap().len()
+    }
+
+    #[test]
+    fn a_transaction_sqlite_rolled_back_is_refused_until_rolled_back() {
+        let mut store = Store::create(None, true).unwrap();
+        store.begin_transaction().unwrap();
+        add(&mut store, 1, 0.0).unwrap();
+        store.begin_transaction().unwrap();
+        add(&mut store, 2, 100.0).unwrap();
+        assert!(!store.write_buffer.is_empty(), "the adds are buffered");
+
+        store.metadata.execute_txn_stmt("ROLLBACK;").unwrap();
+        assert!(store.in_transaction(), "the marks still stand");
+        assert_eq!(count(&store), 0, "the catalog has already unwound");
+
+        // Every write is refused, and so is nesting or committing: any of them
+        // would land in an implicit transaction of its own and commit behind
+        // the caller's back.
+        assert!(refused(add(&mut store, 3, 200.0)));
+        assert!(refused(store.set_store_attribute("k", "v")));
+        assert!(refused(store.begin_transaction()));
+        assert!(refused(store.commit_transaction()));
+        assert!(store.in_transaction(), "commit does not clear it");
+        assert!(
+            !store.write_buffer.is_empty(),
+            "nor does it drop the buffer"
+        );
+
+        // Rollback discards every level at once and drops what was buffered.
+        store.rollback_transaction().unwrap();
+        assert!(!store.in_transaction());
+        assert!(store.write_buffer.is_empty());
+        assert!(
+            refused(store.rollback_transaction()),
+            "nothing is left open"
+        );
+
+        // And the store is a store again.
+        add(&mut store, 3, 200.0).unwrap();
+        assert_eq!(count(&store), 1);
+        store.begin_transaction().unwrap();
+        add(&mut store, 4, 300.0).unwrap();
+        store.commit_transaction().unwrap();
+        assert_eq!(count(&store), 2);
     }
 }

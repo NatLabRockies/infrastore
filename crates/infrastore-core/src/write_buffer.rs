@@ -244,8 +244,24 @@ impl WriteBuffer {
     /// Write every block. Stops at the first failure with the rest of the
     /// buffer intact, for the reason [`Self::write_block`] gives.
     pub(crate) fn write_all(&mut self, backend: &mut dyn StorageBackend) -> Result<()> {
-        while let Some(key) = self.blocks.keys().next().cloned() {
-            self.write_block(&key, backend)?;
+        self.write_all_except(&HashSet::new(), backend)
+    }
+
+    /// [`Self::write_all`], leaving the arrays in `skip` buffered.
+    ///
+    /// For a commit that has already decided to remove them: writing one would
+    /// only be undone, and leaving it out keeps a removed column out of its
+    /// block's width. They stay *buffered* rather than being dropped because
+    /// the commit can still fail after this and be rolled back, to a state
+    /// whose rows name them.
+    pub(crate) fn write_all_except(
+        &mut self,
+        skip: &HashSet<[u8; 32]>,
+        backend: &mut dyn StorageBackend,
+    ) -> Result<()> {
+        let keys: Vec<PoolKey> = self.blocks.keys().cloned().collect();
+        for key in &keys {
+            self.write_block_except(key, skip, backend)?;
         }
         Ok(())
     }
@@ -297,24 +313,57 @@ impl WriteBuffer {
     /// owns these writes is still open, and both committing again and rolling
     /// back have to be able to find them.
     fn write_block(&mut self, key: &PoolKey, backend: &mut dyn StorageBackend) -> Result<()> {
+        self.write_block_except(key, &HashSet::new(), backend)
+    }
+
+    /// [`Self::write_block`] for the block's arrays outside `skip`; the rest
+    /// stay buffered as the pool's block, in their original relative order.
+    /// The block-of-one rule is settled on what is written, so a pair whose
+    /// other half is skipped fills a growth-pool slot.
+    fn write_block_except(
+        &mut self,
+        key: &PoolKey,
+        skip: &HashSet<[u8; 32]>,
+        backend: &mut dyn StorageBackend,
+    ) -> Result<()> {
         let Some(block) = self.blocks.remove(key) else {
             return Ok(());
         };
         self.bytes = self.bytes.saturating_sub(block.bytes);
-        let arrays: Vec<&TypedArray> = block.arrays.iter().collect();
-        match put_block(backend, &block.hashes, &arrays, key.3) {
-            Ok(_) => {
-                for hash in &block.hashes {
-                    self.by_hash.remove(hash);
-                }
-                Ok(())
-            }
-            Err(e) => {
-                self.bytes += block.bytes;
-                self.blocks.insert(key.clone(), block);
-                Err(e)
+        let mut hashes = Vec::with_capacity(block.hashes.len());
+        let mut arrays = Vec::with_capacity(block.hashes.len());
+        for (hash, array) in block.hashes.iter().zip(&block.arrays) {
+            if !skip.contains(hash) {
+                hashes.push(*hash);
+                arrays.push(array);
             }
         }
+        let outcome = if hashes.is_empty() {
+            Ok(())
+        } else {
+            put_block(backend, &hashes, &arrays, key.3).map(drop)
+        };
+        if let Err(e) = outcome {
+            self.bytes += block.bytes;
+            self.blocks.insert(key.clone(), block);
+            return Err(e);
+        }
+        let mut kept = Block::default();
+        for (hash, array) in block.hashes.into_iter().zip(block.arrays) {
+            if skip.contains(&hash) {
+                self.by_hash.insert(hash, (key.clone(), kept.hashes.len()));
+                kept.bytes += array.bytes.len();
+                kept.hashes.push(hash);
+                kept.arrays.push(array);
+            } else {
+                self.by_hash.remove(&hash);
+            }
+        }
+        if !kept.hashes.is_empty() {
+            self.bytes += kept.bytes;
+            self.blocks.insert(key.clone(), kept);
+        }
+        Ok(())
     }
 
     /// Write out whole blocks, widest first, until the buffer is back inside

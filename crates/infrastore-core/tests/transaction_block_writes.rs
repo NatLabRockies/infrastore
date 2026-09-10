@@ -348,6 +348,43 @@ fn a_transaction_around_one_add_fills_a_slot_rather_than_sizing_a_dataset() {
     assert!(store.verify_integrity().unwrap().ok());
 }
 
+/// An array a span both adds and removes is never written: the commit decides
+/// what to free before it flushes, and leaves the doomed array out of its
+/// block. What remains is a block of one, so it fills a growth-pool slot — the
+/// file the surviving add alone would have written — rather than a two-column
+/// dataset with one column zeroed.
+#[test]
+fn an_array_added_and_removed_in_one_span_stays_out_of_the_block() {
+    use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("added_and_removed.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add(request(1, 100.0)).unwrap();
+        let doomed = store.add(request(2, 200.0)).unwrap();
+        store.remove_by_ids(&[doomed]).unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    assert_eq!(
+        packed_layout(&path),
+        BTreeMap::from([(
+            "sts_f64_s_24_PT1H".to_string(),
+            (
+                vec![24, DEFAULT_COLS_PER_DATASET],
+                Some(vec![5, DEFAULT_COLS_PER_DATASET])
+            )
+        )]),
+        "the survivor is a block of one and fills a slot"
+    );
+    let store = open_store(&path, true).unwrap();
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
+    assert_eq!(first_value(&store, 1), 100.0);
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
 /// The twelve-point event timeline every irregular series below shares, so they
 /// all land in one [`PackGroup::Irregular`] cohort.
 fn axis() -> Vec<DateTime<Utc>> {
