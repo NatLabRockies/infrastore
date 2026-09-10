@@ -1100,8 +1100,10 @@ differently in a differently-shaped series. That is the storage layout, not a pr
 
 ### `TypedArray` and `Dtype`
 
-The storage array type: an element `dtype`, an N-dimensional `shape` `[length, k1, k2, …]` (first
-axis time, trailing axes the per-step element shape), and raw row-major, little-endian bytes.
+The array type every read and write carries: an element `dtype`, an N-dimensional `shape`
+`[length, k1, k2, …]` (first axis time, trailing axes the per-step element shape), and raw
+row-major, little-endian bytes. Little-endian describes the buffer, not the HDF5 file, whose
+datasets record their own byte order.
 
 ```rust
 pub enum Dtype { F64, F32, I64, I32, U64, Bool }   // codes 0..=5; size() = 8/4/8/4/8/1

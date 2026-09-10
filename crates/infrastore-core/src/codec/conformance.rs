@@ -159,9 +159,9 @@ pub fn vectors() -> Vec<ConformanceVector> {
             ]),
         ),
         // `Scenarios` shares `Probabilistic`'s three leading axes but names a
-        // different leading dimension, and no vector covered it. Paired with a
-        // fixed-width kind, so a binding cannot pass it by treating the last
-        // axis as ragged.
+        // different leading dimension, so it gets a vector of its own. Paired
+        // with a fixed-width kind, so a binding cannot pass it by treating the
+        // last axis as ragged.
         vector(
             "quadratic_function_scenarios",
             ElementType::QuadraticFunction,

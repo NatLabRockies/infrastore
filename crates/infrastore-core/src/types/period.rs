@@ -3,9 +3,9 @@
 //! [`Period`] is the core's representation of a `resolution`, `horizon`, or
 //! `interval`. It distinguishes two kinds of period:
 //!
-//! - **regular** ([`Period::Fixed`]) — a fixed nanosecond span (`Hour`,
-//!   `Minute`, `Day`, `Week`), backed by a [`chrono::Duration`]. Arithmetic is
-//!   ordinary duration math.
+//! - **regular** ([`Period::Fixed`]) — a fixed span (`Hour`, `Minute`, `Day`,
+//!   `Week`), backed by a [`chrono::Duration`]. Arithmetic is ordinary
+//!   duration math.
 //! - **irregular** ([`Period::Months`]) — a count of calendar months (a
 //!   `Month` is 1, a `Quarter` is 3, a `Year` is 12). A calendar month has no
 //!   fixed span, so arithmetic goes through chrono's calendar-aware
@@ -69,7 +69,8 @@ const MS_PER_WEEK: i64 = 604_800_000;
 /// distinction and equality semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Period {
-    /// A fixed nanosecond span (`Hour`, `Minute`, `Day`, `Week`, …).
+    /// A fixed span (`Hour`, `Minute`, `Day`, `Week`, …), counted in whole
+    /// milliseconds.
     Fixed(Duration),
     /// A count of calendar months (`Month` = 1, `Quarter` = 3, `Year` = 12).
     Months(i32),
@@ -678,8 +679,6 @@ fn months_between(start: DateTime<Utc>, at: DateTime<Utc>) -> i64 {
     year * 12 + month
 }
 
-/// Split an ISO-8601 component run (e.g. `"1Y6M"` or `"1.5S"`) into
-/// `(number, unit)` pairs. Returns `None` on malformed input.
 /// Accumulate a checked-multiply result into a running total, failing the parse
 /// on overflow rather than wrapping. Used for both accumulators: the fixed
 /// millisecond count and the calendar month count.
@@ -697,6 +696,8 @@ fn add_component(
         .ok_or_else(invalid)
 }
 
+/// Split an ISO-8601 component run (e.g. `"1Y6M"` or `"1.5S"`) into
+/// `(number, unit)` pairs. Returns `None` on malformed input.
 fn parse_components(part: &str) -> Option<Vec<(String, char)>> {
     let mut out = Vec::new();
     let mut num = String::new();
@@ -821,9 +822,9 @@ mod tests {
     #[test]
     fn a_daily_local_grid_across_a_dst_transition_is_refused() {
         // Denver local midnights Nov 1-5 2024: the 3rd-to-4th step is 25 hours,
-        // so no period reproduces the vector. This is the case that silently
-        // drifted when a caller asserted `P1D` instead of handing over the
-        // timeline.
+        // so no period reproduces the vector. A caller asserting `P1D` instead
+        // of handing over the timeline would get a grid that silently drifts
+        // off these instants.
         let denver_midnights = [
             ts(2024, 11, 1, 6),
             ts(2024, 11, 2, 6),
@@ -998,9 +999,9 @@ mod tests {
             }
         }
 
-        // A grid whose *phase* is finer than a millisecond is still addressable at
-        // its own points: an `initial_timestamp` keeps nanoseconds even though a
-        // period does not.
+        // Period arithmetic does not itself require a millisecond phase: a start
+        // finer than that, which an artifact written before the write-path rule
+        // can still hold, stays addressable at its own points.
         let offset_start = start + Duration::nanoseconds(500);
         let hourly = Period::Fixed(Duration::hours(1));
         assert_eq!(

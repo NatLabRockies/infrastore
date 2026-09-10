@@ -9,6 +9,7 @@ pub mod storage;
 pub mod store;
 pub mod types;
 pub mod version;
+mod write_buffer;
 
 // Implementation-detail modules. The intended public surface is the root
 // re-exports below; these modules hold the catalog store, hashing, and

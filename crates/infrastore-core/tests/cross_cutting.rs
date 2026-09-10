@@ -150,16 +150,16 @@ fn sub_millisecond_resolutions_are_rejected_not_truncated() {
 #[test]
 fn a_resolution_the_store_cannot_represent_is_refused_on_write() {
     // A resolution has to be a positive whole number of milliseconds -- what
-    // `Period::is_positive` means -- and the write path now enforces it, as
-    // every forecast constructor already did.
+    // `Period::is_positive` means -- and the write path enforces it, as every
+    // forecast constructor does.
     //
-    // This used to be a read-path pin: `SingleTimeSeries::new` is infallible, so
-    // the series was storable and the failure surfaced later, differently for
-    // each bad value. Sub-millisecond encoded as `PT0S` and failed only on a
-    // *sliced* read; zero repeated one instant; a negative resolution built a
-    // reader whose timeline ran backwards and whose every `index_at` then
-    // rejected its own timestamps. None of the three was usable, so the line is
-    // drawn at the write instead.
+    // `SingleTimeSeries::new` is infallible, so without the write-path check the
+    // series would be storable and the failure would surface later, differently
+    // for each bad value. Sub-millisecond encodes as `PT0S` and fails only on a
+    // *sliced* read; zero repeats one instant; a negative resolution builds a
+    // reader whose timeline runs backwards and whose every `index_at` then
+    // rejects its own timestamps. None of the three is usable, so the line is
+    // drawn at the write.
     let mut store = create_store(None, true).unwrap();
     for bad in [
         Duration::microseconds(1),
@@ -203,13 +203,14 @@ fn a_resolution_the_store_cannot_represent_is_refused_on_write() {
 fn millisecond_precision_timestamps_round_trip_and_finer_ones_are_refused() {
     // A timestamp is stored as an RFC3339 string, which *could* carry
     // nanoseconds — but a `Period` is a whole number of milliseconds, and so is
-    // the instant a series may be written at. The two now agree.
+    // the instant a series may be written at. The two agree.
     //
     // The write path draws the line rather than the encoding, because the
     // truncation is otherwise silent and binding-dependent: the C ABI and Julia
     // exchange instants as i64 unix milliseconds, Python's `datetime` is
     // microsecond, and gRPC and the Rust core keep the full RFC3339 string. The
-    // same series then sat on three different instants depending on who read it.
+    // same series would then sit on three different instants depending on who
+    // read it.
     let precise = t0() + Duration::milliseconds(123);
     assert_eq!(precise.timestamp_subsec_nanos(), 123_000_000);
 
@@ -274,11 +275,12 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
     //   * a *static* read floors/ceils the bounds onto the grid;
     //   * a *forecast* read requires the start to BE a window boundary.
     //
-    // This previously diverged: `steps_between`'s `Fixed` branch tested only
-    // `delta_ms % step_ms == 0`, and `delta_ms` truncates, so a start in the open
-    // range `(boundary, boundary + 1ms)` passed the alignment check and was then
+    // For the forecast check, `steps_between` must verify the exact landing for a
+    // `Fixed` period as it does for `Months`. Testing only `delta_ms % step_ms ==
+    // 0` is not enough: `delta_ms` truncates, so a start in the open range
+    // `(boundary, boundary + 1ms)` would pass the alignment check and then be
     // excluded by the window filter's exact `>=` — silently returning the *next*
-    // window. `Fixed` now verifies the exact landing the way `Months` always has.
+    // window.
     let mut store = create_store(None, true).unwrap();
 
     // --- static: an off-grid start is floored onto the grid, as documented ---
@@ -421,9 +423,9 @@ fn a_forecast_the_store_cannot_read_back_is_refused_on_write() {
     // The forecast half of `a_resolution_the_store_cannot_represent_is_refused_
     // on_write`. Every field on a `Deterministic` is `pub` and the type derives
     // `Deserialize`, so a struct literal or a `serde_json::from_str` reaches the
-    // store having met no constructor. The store used to trust it, write the
-    // row, and then fail *every read* with an `IntegrityError` — the same
-    // "writable but unusable" state the static path was fixed to reject.
+    // store having met no constructor. Trusting it would write the row and then
+    // fail *every read* with an `IntegrityError` — the same "writable but
+    // unusable" state the static path refuses.
     let base = Deterministic::new(
         t0(),
         Duration::hours(1),
@@ -623,7 +625,7 @@ fn a_century_spanning_non_sequential_series_round_trips() {
 fn non_sequential_timestamps_keep_sub_second_precision() {
     // Two timestamps one millisecond apart are distinct (and strictly
     // increasing), and the sub-second component survives the stored encoding —
-    // which is the delta-varint blob, not a whole-second count.
+    // an `i64` dataset of unix milliseconds, not a whole-second count.
     //
     // One *nanosecond* apart is a different matter: see
     // `sub_millisecond_non_sequential_timestamps_are_refused` below. They are
@@ -675,8 +677,8 @@ fn sub_millisecond_non_sequential_timestamps_are_refused() {
     // Every timestamp in the vector is checked, not just the first: a single
     // sub-millisecond entry is enough to make the vector non-monotonic once it
     // crosses a millisecond boundary, which is what the C ABI and Julia read it
-    // through. The failure that produced was a store one binding could write and
-    // another could not read.
+    // through. Left unchecked, that is a store one binding can write and another
+    // cannot read.
     let base = t0();
     for (label, offset) in [
         ("1ns", Duration::nanoseconds(1)),
@@ -794,11 +796,8 @@ fn store_is_send_but_not_sync() {
     // `Sync` does NOT hold: `rusqlite::Connection` contains `RefCell`s, so a
     // `&Store` cannot be shared across threads even for reads. A caller wanting
     // concurrent readers must wrap it (`Mutex<Store>`) or open one store per
-    // thread. Because a negative bound cannot be written in a test, the `!Sync`
-    // half is asserted by the `compile_fail` doc-test in
-    // `tests/ui/store_is_not_sync.rs`'s stead: here we simply document it, and
-    // the positive assertion below would stop compiling if `Sync` were added
-    // *and* someone deleted this comment.
+    // thread. A negative bound cannot be written as an ordinary test, so the
+    // `!Sync` half is documented here rather than asserted.
     fn assert_send<T: Send>() {}
     assert_send::<Store>();
 
@@ -829,13 +828,13 @@ fn a_store_can_be_moved_to_another_thread() {
 
 #[test]
 fn a_second_handle_on_one_path_is_refused_whatever_its_mode() {
-    // Two handles on one on-disk store in one process used to be admitted for
-    // read-only opens (HDF5 takes a shared lock, SQLite readers do not exclude
-    // each other) and left to the platform for a reader beside a writer.
-    // Neither was safe: a handle indexes the packed columns once at open, so a
-    // reader beside a writer served another series' values once a slot was
-    // reused, and two writers overwrote each other's columns. Every second
-    // handle is now `StoreInUse`; `artifact_safety.rs` pins the full contract.
+    // Every second handle on one on-disk store in one process is `StoreInUse`,
+    // including read-only opens that the platform alone would admit (HDF5 takes
+    // a shared lock, SQLite readers do not exclude each other). None of them is
+    // safe: a handle indexes the packed columns once at open, so a reader beside
+    // a writer would serve another series' values once a slot was reused, and
+    // two writers would overwrite each other's columns. `artifact_safety.rs`
+    // pins the full contract.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {

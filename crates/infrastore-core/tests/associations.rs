@@ -1,6 +1,6 @@
 //! Tests for the two association catalogs: supplemental attributes attached to
-//! components, and parent/child edges between components. Both replace logic
-//! the consumers previously kept in SQLite databases of their own.
+//! components, and parent/child edges between components. Both hold what the
+//! consumers would otherwise keep in SQLite databases of their own.
 //!
 //! Associations are independent of time series, so most of these exercise an
 //! otherwise empty store.
@@ -1308,12 +1308,12 @@ fn parent_child_counts_match_brute_force_on_a_fan_in_and_fan_out_graph() {
 
 /// Reassigning a component brings its denormalized type label with it.
 ///
-/// `component_type` / `parent_type` / `child_type` are carried for filtering,
-/// and the reassignment used to rewrite only the id. The moved rows went on
-/// describing the component they came from, so filtering by the destination's
-/// real type missed them, filtering by the source's type returned them under the
-/// destination's id, and `supplemental_attribute_summary` split one component
-/// across two contradictory type buckets.
+/// `component_type` / `parent_type` / `child_type` are carried for filtering, so
+/// a reassignment that rewrote only the id would leave the moved rows describing
+/// the component they came from: filtering by the destination's real type would
+/// miss them, filtering by the source's type would return them under the
+/// destination's id, and `supplemental_attribute_summary` would split one
+/// component across two contradictory type buckets.
 ///
 /// The destination's type comes from the rows it already has. Where it has none
 /// the catalog has no other record of it — these rows become its only ones — so

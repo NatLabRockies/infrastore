@@ -264,7 +264,7 @@ fn write_revision(conn: &Connection, revision: i64) -> Result<()> {
 /// Nothing can be changed on a read-only connection, so this only reports.
 /// A stale catalog gets [`TimeSeriesError::CatalogMigrationRequired`], which
 /// tells the caller the one thing that fixes it: open the store once for
-/// writing. Before this existed, such a store failed with a raw SQLite
+/// writing. Without it, such a store would fail with a raw SQLite
 /// `no such column` from somewhere inside a later query.
 ///
 /// A connection with no association table at all is left alone: there is
@@ -432,8 +432,7 @@ CREATE TABLE time_series_associations (
     ///
     /// The view is not decoration here. SQLite refuses to drop a table a view
     /// still names, so a fixture without one lets a table-rebuild migration
-    /// pass in tests and fail against every real store. That is exactly what
-    /// happened to revision 2 before this fixture grew the view.
+    /// pass in tests and fail against every real store.
     fn revision_1_catalog() -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory database");
         conn.execute_batch(REVISION_1_ASSOCIATIONS_TABLE)

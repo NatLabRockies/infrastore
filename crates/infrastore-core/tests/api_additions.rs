@@ -1,6 +1,6 @@
-//! Tests for the Phase-1 additive API surface: `AddRequest`/`Store::add`,
-//! bulk/filtered delete, time-sliced bulk read, discovery enumerations, rename,
-//! and serde coverage. All additive — no on-disk format change.
+//! Tests for the maintenance and discovery surface: `AddRequest`/`Store::add`,
+//! bulk/filtered delete, time-sliced bulk read, discovery enumerations, copy,
+//! owner reassignment, and serde coverage.
 
 use std::collections::BTreeMap;
 
@@ -43,7 +43,7 @@ fn det(name: &str, base: f64) -> Deterministic {
     .unwrap()
 }
 
-// ---- 1.1 AddRequest builder + Store::add ----------------------------------
+// ---- AddRequest builder + Store::add --------------------------------------
 
 #[test]
 fn store_add_preserves_application_data() {
@@ -243,7 +243,7 @@ fn near_miss_feature_names_are_accepted() {
     );
 }
 
-// ---- 1.5 bulk / filtered delete -------------------------------------------
+// ---- bulk / filtered delete -----------------------------------------------
 
 #[test]
 fn remove_by_filter_empty_match_is_ok_zero() {
@@ -263,7 +263,7 @@ fn remove_by_filter_empty_match_is_ok_zero() {
     assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
 }
 
-// ---- 1.6 time-sliced bulk read --------------------------------------------
+// ---- time-sliced bulk read ------------------------------------------------
 
 #[test]
 fn bulk_read_range_matches_per_key_get_time_series() {
@@ -300,7 +300,7 @@ fn bulk_read_range_matches_per_key_get_time_series() {
         );
     }
 
-    // None behaves exactly like bulk_read.
+    // The unsliced bulk form, over a full `ReadWindow`.
     let full = store
         .read_by_ids(&keys, infrastore_core::ReadWindow::full())
         .unwrap();
@@ -312,9 +312,7 @@ fn bulk_read_range_matches_per_key_get_time_series() {
     );
 }
 
-// ---- 1.7 discovery enumerations -------------------------------------------
-
-// ---- 1.9 serde coverage ----------------------------------------------------
+// ---- serde coverage --------------------------------------------------------
 
 #[test]
 fn period_serializes_as_iso8601_string() {
@@ -391,9 +389,9 @@ fn unit_system_serde_matches_its_as_str_spelling() {
 // ===========================================================================
 // Backend parity
 //
-// Everything above runs against the in-memory backend only. Rename, bulk /
-// filtered delete, discovery, and copy all touch the *array* side as well as
-// the catalog — reclaiming a slot, re-resolving a shared hash — so their
+// Everything above runs against the in-memory backend only. Bulk / filtered
+// delete, discovery, and copy all touch the *array* side as well as the
+// catalog — reclaiming a slot, re-resolving a shared hash — so their
 // in-memory result is not evidence about the persisted one. Each case below
 // re-runs through `common::for_each_backend_mut`, which for HDF5 flushes,
 // closes, and reopens read-write before the mutation, so the state being
@@ -663,7 +661,7 @@ fn copy_time_series_shares_the_array() {
 }
 
 // ===========================================================================
-// Error and accessor paths with no coverage
+// Error and accessor paths
 // ===========================================================================
 
 /// An id the catalog has never minted. Ids are never reissued, so a reference
@@ -711,9 +709,9 @@ fn reading_a_stale_id_is_not_found() {
 fn selecting_the_wrong_time_series_type_matches_nothing() {
     // The stored row is a SingleTimeSeries. `time_series_type` is part of the
     // identity, so naming a different type selects a series that does not
-    // exist. A read cannot express this any more -- an id names one concrete
-    // row, whatever its type -- so the mismatch now lives entirely in the
-    // identify half, which is where it belongs.
+    // exist. A read cannot express this -- an id names one concrete row,
+    // whatever its type -- so the mismatch lives entirely in the identify half,
+    // which is where it belongs.
     let mut store = create_store(None, true).unwrap();
     let key = add_sts(&mut store, 1, "load", 10.0);
 
@@ -742,7 +740,7 @@ fn selecting_the_wrong_time_series_type_matches_nothing() {
     }
 
     // The correct type selects it, and the id still reads whatever the filter
-    // said, because a read no longer carries a type at all.
+    // said, because a read carries no type at all.
     let rows = store
         .list_metadata(by_type(TimeSeriesType::SingleTimeSeries))
         .unwrap();
@@ -1494,8 +1492,7 @@ fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
     // persist a row that misdescribes its own bytes: it survives
     // flush/persist_to/compact, and `check_static_consistency`,
     // `transform_single_time_series` and `build_static_reader` all then work off
-    // the wrong grid. `NonSequentialTimeSeries` has always enforced the
-    // equivalent rule.
+    // the wrong grid. `NonSequentialTimeSeries` enforces the equivalent rule.
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let mut store = create_store(None, true).unwrap();
 
@@ -1555,14 +1552,14 @@ fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
 /// `Deterministic` and `DeterministicSingleTimeSeries` are mutually exclusive
 /// for one family — on *every* path that writes an association row.
 ///
-/// The add path has always enforced this. `copy_time_series` and
-/// `replace_owner` did not: they write through
-/// `MetadataStore::insert`/`replace_owner`, which skip the check, and each
-/// moves a row to a *new* family identity, which is precisely the operation
-/// that can pair the two. The resulting state is one the rest of the code
-/// treats as unreachable: `resolve_metadata` reports the family as ambiguous
-/// with no way to narrow it (both candidates share resolution *and* interval),
-/// and `transform_single_time_series` refuses to run again.
+/// The add path is the obvious place for the check, but `copy_time_series` and
+/// `replace_owner` need it too: they write through
+/// `MetadataStore::insert`/`replace_owner`, which skip it, and each moves a row
+/// to a *new* family identity, which is precisely the operation that can pair
+/// the two. The resulting state is one the rest of the code treats as
+/// unreachable: a `Deterministic` lookup of the family is ambiguous with no way
+/// to narrow it (both candidates share resolution *and* interval), and
+/// `transform_single_time_series` refuses to run again.
 #[test]
 fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -1672,13 +1669,14 @@ fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
 /// A reader's column layout is a total order, so series that differ only by
 /// feature land in the same position every run.
 ///
-/// `identity_sort_key` used to be `(owner_id, owner_category, name)`. The
-/// catalog's uniqueness index deliberately allows one owner to hold the same
-/// name at the same resolution under different `features_hash` values —
-/// scenarios of one variable — so those rows tied. `sort_by` is stable and the
-/// listing query carries no `ORDER BY`, so the tie fell through to whatever row
-/// order SQLite produced, which is not stable across index choices, catalog
-/// rebuilds, or SQLite versions. A consumer caching "column j is component X"
+/// `identity_sort_key` therefore breaks ties on the features: owner, category
+/// and name alone are not a total order. The catalog's uniqueness index
+/// deliberately allows one owner to hold the same name at the same resolution
+/// under different `features_hash` values — scenarios of one variable — so
+/// those rows would tie. `sort_by` is stable and the listing query carries no
+/// `ORDER BY`, so a tie would fall through to whatever row order SQLite
+/// produced, which is not stable across index choices, catalog rebuilds, or
+/// SQLite versions. A consumer caching "column j is component X"
 /// could then read another component's values with nothing reporting an error.
 #[test]
 fn reader_columns_are_ordered_by_features_when_nothing_else_separates_them() {

@@ -525,7 +525,7 @@ pub fn info(
     no_stats: bool,
     format: Format,
 ) -> Result<(), String> {
-    let store = store_access::open_readonly(store_path)?;
+    let mut store = store_access::open_readonly(store_path)?;
     let (meta, _key) = selector.resolve(&store)?;
 
     // Always-present fields first, then the optional ones in the order a reader

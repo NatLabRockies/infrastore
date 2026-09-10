@@ -3,8 +3,8 @@
 //! In its own file on purpose: the test below forks a child that aborts, and
 //! libhdf5 opens files without `O_CLOEXEC`, so a forked child inherits every
 //! HDF5 descriptor -- and every lock -- its parent's other threads hold at
-//! that moment. Sharing a process with other store tests made them fail on
-//! "unable to lock file" whenever this one's child was alive.
+//! that moment. Sharing a process with other store tests makes them fail on
+//! "unable to lock file" whenever this one's child is alive.
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
@@ -48,8 +48,8 @@ fn first_value(store: &Store, owner: i64) -> f64 {
 /// flushed ahead of the catalog commit (once per call, or once per
 /// transaction), so a process killed right afterwards leaves no row naming an
 /// array the file never received. libhdf5 writes its chunk cache back lazily,
-/// and the catalog commit is durable at once, which is what made the window
-/// real.
+/// and the catalog commit is durable at once, which is what makes the window
+/// real without that flush.
 #[test]
 fn writes_are_durable_before_they_return() {
     if let Ok(path) = std::env::var("INFRASTORE_CRASH_CHILD") {

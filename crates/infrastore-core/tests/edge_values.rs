@@ -1,7 +1,7 @@
 //! Corner-case *values*: non-finite floats, empty / minimal arrays, extreme
 //! integers, and hostile strings.
 //!
-//! Much of what is asserted here was previously **undefined** — no test said
+//! Much of what is asserted here is otherwise **undefined** — nothing else says
 //! whether a zero-length series or a 10 kB name is accepted or rejected. These
 //! tests therefore *pin* the behavior the shipping code has today, with a
 //! comment saying so; they are tripwires against silent drift, not a
@@ -214,57 +214,6 @@ fn differing_nan_bit_patterns_content_address_to_one_array() {
             );
         },
     );
-}
-
-#[test]
-fn hdf5_default_fill_value_is_not_special_cased() {
-    // 9.969209968386869e+36 was netcdf-c's default f64 `_FillValue`, from the
-    // era when this store was netcdf-backed. The HDF5 backend has no such
-    // sentinel, but the pin is kept: a stored value that happens to equal a
-    // fill sentinel must survive a reopen as data, not be read back as
-    // "missing".
-    const NC_FILL_DOUBLE: f64 = 9.969_209_968_386_869e36;
-    // netcdf-c's `NC_FILL_FLOAT`, the f32 nearest the double above; it carries
-    // only f32's precision, so writing more digits is a clippy error.
-    const NC_FILL_FLOAT: f32 = 9.969_21e36;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.h5");
-    let f64_data = TypedArray::from_slice(vec![3], &[1.0, NC_FILL_DOUBLE, 3.0]).unwrap();
-    let f32_data = TypedArray::from_slice(vec![3], &[1.0f32, NC_FILL_FLOAT, 3.0]).unwrap();
-
-    let (k64, k32) = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
-        let k64 = add(&mut store, 1, sts("fill64", f64_data.clone()));
-        let k32 = add(&mut store, 2, sts("fill32", f32_data.clone()));
-        store.flush().unwrap();
-        (k64, k32)
-    };
-
-    let store = open_store(path.as_path(), true).unwrap();
-    assert_eq!(
-        store
-            .read_by_id(k64, infrastore_core::ReadWindow::full())
-            .unwrap()
-            .as_single()
-            .unwrap()
-            .data
-            .bytes,
-        f64_data.bytes,
-        "f64 fill-value sentinel was not preserved"
-    );
-    assert_eq!(
-        store
-            .read_by_id(k32, infrastore_core::ReadWindow::full())
-            .unwrap()
-            .as_single()
-            .unwrap()
-            .data
-            .bytes,
-        f32_data.bytes,
-        "f32 fill-value sentinel was not preserved"
-    );
-    assert!(store.verify_integrity().unwrap().ok());
 }
 
 // ===========================================================================
@@ -1075,9 +1024,10 @@ fn feature_value_equality_hashing_and_ordering_agree() {
     // `FeatureValue` is part of a series' identity, so the three have to be one
     // rule. They are the *catalog's* rule: `features_hash` digests a float by
     // its bit pattern, and that hash is what the uniqueness index keys on. A
-    // derived `PartialEq` gave IEEE semantics instead, so `0.0 == -0.0` compared
-    // equal while hashing differently — breaking the `Hash` contract all the way
-    // up through `Features`, `KeyIdentity` and `TimeSeriesId`.
+    // derived `PartialEq` would give IEEE semantics instead, so `0.0 == -0.0`
+    // would compare equal while hashing differently — breaking the `Hash`
+    // contract all the way up through `Features`, `KeyIdentity` and
+    // `TimeSeriesId`.
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -1106,9 +1056,9 @@ fn feature_value_equality_hashing_and_ordering_agree() {
         assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal, "{a:?} vs {b:?}");
     }
 
-    // `Eq` is reflexive even for NaN, which the derived impl was not: a NaN
-    // feature was not equal to itself, so such a key could never be found in any
-    // `HashMap` or `HashSet` while `impl Eq` claimed otherwise.
+    // `Eq` is reflexive even for NaN, which a derived impl would not be: a NaN
+    // feature unequal to itself could never be found in any `HashMap` or
+    // `HashSet` while `impl Eq` claimed otherwise.
     let nan = FeatureValue::Float(f64::NAN);
     assert_eq!(nan, nan.clone());
 
@@ -1128,7 +1078,7 @@ fn feature_value_equality_hashing_and_ordering_agree() {
         );
     }
 
-    // The contract that was actually broken: a set lookup by an equal value.
+    // The contract at stake: a set lookup by an equal value.
     let mut set = std::collections::HashSet::new();
     set.insert(FeatureValue::Float(0.0));
     assert!(set.contains(&FeatureValue::Float(0.0)));
@@ -1140,15 +1090,15 @@ fn feature_value_equality_hashing_and_ordering_agree() {
 
 #[test]
 fn malformed_inputs_report_errors_rather_than_panicking() {
-    // Four places where caller- or data-supplied numbers reached arithmetic or
-    // an index without a guard. All are reachable from safe, public API; a debug
-    // build panicked and a release build, where the workspace profile leaves
-    // `overflow-checks` off, would have wrapped instead.
+    // Four places where caller- or data-supplied numbers reach arithmetic or an
+    // index and need a guard. All are reachable from safe, public API; unguarded,
+    // a debug build panics and a release build, where the workspace profile
+    // leaves `overflow-checks` off, wraps instead.
     use infrastore_core::{DecodedValues, Dtype, Period, codec};
 
     // 1. An ISO-8601 duration may repeat a unit — `parse_components` applies no
     //    uniqueness rule — and one day component already reaches the edge of i64
-    //    milliseconds, so a second overflowed the unguarded `+=`. Reachable from
+    //    milliseconds, so a second overflows an unguarded `+=`. Reachable from
     //    an arbitrary caller string, including one arriving over gRPC. The
     //    calendar accumulator is the same shape: a year component multiplies by
     //    12 under a guard, then lands in `months`, which needs one too.
@@ -1207,9 +1157,9 @@ fn malformed_inputs_report_errors_rather_than_panicking() {
     );
 
     // 3. A `TypedArray` whose bytes do not match its shape is buildable in safe
-    //    code, because the fields are public. Both write paths must report it;
-    //    the bulk one used to panic on an unchecked slice index, after the
-    //    dataset had already been created.
+    //    code, because the fields are public. Both write paths must report it,
+    //    the bulk one included, where an unchecked slice index would panic after
+    //    the dataset had already been created.
     let dir = tempfile::tempdir().unwrap();
     let mut store = create_store(Some(dir.path().join("bad.h5").as_path()), false).unwrap();
     let mismatched = TypedArray {

@@ -309,8 +309,8 @@ impl<'de> Deserialize<'de> for TimeReference {
 /// grid. It does not require grid alignment: `start` is floored and `end`
 /// ceil-ed onto the series' own grid.
 ///
-/// The `zoneless` flag is what lets the core apply decision 8 — *bounds must
-/// match the series' reference, no coercion*. A naive bound against a zoned
+/// The `zoneless` flag is what lets the core enforce its rule that *bounds
+/// must match the series' reference, no coercion*. A naive bound against a zoned
 /// series, or an aware bound against a [`TimeReference::Zoneless`] one, is a
 /// category error with no defined mapping to fall back on, so it is refused
 /// rather than reinterpreted. An aware bound need not match the series' own
@@ -470,9 +470,9 @@ mod tests {
     fn a_non_ascii_offset_shaped_string_is_rejected_not_a_panic() {
         // `rest` is measured in bytes, so a multi-byte character can make a
         // string look like one of the fixed-width offset spellings while its
-        // split points fall inside a character. Every one of these used to
-        // panic on a char boundary; all of them reach the store as untrusted
-        // text (a CLI flag, a descriptor, a wire string, a zone name).
+        // split points fall inside a character, where slicing would panic on
+        // a char boundary. All of them reach the store as untrusted text (a
+        // CLI flag, a descriptor, a wire string, a zone name).
         for s in ["+aéb", "-aéb", "+éé", "-é", "+aé:b", "+00:é", "-éé:00"] {
             assert_eq!(parse_offset(s), None, "{s:?} is not an offset");
             // The same strings reach `parse_offset` a second time through
@@ -498,7 +498,7 @@ mod tests {
             );
         }
 
-        // The boundary itself stays exclusive on both sides, unchanged.
+        // The boundary itself is exclusive on both sides.
         for minutes in [-1439, -420, 0, 330, 1439] {
             TimeReference::FixedOffset(minutes)
                 .validate()

@@ -36,7 +36,7 @@ pub fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&
 }
 
 /// Like [`for_each_backend`], but `verify` gets a mutable store so it can
-/// exercise write-direction APIs (rename, remove, copy, ...).
+/// exercise write-direction APIs (remove, copy, ...).
 ///
 /// The HDF5 variant is flushed and reopened **read-write** before `verify`,
 /// so the mutations run against a store whose state came off disk.

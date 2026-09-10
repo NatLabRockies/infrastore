@@ -199,15 +199,15 @@ fn supplemental_attribute_association_fixture_conforms() {
 
 /// The reserved feature names are maintained by hand in two repositories --
 /// [`RESERVED_FEATURE_NAMES`] here and `TimeSeriesFeatures.propertyNames.not.enum`
-/// in the vendored `TimeSeries/common.json`. They had already drifted once, in
-/// both directions at once, which is what this test exists to catch.
+/// in the vendored `TimeSeries/common.json`. Nothing ties the two together, and
+/// they can drift in both directions at once, which is what this test catches.
 ///
 /// The two directions are not equally harmful. A name the schema reserves and
 /// the core does not is the one that breaks a document: the store accepts the
 /// feature, and the export it produces then fails validation on the features
 /// map. The reverse only makes the store stricter than the wire contract. The
 /// assertion is equality anyway, because holding them equal is what keeps the
-/// harmful direction from reappearing unnoticed -- and because a core-only
+/// harmful direction from appearing unnoticed -- and because a core-only
 /// reservation is a field the schema should learn about too.
 #[test]
 fn the_reserved_feature_names_match_the_vendored_schema() {

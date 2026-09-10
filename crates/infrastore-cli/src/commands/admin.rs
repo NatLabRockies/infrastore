@@ -122,7 +122,7 @@ pub fn arrays(
     format: Format,
 ) -> Result<(), String> {
     let wanted = data_hash.map(parse::parse_hash_prefix).transpose()?;
-    let store = store_access::open_readonly(store_path)?;
+    let mut store = store_access::open_readonly(store_path)?;
     let rows = store
         .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;

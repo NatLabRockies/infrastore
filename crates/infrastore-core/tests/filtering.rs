@@ -1,7 +1,7 @@
 //! Tests for the descriptive `ListFilter` predicates, threaded through every
-//! `ListFilter`-taking query path: `name_glob` (round-2 plan item 1.1), SQLite
-//! `GLOB` pattern matching on the series name, and `component_field`, an exact
-//! match on the owning component's field.
+//! `ListFilter`-taking query path: `name_glob`, SQLite `GLOB` pattern matching
+//! on the series name, and `component_field`, an exact match on the owning
+//! component's field.
 //!
 //! Every case runs against both backends. Matching itself is pure SQLite
 //! and so cannot differ, but the filter feeds `build_static_reader` and
@@ -120,7 +120,7 @@ fn glob_no_match_is_empty_not_error() {
                 .is_empty(),
             "{backend}"
         );
-        // Reader build over an empty match keeps its existing error semantics.
+        // A reader over an empty match is an error, as for any other filter.
         assert!(
             store
                 .build_static_reader(ListFilter::new().name_glob("xyz*"))

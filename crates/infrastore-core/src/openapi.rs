@@ -70,13 +70,11 @@
 //! present as `null`.
 //!
 //! `initial_timestamp` is RFC3339 UTC, floored to millisecond precision (see
-//! [`format_initial_timestamp`]) — deliberately less precise than the general
-//! store contract, which keeps nanoseconds
-//! (`crate::types::period` module docs); the OpenAPI wire form only promises
-//! milliseconds. `resolution` / `horizon` / `interval` are
-//! [`Period::to_iso8601`]'s canonical spelling, which is not always the
-//! "seconds" form a hand-written fixture might guess (`PT3600S` canonicalizes
-//! to `PT1H`).
+//! [`format_initial_timestamp`]) — the store's own precision floor
+//! (`crate::timestamps` module docs), and all the OpenAPI wire form promises.
+//! `resolution` / `horizon` / `interval` are [`Period::to_iso8601`]'s canonical
+//! spelling, which is not always the "seconds" form a hand-written fixture
+//! might guess (`PT3600S` canonicalizes to `PT1H`).
 //!
 //! # Export sort order
 //!
@@ -173,12 +171,12 @@ fn unit_system_wire(system: UnitSystem) -> &'static str {
     }
 }
 
-/// RFC3339 UTC, floored to millisecond precision: any finer component the
-/// catalog happens to hold is dropped rather than surfaced. A whole-second
-/// timestamp renders with no fractional part at all (`"...T00:00:00Z"`), and
-/// anything with a nonzero millisecond remainder renders with exactly three
-/// fractional digits — never nanoseconds, which is what softens the schema's
-/// "keeps nanoseconds" wording.
+/// RFC3339 UTC, floored to millisecond precision: the write path refuses a
+/// finer instant, but reads stay permissive for an artifact written before that
+/// rule, so any finer component such a catalog holds is dropped rather than
+/// surfaced. A whole-second timestamp renders with no fractional part at all
+/// (`"...T00:00:00Z"`), and anything with a nonzero millisecond remainder
+/// renders with exactly three fractional digits — never more.
 fn format_initial_timestamp(ts: DateTime<Utc>) -> String {
     let millis = ts.timestamp_millis();
     let floored = DateTime::<Utc>::from_timestamp_millis(millis)
@@ -742,7 +740,7 @@ where
     let mut out = Vec::with_capacity(values.len());
     for (index, value) in values.into_iter().enumerate() {
         check(&value, index)?;
-        // Parsing to `Value` first cost serde_json's line/column, and the row
+        // Parsing to `Value` first loses serde_json's line/column, and the row
         // schemas are open objects, so an unknown field reaches this call as the
         // first thing that rejects it. Without the index it would name no row.
         let raw: Raw =

@@ -1,4 +1,4 @@
-//! Guards at the store's seams, each pinned to a failure a review found:
+//! Guards at the store's seams, each pinned to the failure it prevents:
 //!
 //! * an array reaching the write boundary with bytes that disagree with its
 //!   shape, or a zero-width element dimension, is refused rather than truncated
@@ -17,9 +17,9 @@
 //!   values in the groups it reached and another's in the groups it did not.
 //!
 //! Both backends run every case: the write boundary is shared, but the two
-//! backends stored a malformed array differently (the on-disk one refused it in
-//! one write path and copied a prefix in the other; the in-memory one kept it
-//! and panicked on a sliced read).
+//! backends would store a malformed array that slipped past it differently (the
+//! on-disk one could copy a prefix; the in-memory one would keep it and panic on
+//! a sliced read).
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::types::array::Dtype;
@@ -114,8 +114,9 @@ fn an_array_whose_bytes_disagree_with_its_shape_is_refused() {
                 )])
                 .unwrap_err();
             assert!(is_invalid(&err), "{backend}: {label} bulk add: {err}");
-            // The dense forecast path validated its geometry through the
-            // constructor, which a struct literal bypasses.
+            // The dense forecast path must check its geometry at the write
+            // boundary too, not only in the constructor, which a struct literal
+            // bypasses.
             let det = Deterministic {
                 data: arr,
                 ..Deterministic::new(
@@ -392,7 +393,7 @@ fn the_derived_forecast_source_guard_is_per_owner() {
 /// `DeterministicSingleTimeSeries` with no source at the destination, and that
 /// copy can land in a family where an unrelated `SingleTimeSeries` lives — the
 /// two are distinct identities, so the catalog holds both. Probing the family
-/// alone made that unrelated source unremovable on behalf of a view over a
+/// alone would make that unrelated source unremovable on behalf of a view over a
 /// different array entirely.
 #[test]
 fn a_copied_view_does_not_pin_an_unrelated_source_in_its_family() {
@@ -504,12 +505,12 @@ fn a_static_read_failing_mid_loop_empties_the_groups_it_already_filled() {
 /// of the last.
 ///
 /// `StaticGroup::fill` clears the group it is filling, but a read is one
-/// operation over every group: a failure part way through left the groups
+/// operation over every group: a failure part way through would leave the groups
 /// already filled holding the new timestamp's values while the rest held the
 /// previous read's, all of it still labeled with the previous timestamp. An
 /// off-grid timestamp is the sharper form — it fails before any group is
-/// touched, so every group kept the last read intact and a caller that ignored
-/// the error saw a full, plausible, wrong answer.
+/// touched, so every group would keep the last read intact and a caller that
+/// ignored the error would see a full, plausible, wrong answer.
 #[test]
 fn a_failed_static_read_empties_the_whole_reader() {
     each_backend(|store, backend| {

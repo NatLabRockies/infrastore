@@ -178,8 +178,8 @@ fn a_malformed_zone_name_is_refused_at_the_door() {
         .expect("a shape-valid zone name is stored without a database to check it against");
 }
 
-/// Decision 8: a bound has to be spelled the way the series is, and a mismatch
-/// is a category error rather than a rounding one.
+/// A bound has to be spelled the way the series is, and a mismatch is a
+/// category error rather than a rounding one.
 #[test]
 fn a_query_bound_must_match_the_series_spelling() {
     let mut store = create_store(None, true).unwrap();
@@ -240,8 +240,8 @@ fn a_query_bound_must_match_the_series_spelling() {
     }
 }
 
-/// Rules 1 and 2: one bound, or one shared timestamp axis, cannot serve both
-/// coherence groups — and the refusal names them.
+/// One bound, or one shared timestamp axis, cannot serve both coherence
+/// groups — and the refusal names them.
 #[test]
 fn a_selection_cannot_span_both_coherence_groups() {
     let mut store = create_store(None, true).unwrap();
@@ -387,8 +387,8 @@ fn a_reader_over_mixed_zoned_spellings_reports_the_shared_truth() {
     );
 }
 
-/// Decision 10: a reference is a spelling, not a grid. A calendar period steps
-/// on the stored UTC calendar and the reference does not redirect it.
+/// A reference is a spelling, not a grid. A calendar period steps on the
+/// stored UTC calendar and the reference does not redirect it.
 ///
 /// Spelled here at a **fixed offset**, which is where this is still storable. A
 /// fixed offset has no DST to drift against, so the only disagreement is at a
@@ -508,9 +508,9 @@ fn every_series_type_carries_its_reference() {
 /// A mixed cohort is refused for either reader — and the refusal names the one
 /// the caller actually asked for.
 ///
-/// Both readers share the coherence check, whose message used to be hardcoded
-/// to `StaticReader`. A caller who built a *forecast* reader was told a
-/// `StaticReader` had failed: an API they never invoked, which sends them
+/// Both readers share the coherence check, so its message has to name the
+/// reader being built. A caller who built a *forecast* reader and is told a
+/// `StaticReader` failed is pointed at an API they never invoked, and goes
 /// looking in the wrong place for a filter they did not write.
 #[test]
 fn the_cohort_refusal_names_the_reader_that_was_asked_for() {

@@ -12,14 +12,14 @@ use serde::{Deserialize, Serialize};
 /// the series by it from then on. [`crate::Store::list_metadata`] recovers ids
 /// from attributes for a caller that does not hold one.
 ///
-/// A newtype rather than a bare `i64` because the store now hands out several
+/// A newtype rather than a bare `i64` because the store hands out several
 /// unrelated integer id streams — this one, `owner_id`, and the two association
-/// catalogs' own ids — and every read, removal and rename takes one of them.
+/// catalogs' own ids — and every read and removal takes one of them.
 /// Passing an `owner_id` where a series id belongs is a type error here rather
 /// than a lookup that silently finds the wrong row or none at all.
 ///
 /// It is per-store and descriptive: `merge` assigns fresh ids, `diff` ignores
-/// it, and `rename` / `reassign` / `compact` / `persist_to` all preserve it.
+/// it, and `reassign` / `compact` / `persist_to` all preserve it.
 ///
 /// Serialized transparently as its integer, so the SQLite catalog, the gRPC
 /// wire, and the OpenAPI document (where the schema spells it
@@ -77,8 +77,8 @@ mod tests {
 
     #[test]
     fn serializes_as_a_bare_integer() {
-        // The wrapper must be invisible on every wire the id already crossed:
-        // the catalog, gRPC, and the OpenAPI document.
+        // The wrapper must be invisible on every wire the id crosses: the
+        // catalog, gRPC, and the OpenAPI document.
         let json = serde_json::to_string(&TimeSeriesId(42)).unwrap();
         assert_eq!(json, "42");
         assert_eq!(

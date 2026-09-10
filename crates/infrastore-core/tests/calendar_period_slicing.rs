@@ -159,8 +159,8 @@ fn a_window_slice_of_an_unclamped_monthly_series_always_works() {
 }
 
 /// The same rule on `read_by_ids_range` — the path the CLI's
-/// `export --time-range` and every bulk export use, and the one that was writing
-/// drifted timestamps into re-importable CSV.
+/// `export --time-range` and every bulk export use, where a drifted grid would
+/// land in re-importable CSV.
 #[test]
 fn a_range_slice_never_invents_a_grid() {
     let mut store = create_store(None, true).unwrap();
@@ -352,7 +352,7 @@ fn a_derived_forecast_over_an_unclamped_source_labels_the_source_grid() {
 /// `read_by_ids_range` is the bounds form that clips. A forecast whose first
 /// window starts *after* the range start is not a partial window — it is no
 /// window at all before that point — so the range clips to the windows it does
-/// cover instead of failing, and one forecast no longer fails a whole batch.
+/// cover instead of failing, so one forecast does not fail a whole batch.
 #[test]
 fn a_range_wider_than_a_forecast_clips_instead_of_erroring() {
     let mut store = create_store(None, true).unwrap();
@@ -397,7 +397,7 @@ fn a_range_wider_than_a_forecast_clips_instead_of_erroring() {
     assert_eq!(got_fc.initial_timestamp, initial);
 
     // A range that starts before the forecast and ends inside it still clips on
-    // the end, which is the half that was always meant to.
+    // the end, the half the bounds form clips for every forecast.
     let partial = TimeRange::new(
         Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
         initial + Duration::hours(13),

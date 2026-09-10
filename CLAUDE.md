@@ -327,6 +327,7 @@ crates/
     src/storage/             #   memory.rs, hdf5.rs (storage backends)
     src/metadata/            #   schema.rs (SQLite catalog schema)
     src/store.rs             #   Store: the top-level public API
+    src/write_buffer.rs      #   WriteBuffer: an open transaction's not-yet-written packed arrays
     src/reader.rs            #   StaticReader / ForecastReader: columnar bulk-read surface
     src/hash.rs              #   SHA-256 column hashing
   infrastore-proto/   # Protobuf service definition (proto/) + tonic codegen, conversions
@@ -441,10 +442,9 @@ cargo run -p infrastore-server -- --config my_server.toml
 
 - A persisted store is an HDF5 file plus a SQLite catalog at `<store-path>.sqlite`. They are one
   logical artifact and must be moved, copied, and deleted together. The file is written directly
-  against libhdf5 (via `hdf5-metno`), not through netcdf-c; the extension is conventionally `.h5`
-  but nothing enforces it. Identity comes from the root attribute `storage_backend = "hdf5"`, and
-  `Store::open` rejects a file that lacks it — including stores written by the removed netcdf
-  backend.
+  against libhdf5 (via `hdf5-metno`); the extension is conventionally `.h5` but nothing enforces it.
+  Identity comes from the root attribute `storage_backend = "hdf5"`, and `Store::open` rejects a
+  file that lacks it.
 - `CatalogMode` decides where the catalog lives while a store is open, independently of the backend.
   `Attached` (default) makes it the `.sqlite` file, with WAL and durability on every commit.
   `InMemory` holds it in RAM and writes it only at `persist_to` or `persist_catalog`; arrays still

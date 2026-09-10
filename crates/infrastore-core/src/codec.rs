@@ -123,8 +123,8 @@ pub fn decode(
     // exactly that for an empty `Tuple` — which `validate_array` then accepts,
     // since arity 0 expects element dims `[0]`. `ElementType::parse` refuses the
     // `tuple(0,…)` spelling, so such a row cannot arrive from a catalog, but the
-    // crate's own `element_type_of` -> `encode` -> `decode` round trip reaches it
-    // through the public API.
+    // crate's own `element_type_of` -> `encode_as` -> `decode` round trip reaches
+    // it through the public API.
     if width == 0 {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "element_type {element_type} has no values per timestep, so there is nothing to decode"

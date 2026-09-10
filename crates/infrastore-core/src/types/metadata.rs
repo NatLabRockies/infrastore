@@ -138,19 +138,19 @@ impl FromStr for UnitSystem {
 ///
 /// That is the catalog's own rule, not a convenience: [`crate::hash::features_hash`]
 /// digests a float by its bit pattern, and `features_hash` is the column the
-/// uniqueness index keys on. So the store already treats `0.0` and `-0.0` as two
-/// different series. Deriving `PartialEq` gave IEEE semantics instead, where
-/// `0.0 == -0.0` — equal values that hashed differently, breaking the `Hash`
+/// uniqueness index keys on. So the store treats `0.0` and `-0.0` as two
+/// different series. A derived `PartialEq` would give IEEE semantics instead,
+/// where `0.0 == -0.0` — equal values that hash differently, breaking the `Hash`
 /// contract for `FeatureValue`, `Features` and `KeyIdentity` alike. A
-/// `HashSet<KeyIdentity>` would hold two members that compare equal
-/// while `contains` missed one of them, and the type disagreed with the catalog
+/// `HashSet<KeyIdentity>` could then hold two members that compare equal while
+/// `contains` misses one of them, and the type would disagree with the catalog
 /// about what a distinct series is.
 ///
 /// NaN is canonicalized to one bit pattern, so `Float(NaN) == Float(NaN)` and
-/// `Eq`'s reflexivity is honest — the derived `PartialEq` made `impl Eq` a lie,
-/// since a NaN feature was not equal to itself. (The store rejects a NaN feature
-/// on write, because SQLite cannot store one; this keeps the in-memory type
-/// coherent regardless.)
+/// `Eq`'s reflexivity is honest — a derived `PartialEq` would make `impl Eq` a
+/// lie, since a NaN feature would not equal itself. (The store rejects a NaN
+/// feature on write, because SQLite cannot store one; this keeps the in-memory
+/// type coherent regardless.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FeatureValue {
     Int(i64),
@@ -296,10 +296,10 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "features",
     "horizon",
     // Reserved for the catalog row's own id, which every binding surfaces
-    // alongside the fields above. Unlike `dtype` and `ext` below it, this one
-    // is reserved *before* anything could have used it: the name is too
-    // generic to be a plausible series discriminator, so the shadowing this
-    // list prevents is the only thing it could cause.
+    // alongside the fields above. Unlike `dtype` and `ext` above it, reserving
+    // this one takes nothing a consumer plausibly uses: the name is too
+    // generic to be a series discriminator, so the shadowing this list
+    // prevents is the only thing it could cause.
     "id",
     "initial_timestamp",
     "interval",
@@ -355,9 +355,9 @@ pub fn validate_features(features: &Features) -> Result<()> {
         // NaN: SQLite has none, so `sqlite3_bind_double` stores it as NULL while
         // `value_kind` still says 'float', and the read path — which hydrates
         // *every* feature set a listing touches — then fails on the NULL. One
-        // such row made `list_metadata`/`list_names` fail for the
-        // whole store, including series sharing nothing with it, and survived
-        // reopen because the bad row was on disk.
+        // such row would make `list_metadata`/`list_names` fail for the whole
+        // store, including series sharing nothing with it, and would survive
+        // reopen because the bad row is on disk.
         //
         // Negative zero: SQLite's REAL storage keeps an exactly-integral value
         // as an integer, so `-0.0` is written and read back as `+0.0` — the sign

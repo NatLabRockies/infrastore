@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported physical element types. Codes are part of the public contract:
-/// 0-5 were the original set and never move; new widths are appended.
+/// an assigned code never moves, and new widths are appended.
 ///
 /// `Ord` follows declaration order, which is also code order. It carries no
 /// meaning beyond giving layout-grouping code a stable, allocation-free sort.
@@ -127,7 +127,11 @@ impl Dtype {
     }
 }
 
-/// A runtime-typed, N-dimensional array stored as raw little-endian bytes.
+/// A runtime-typed, N-dimensional array held as raw little-endian bytes.
+///
+/// Little-endian is the in-memory and wire encoding, fixed so the content hash
+/// and every binding agree on it. It says nothing about the HDF5 file, whose
+/// datasets record their own byte order.
 ///
 /// `Eq` is sound because `PartialEq` compares the raw byte buffers: float
 /// element comparison is bitwise (NaN ≠ NaN by bits, `+0.0` ≠ `-0.0`), which is
@@ -229,7 +233,7 @@ impl TypedArray {
     /// Build a `TypedArray` from a typed slice + shape, validating that
     /// `values.len()` equals the shape's element count. The array's dtype is
     /// `T`'s dtype ([`Element::DTYPE`]). Values are encoded little-endian in
-    /// row-major order, matching the on-disk layout.
+    /// row-major order, the crate's canonical buffer form.
     pub fn from_slice<T: Element>(shape: Vec<usize>, values: &[T]) -> Result<Self, String> {
         let n = element_count(&shape)?;
         if values.len() != n {

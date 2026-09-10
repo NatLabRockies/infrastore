@@ -275,7 +275,7 @@ fn locate_array_names_the_dataset_and_column_of_a_packed_array() {
         hashes
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let mut store = open_store(path.as_path(), true).unwrap();
     let mut columns = Vec::new();
     for hash in &hashes {
         match store.locate_array(hash).unwrap() {
@@ -331,7 +331,7 @@ fn locate_array_names_the_standalone_dataset_of_a_lone_irregular_series() {
         hash
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let mut store = open_store(path.as_path(), true).unwrap();
     match store.locate_array(&hash).unwrap() {
         ArrayLocation::Standalone { dataset } => assert!(
             dataset.starts_with("/time_series/single/arr_"),
@@ -457,8 +457,8 @@ fn locate_array_reports_no_on_disk_location_for_an_in_memory_store() {
 /// A dense forecast whose array is byte-identical to a packed static series'
 /// shares that column -- content addressing keeps one copy -- and every read
 /// of it has to work from there, including the forecast reader's window read,
-/// which used to reject a packed location outright. Both orders of arrival
-/// are covered because the layout is decided by whichever row came first.
+/// which must accept a packed location. Both orders of arrival are covered
+/// because the layout is decided by whichever row came first.
 #[test]
 fn a_forecast_sharing_a_packed_array_reads_through_the_forecast_reader() {
     use infrastore_core::{Deterministic, ListFilter};
@@ -525,7 +525,7 @@ fn a_forecast_sharing_a_packed_array_reads_through_the_forecast_reader() {
             expected,
             "forecast_first={forecast_first}"
         );
-        // The static side of the same bytes reads as it always did.
+        // The static side of the same bytes reads back unchanged.
         let mut sr = store
             .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
             .unwrap();

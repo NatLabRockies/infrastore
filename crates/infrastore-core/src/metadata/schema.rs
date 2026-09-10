@@ -167,10 +167,10 @@ CREATE TABLE IF NOT EXISTS feature_sets (
 -- Two indexes are required to enforce and serve it, and BOTH must be kept:
 --
 --   * uq_ts_assoc indexes resolution and interval as plain columns. It serves
---     the equality/IS NULL lookups in get_by_key/list/delete_by_key (an
---     expression index cannot be used for those), but it does NOT enforce
---     uniqueness when resolution or interval IS NULL, because SQLite treats
---     NULLs as distinct in a UNIQUE index.
+--     the equality/IS NULL lookups of the write path's duplicate probe and of
+--     filtered listings (an expression index cannot be used for those), but
+--     it does NOT enforce uniqueness when resolution or interval IS NULL,
+--     because SQLite treats NULLs as distinct in a UNIQUE index.
 --   * uq_ts_assoc_coalesced closes that gap by COALESCE-ing NULL resolutions and
 --     intervals to a sentinel, so NULL-resolution/NULL-interval types (e.g.
 --     NonSequentialTimeSeries, and any static series) also get the uniqueness

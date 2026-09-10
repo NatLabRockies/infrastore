@@ -7,14 +7,9 @@
 //! `arr_{hexhash}` dataset per dense forecast (and per irregular series whose
 //! time axis nothing else shares), written through libhdf5 via `hdf5-metno`.
 //!
-//! This backend replaced a netcdf-c–driven one with the same logical layout.
-//! The motivation was netcdf-c's define-mode semantics: every new variable
-//! followed by a data write triggers an implicit whole-file `H5Fflush` that
-//! iterates every open dataset, making a forecast-heavy ingest O(N²). Plain
-//! HDF5 dataset creation is O(log n) and flushes metadata lazily, so the
-//! per-array standalone layout stays flat with store size. Its files are not
-//! readable by this backend (`Store::open` checks the `storage_backend` root
-//! attribute, which netcdf-written stores lack, and rejects them).
+//! Plain HDF5 dataset creation is O(log n) and flushes metadata lazily, which
+//! is what keeps one standalone dataset per dense forecast cheap as a store
+//! grows.
 //!
 //! Layout details specific to this backend:
 //!
@@ -45,21 +40,21 @@ use h5::{Group, Hyperslab, Selection, SliceOrIndex};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
-use crate::storage::{ArrayLayout, Compression, WriteMode, write_window_block};
+use crate::storage::{ArrayLayout, Compression};
 use crate::types::array::{Dtype, TypedArray};
 use crate::version::{Compat, DATA_FORMAT_VERSION};
 
 use super::common::{
-    COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, MAX_PENDING_BYTES, PackGroup, ROOT_GROUP,
-    SINGLE_GROUP, STANDALONE_PREFIX, TIMESTAMPS_GROUP, TIMESTAMPS_PREFIX, dataset_base_name,
-    element_block_bytes, hex_to_hash, packed_chunk_rows, parse_dataset_name, resolve_dataset_cols,
-    spill_name, standalone_chunks,
+    COMPRESSION_ATTR, HASH_SUFFIX, MAX_CHUNK_BYTES, PackGroup, ROOT_GROUP, SINGLE_GROUP,
+    STANDALONE_PREFIX, TIMESTAMPS_GROUP, TIMESTAMPS_PREFIX, dataset_base_name, element_block_bytes,
+    hex_to_hash, packed_chunk_rows, parse_dataset_name, resolve_dataset_cols, spill_name,
+    standalone_chunks,
 };
 use super::{ArrayLocation, BackendStats, CompactionReport, IntegrityReport, StorageBackend};
 
-/// Root attribute naming the backend that wrote the file; `Store::open` checks
-/// it (absent on stores written by the removed netcdf backend, which are
-/// rejected).
+/// Root attribute naming the backend that wrote the file. `Store::open`
+/// refuses an HDF5 file without it, which is what tells an arbitrary HDF5 file
+/// apart from a store.
 pub(crate) const BACKEND_ATTR: &str = "storage_backend";
 pub(crate) const BACKEND_NAME: &str = "hdf5";
 
@@ -83,9 +78,8 @@ const COMPACT_MAX_BYTES: usize = 56 * 1024;
 /// — far too small for the packed layout, whose timestamp-major chunks run up
 /// to the 1 MiB budget × the series length per dataset: a repeated
 /// single-column read then evicts and re-inflates every chunk on each call.
-/// 64 MiB keeps a whole packed dataset's chunks resident (netcdf-c sizes its
-/// per-variable cache generously for the same reason). Slot count is a prime
-/// well above the chunks a dataset can hold.
+/// 64 MiB keeps a whole packed dataset's chunks resident. Slot count is a
+/// prime well above the chunks a dataset can hold.
 const CHUNK_CACHE_NSLOTS: usize = 8209;
 const CHUNK_CACHE_NBYTES: usize = 64 << 20;
 const CHUNK_CACHE_W0: f64 = 0.75;
@@ -98,8 +92,8 @@ const CHUNK_CACHE_W0: f64 = 0.75;
 /// span between the first and last of them is a single HDF5 call and is what
 /// makes a whole-cohort read fast; it is also the wrong shape when the wanted
 /// columns are scattered, because the span then covers columns nobody asked
-/// for, over the pool's full time extent. Reading a single late column out of a
-/// wide pool that way allocated gigabytes to return kilobytes.
+/// for, over the pool's full time extent. Read that way, a single late column
+/// out of a wide pool costs gigabytes to return kilobytes.
 ///
 /// At this factor the block path reads at most three times what it returns, and
 /// anything sparser pays one call per column and reads exactly what it returns.
@@ -149,9 +143,21 @@ fn standalone_ranges(time: Range<usize>, element_shape: &[usize]) -> Vec<Range<u
 }
 
 // ---- typed read/write helpers ---------------------------------------------
+//
+// Byte order is two separate questions here. The *file's* is HDF5's business:
+// a dataset's datatype records it, and libhdf5 converts between that and the
+// host's native order on every read and write. These helpers are created with
+// native Rust types, so a file takes the writing host's order and any host can
+// read it back.
+//
+// The *buffer's* is this crate's: a `TypedArray`'s bytes are little-endian on
+// every host, because the content hash and every binding depend on one fixed
+// encoding. libhdf5's typed API takes native values rather than bytes with a
+// declared order, so the helpers below convert between the two. On a
+// little-endian host that conversion is a reinterpretation of the same bytes.
 
-/// Element-by-element decode of little-endian `$bytes` into `Vec<$t>`. Only the
-/// big-endian path needs it; see [`le_values!`].
+/// Element-by-element decode of a little-endian `$bytes` buffer into native
+/// `Vec<$t>`. Only the big-endian path needs it; see [`le_values!`].
 #[cfg(not(target_endian = "little"))]
 macro_rules! vec_from_le {
     ($bytes:expr, $t:ty, $n:expr) => {
@@ -162,10 +168,11 @@ macro_rules! vec_from_le {
     };
 }
 
-/// View little-endian `$bytes` as `Cow<[$t]>` for handing to libhdf5.
+/// View a little-endian `$bytes` buffer as native `Cow<[$t]>` for handing to
+/// libhdf5.
 ///
-/// A [`TypedArray`]'s buffer is already in the layout libhdf5 wants on a
-/// little-endian host, so this borrows it outright whenever the slice is
+/// On a little-endian host a [`TypedArray`]'s buffer already holds native
+/// values, so this borrows it outright whenever the slice is
 /// `$t`-aligned — which is the case for a whole array buffer, so a write does
 /// not allocate and fill a second copy of the data first. A misaligned slice (a
 /// sub-slice of a packed write, say) costs a memcpy. Big-endian hosts decode
@@ -189,8 +196,9 @@ macro_rules! le_values {
     }};
 }
 
-/// The inverse of [`le_values!`]: `$values` in its canonical little-endian byte
-/// form. A memcpy on a little-endian host, an element-wise swap elsewhere.
+/// The inverse of [`le_values!`]: native `$values`, as libhdf5 returns them,
+/// in the crate's canonical little-endian buffer form. A memcpy on a
+/// little-endian host, an element-wise swap elsewhere.
 macro_rules! le_bytes {
     ($values:expr, $t:ty) => {{
         #[cfg(target_endian = "little")]
@@ -207,7 +215,8 @@ macro_rules! le_bytes {
     }};
 }
 
-/// Read the hyperslab `ranges` of `ds` as little-endian bytes.
+/// Read the hyperslab `ranges` of `ds` into a little-endian buffer. libhdf5
+/// converts from the file's byte order on the way out.
 fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result<Vec<u8>> {
     let s = sel(ranges);
     macro_rules! rd {
@@ -241,7 +250,6 @@ fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result
     })
 }
 
-/// Read the whole dataset as little-endian bytes (row-major).
 /// The dtype a dataset is physically stored as, or `None` for a type this crate
 /// does not write.
 ///
@@ -280,15 +288,12 @@ fn stored_dtype(ds: &h5::Dataset) -> Option<Dtype> {
     None
 }
 
-/// Assert a standalone dataset holds what the catalog claims.
+/// Assert a standalone dataset holds what the catalog claims, as the packed
+/// path does through [`super::check_dtype`].
 ///
-/// The packed path has always called [`super::check_dtype`], and so does
-/// `MemoryBackend`; the standalone path decoded with the caller's dtype and
-/// never looked. HDF5 converts happily, so a catalog claiming `i32` for an `f64`
-/// dataset returned truncated integers — `[100.5, 200.5]` read back as
-/// `[100, 200]` — where the packed path reported the mismatch. The state needs a
-/// corrupt artifact rather than any supported call, which is exactly what
-/// `check_dtype` exists to catch.
+/// HDF5 converts on read, so without this a catalog claiming `i32` for an `f64`
+/// dataset would read back truncated integers — `[100.5, 200.5]` as `[100, 200]`
+/// — instead of reporting the mismatch. Only a corrupt artifact reaches it.
 fn check_standalone_dtype(ds: &h5::Dataset, hash: &[u8; 32], requested: Dtype) -> Result<()> {
     let Some(stored) = stored_dtype(ds) else {
         return Ok(());
@@ -302,6 +307,8 @@ fn check_standalone_dtype(ds: &h5::Dataset, hash: &[u8; 32], requested: Dtype) -
     super::check_dtype(hash, stored, requested)
 }
 
+/// Read the whole dataset into a row-major, little-endian buffer. libhdf5
+/// converts from the file's byte order on the way out.
 fn read_all(ds: &h5::Dataset, dtype: Dtype) -> Result<Vec<u8>> {
     macro_rules! rd {
         ($t:ty) => {{
@@ -324,8 +331,9 @@ fn read_all(ds: &h5::Dataset, dtype: Dtype) -> Result<Vec<u8>> {
     })
 }
 
-/// Write little-endian `bytes` (logical shape `shape`) into the hyperslab
-/// `ranges` of `ds`. The selection's shape must equal `shape`.
+/// Write a little-endian `bytes` buffer (logical shape `shape`) into the
+/// hyperslab `ranges` of `ds`. The selection's shape must equal `shape`. The
+/// file keeps its own byte order; libhdf5 converts on the way in.
 fn write_sel(
     ds: &h5::Dataset,
     dtype: Dtype,
@@ -362,7 +370,8 @@ fn write_sel(
     }
 }
 
-/// Write little-endian `bytes` as the whole content of `ds`.
+/// Write a little-endian `bytes` buffer as the whole content of `ds`. The file
+/// keeps its own byte order; libhdf5 converts on the way in.
 fn write_all(ds: &h5::Dataset, dtype: Dtype, bytes: &[u8]) -> Result<()> {
     macro_rules! wr {
         ($t:ty, $n:expr) => {{
@@ -501,34 +510,19 @@ fn read_str_attr(file: &h5::File, name: &str) -> Option<String> {
 
 #[derive(Debug, Clone)]
 enum Location {
-    Packed {
-        dataset: String,
-        col: usize,
-    },
-    Standalone {
-        var: String,
-    },
-    /// Accepted but not yet in the file: entry `idx` of the pending block for
-    /// pool `key`. Only a [`WriteMode::Deferred`] packed put creates one, and
-    /// only until that block is materialized — see [`Inner::pending`].
-    ///
-    /// It lives in `by_hash` beside the two physical locations rather than in a
-    /// map of its own so that every path which resolves a hash has to say what
-    /// it does with a buffered array: the compiler asks at each `match`, and the
-    /// answer is either "serve it from the buffer" or "write the block out
-    /// first", never "not found".
-    ///
-    /// The key is boxed so that this variant does not set the enum's size. A
-    /// `DatasetGroupKey` is some eighty bytes inline — a `Vec`, a `PackGroup`
-    /// carrying a 32-byte hash — and holding it here made every `by_hash`
-    /// entry nearly twice as wide, for every array, to serve the few that are
-    /// ever pending. A columnar read probes that map once per column, and at
-    /// 100,000 columns the wider entries cost 12% per timestep read on an
-    /// otherwise identical file.
-    Pending {
-        key: Box<DatasetGroupKey>,
-        idx: usize,
-    },
+    Packed { dataset: String, col: usize },
+    Standalone { var: String },
+}
+
+/// Where a column is read from, resolved from the index once per call by
+/// [`Inner::place`].
+#[derive(Clone, Copy)]
+enum Placement<'a> {
+    /// Column `col` of a packed dataset, gathered together with the other
+    /// columns the same call wants from it.
+    Packed { dataset: &'a str, col: usize },
+    /// A standalone dataset, read on its own.
+    Individual { hash: [u8; 32] },
 }
 
 #[derive(Debug, Clone)]
@@ -547,29 +541,54 @@ impl DatasetState {
     fn full(&self) -> bool {
         !self.columns.iter().any(|c| c.is_none())
     }
+    /// Bytes of one column's element block at a single timestep.
+    fn elem_bytes(&self) -> usize {
+        self.element_shape.iter().product::<usize>().max(1) * self.dtype.size()
+    }
+    /// The logical shape of one column: `[length, *element_shape]`.
+    fn column_shape(&self) -> Vec<usize> {
+        logical_shape(self.length, &self.element_shape)
+    }
+    /// The shape of a `width`-column slab of the dataset:
+    /// `[length, width, *element_shape]`.
+    fn slab_shape(&self, width: usize) -> Vec<usize> {
+        let mut shape = Vec::with_capacity(self.element_shape.len() + 2);
+        shape.push(self.length);
+        shape.push(width);
+        shape.extend_from_slice(&self.element_shape);
+        shape
+    }
+    /// Refuse a row index the dataset does not have.
+    fn check_row(&self, index: usize, name: &str) -> Result<()> {
+        if index >= self.length {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "index {index} out of bounds for dataset {name} length {}",
+                self.length
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `[len, *element_shape]`.
+fn logical_shape(len: usize, element_shape: &[usize]) -> Vec<usize> {
+    let mut shape = Vec::with_capacity(element_shape.len() + 1);
+    shape.push(len);
+    shape.extend_from_slice(element_shape);
+    shape
+}
+
+/// Refuse a time slice that does not lie within `0..total`.
+fn check_slice(range: &Range<usize>, total: usize) -> Result<()> {
+    if range.start > range.end || range.end > total {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "slice {range:?} out of bounds for length {total}"
+        )));
+    }
+    Ok(())
 }
 
 type DatasetGroupKey = (Dtype, Vec<usize>, usize, PackGroup);
-
-/// The arrays a pool has accepted under [`WriteMode::Deferred`] and not yet
-/// written, in the order they arrived — which is the order they will occupy in
-/// the dataset, so that N single adds inside one transaction and one bulk add
-/// of the same N items produce identical files.
-///
-/// The arrays are owned copies: the caller's borrow ends when `put_array`
-/// returns, and the block outlives it. The cost is that an open transaction
-/// holds its not-yet-written arrays in memory, which is why the buffer is
-/// bounded twice over — per pool by [`Inner::pending_width_cap`], and across
-/// every pool by [`MAX_PENDING_BYTES`]. See [`Inner::defer_packed`].
-#[derive(Debug, Default)]
-struct PendingBlock {
-    hashes: Vec<[u8; 32]>,
-    arrays: Vec<TypedArray>,
-    /// Running sum of `arrays[i].bytes.len()`, so the byte budget can be kept
-    /// without walking the block and the widest holder can be found in one
-    /// pass over the (few) pools.
-    bytes: usize,
-}
 
 pub(crate) struct Hdf5Backend {
     inner: Mutex<Inner>,
@@ -584,8 +603,7 @@ struct Inner {
     /// Open dataset handles, cached for the file's lifetime. HDF5's raw-data
     /// chunk cache lives per *open dataset handle* — reopening a dataset on
     /// every read would discard the cache and re-inflate every touched chunk
-    /// per call (netcdf-c avoids this by keeping all variables open; so do
-    /// we). Interior mutability is safe: `Inner` sits behind the backend's
+    /// per call. Interior mutability is safe: `Inner` sits behind the backend's
     /// `Mutex`.
     handles: std::cell::RefCell<HashMap<String, h5::Dataset>>,
     read_only: bool,
@@ -593,19 +611,6 @@ struct Inner {
     dataset_groups: HashMap<DatasetGroupKey, Vec<String>>,
     standalone_vars: HashSet<String>,
     by_hash: HashMap<[u8; 32], Location>,
-    /// Packed arrays accepted under [`WriteMode::Deferred`] and not yet
-    /// written, one block per pool. Always empty at open and after a flush;
-    /// `rebuild_index` therefore never sees one and nothing on disk records it.
-    pending: HashMap<DatasetGroupKey, PendingBlock>,
-    /// `pending.values().map(|b| b.bytes).sum()`, maintained rather than
-    /// recomputed. This is the figure [`MAX_PENDING_BYTES`] caps: the per-pool
-    /// width cap alone bounds *columns*, and a chunk row's worth of columns
-    /// of a multi-year series is gigabytes.
-    pending_bytes: usize,
-    /// The ceiling `pending_bytes` is held to, [`MAX_PENDING_BYTES`] outside
-    /// tests. A field rather than the constant so a test can lower it and cross
-    /// it with kilobytes instead of the hundred megabytes it takes in earnest.
-    max_pending_bytes: usize,
     /// Content hashes of the timestamp vectors present in the file, so a
     /// re-store of a known axis is answered without touching HDF5.
     timestamp_hashes: HashSet<[u8; 32]>,
@@ -626,13 +631,12 @@ struct Inner {
 impl Hdf5Backend {
     /// Create a new array file at `path`, which must not exist.
     ///
-    /// Exclusive rather than truncating on purpose. A truncating create is what
-    /// let a store be built over an existing artifact, emptying the HDF5 half
-    /// while the catalog beside it survived — see
-    /// [`Store::create_with_catalog`](crate::Store::create_with_catalog), which
-    /// rejects that case with its own message. This is the backstop behind that
-    /// check, and the guard that keeps a staged temporary from being written on
-    /// top of a leftover with the same name.
+    /// Exclusive rather than truncating: a truncating create would empty the
+    /// HDF5 half of an existing artifact while the catalog beside it survived.
+    /// [`Store::create_with_catalog`](crate::Store::create_with_catalog) refuses
+    /// that case with its own message; this is the backstop behind that check,
+    /// and it keeps a staged temporary from being written over a leftover with
+    /// the same name.
     pub fn create(path: &Path, compression: Compression) -> Result<Self> {
         let file = file_builder().create_excl(path).map_err(map_h5)?;
         write_str_attr(
@@ -656,9 +660,6 @@ impl Hdf5Backend {
                 dataset_groups: HashMap::new(),
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
-                pending: HashMap::new(),
-                pending_bytes: 0,
-                max_pending_bytes: MAX_PENDING_BYTES,
                 timestamp_hashes: HashSet::new(),
                 compression,
                 // A file this build just created carries this build's stamp.
@@ -714,9 +715,6 @@ impl Hdf5Backend {
                 dataset_groups: HashMap::new(),
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
-                pending: HashMap::new(),
-                pending_bytes: 0,
-                max_pending_bytes: MAX_PENDING_BYTES,
                 timestamp_hashes: HashSet::new(),
                 compression,
                 format_version: found,
@@ -1027,6 +1025,20 @@ impl Inner {
         write_sel(&ds, Dtype::Bool, &row, &[1, 64], vec![col..col + 1, 0..64])
     }
 
+    /// The index entry for a packed dataset, or an integrity error for a name
+    /// the index does not know.
+    fn dataset_state(&self, name: &str) -> Result<&DatasetState> {
+        self.datasets
+            .get(name)
+            .ok_or_else(|| TimeSeriesError::IntegrityError(format!("dataset {name} missing")))
+    }
+
+    fn dataset_state_mut(&mut self, name: &str) -> Result<&mut DatasetState> {
+        self.datasets
+            .get_mut(name)
+            .ok_or_else(|| TimeSeriesError::IntegrityError(format!("dataset {name} missing")))
+    }
+
     #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
     fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, group: PackGroup) -> Result<()> {
         let length = data.length();
@@ -1034,31 +1046,26 @@ impl Inner {
         let dtype = data.dtype;
 
         let dataset_name = self.ensure_writable_dataset(dtype, &element_shape, length, group)?;
-        let (col_index, hash_name) = {
-            let state = self.datasets.get(&dataset_name).expect("dataset ensured");
+        let (col_index, hash_name, slab_shape) = {
+            let state = self.dataset_state(&dataset_name)?;
             let col = state.first_free().ok_or_else(|| {
                 TimeSeriesError::IntegrityError("no free slot in newly-ensured dataset".into())
             })?;
-            (col, state.hash_name.clone())
+            (col, state.hash_name.clone(), state.slab_shape(1))
         };
 
         let ds = self.dataset(&dataset_name)?;
-        let mut slice_shape = vec![length, 1];
-        slice_shape.extend_from_slice(&element_shape);
         write_sel(
             &ds,
             dtype,
             &data.bytes,
-            &slice_shape,
+            &slab_shape,
             packed_ranges(0..length, col_index, &element_shape),
         )?;
         let hex = hash_hex(hash);
         self.write_hash_row(&hash_name, col_index, Some(&hex))?;
 
-        self.datasets
-            .get_mut(&dataset_name)
-            .expect("dataset ensured")
-            .columns[col_index] = Some(hex);
+        self.dataset_state_mut(&dataset_name)?.columns[col_index] = Some(hex);
         self.by_hash.insert(
             *hash,
             Location::Packed {
@@ -1067,249 +1074,6 @@ impl Inner {
             },
         );
         Ok(())
-    }
-
-    /// The width one pending block grows to before it is written out.
-    ///
-    /// Two ceilings, whichever is lower. The first is the per-chunk byte
-    /// budget, [`MAX_CHUNK_BYTES`] over one column's element block — the width
-    /// the block writer itself spills a batch at, so a span produces the
-    /// datasets the bulk add of the same items would. It is deliberately *not*
-    /// [`DEFAULT_COLS_PER_DATASET`](super::common::DEFAULT_COLS_PER_DATASET):
-    /// that ceiling bounded the buffer by a round number, but it also cut a
-    /// bulk add issued inside a transaction into growth-pool-sized pieces — a
-    /// 100,000-series batch became a hundred datasets of a thousand columns
-    /// where the same batch outside a transaction wrote ten of ten thousand —
-    /// and a columnar read pays one chunk per dataset per timestep, which
-    /// measured as 10% on every read of that store.
-    ///
-    /// The second converts [`MAX_PENDING_BYTES`] into columns *for this pool*,
-    /// because a column's cost is `length × element_block` and a thousand
-    /// columns of a multi-year series is hundreds of megabytes. It is a
-    /// per-pool share of a global budget rather than the budget itself; the
-    /// global total is what [`Self::evict_pending_over_budget`] enforces.
-    fn pending_width_cap(&self, dtype: Dtype, element_shape: &[usize], length: usize) -> usize {
-        let per_column = length
-            .saturating_mul(element_block_bytes(dtype, element_shape))
-            .max(1);
-        let by_bytes = (self.max_pending_bytes / per_column).max(1);
-        resolve_dataset_cols(Some(usize::MAX), dtype, element_shape).min(by_bytes)
-    }
-
-    /// Write out whole blocks, widest first, until the buffer is back inside
-    /// [`MAX_PENDING_BYTES`].
-    ///
-    /// The width cap bounds one pool; this bounds the sum. A transaction
-    /// touching many pools — several resolutions, several lengths, several
-    /// irregular axes — would otherwise hold a per-pool budget for each.
-    ///
-    /// Widest first because it frees the most memory for the fewest datasets,
-    /// and because a wide block is exactly the one whose dataset is worth
-    /// writing; the narrow ones are left to keep growing.
-    fn evict_pending_over_budget(&mut self) -> Result<()> {
-        while self.pending_bytes > self.max_pending_bytes {
-            let Some(key) = self
-                .pending
-                .iter()
-                .max_by_key(|(_, block)| block.bytes)
-                .map(|(key, _)| key.clone())
-            else {
-                return Ok(());
-            };
-            self.materialize_block(&key)?;
-        }
-        Ok(())
-    }
-
-    /// Accept a packed array into its pool's pending block instead of writing
-    /// it now. The caller has already established that the hash is new.
-    ///
-    /// The array is stored from this moment on — `by_hash` names it, so
-    /// `contains` is true, reads serve it, and `remove_array` unwinds it — it
-    /// simply has no physical position yet.
-    ///
-    /// Two things write a block out from here, and both exist to bound the
-    /// memory an open transaction holds: the pool reaching its width cap
-    /// ([`Self::pending_width_cap`]), and the buffer as a whole crossing
-    /// [`MAX_PENDING_BYTES`] ([`Self::evict_pending_over_budget`]). Either way
-    /// the result is a spill into an extra dataset, which is what the block
-    /// writer already does to a batch too wide for one chunk.
-    fn defer_packed(&mut self, hash: &[u8; 32], data: &TypedArray, group: PackGroup) -> Result<()> {
-        let element_shape = data.element_shape().to_vec();
-        let length = data.length();
-        let key = (data.dtype, element_shape.clone(), length, group);
-        let cap = self.pending_width_cap(data.dtype, &element_shape, length);
-        let bytes = data.bytes.len();
-        let block = self.pending.entry(key.clone()).or_default();
-        let idx = block.hashes.len();
-        block.hashes.push(*hash);
-        block.arrays.push(data.clone());
-        block.bytes += bytes;
-        let full = block.hashes.len() >= cap;
-        self.pending_bytes += bytes;
-        self.by_hash.insert(
-            *hash,
-            Location::Pending {
-                key: Box::new(key.clone()),
-                idx,
-            },
-        );
-        // The width cap first, so a pool that is full writes *its own* block
-        // rather than whichever one the budget happens to pick.
-        let spilled = if full {
-            self.materialize_block(&key)
-        } else {
-            Ok(())
-        };
-        if let Err(e) = spilled.and_then(|()| self.evict_pending_over_budget()) {
-            // This call is about to report that it stored nothing, and the
-            // caller stages for rollback only what a put said it wrote. Take
-            // the array back out so the two agree, wherever it ended up: still
-            // buffered if its own block failed, or a written column if its
-            // block landed and some *other* pool's eviction is what failed.
-            // The arrays that were already buffered belong to earlier calls and
-            // stay.
-            let _ = self.remove_array_locked(hash);
-            return Err(e);
-        }
-        Ok(())
-    }
-
-    /// Write one pool's pending block and drop it from the buffer. A no-op if
-    /// the pool has no block.
-    ///
-    /// A block of two or more goes to [`Self::put_packed_segment`], which sizes
-    /// a fresh dataset to it — the whole point of buffering. **A block of one
-    /// goes to [`Self::put_packed`] instead**, filling a slot of the shared
-    /// growth pool exactly as an un-transactioned single add does.
-    ///
-    /// Sizing a dataset to a block of one is the same mistake sizing one to a
-    /// batch of one is, and `Store::add_time_series_bulk` already refuses it for
-    /// that reason: the dataset is chunked `(1, 1, *element_shape)`, so a scalar
-    /// `f64` series gets an eight-byte chunk and one chunk per timestep, whose
-    /// per-chunk overhead dwarfs the data. Nineteen 30,500-step series added in
-    /// nineteen separate transactions wrote a 36 MB file that way, against 5.9 MB
-    /// through the growth pool. A transaction spanning *one* packed add is the
-    /// ordinary shape of the feature — "several operations atomic together" is
-    /// usually a removal and a replacement — so it cannot be the pathological
-    /// one.
-    ///
-    /// The cutoff is one and not more, because from two columns up the block is
-    /// what a bulk add of the same items would write, and matching that is the
-    /// invariant this whole path exists to hold.
-    ///
-    /// **An irregular block of one is a standalone array**, not a growth-pool
-    /// slot, and this is where that bet is settled for a span. Packing is the
-    /// right default for an irregular series because they arrive in cohorts on
-    /// one event timeline, but it is a bet the pool will be wider than one
-    /// column: a packed dataset spreads a single array over `length` chunks,
-    /// which costs far more than the one standalone dataset it replaces.
-    /// `Store::resolve_irregular_layouts` settles that bet before the write for
-    /// an un-transactioned add, from the requests it can see; inside a span it
-    /// cannot, because the cohort is still arriving. Deciding it here — where
-    /// the block's final membership *is* known — is what makes a cohort added
-    /// one series at a time pool exactly as the bulk add of it does. A pool the
-    /// file already holds still wins over standalone, which is the other half of
-    /// the same bet.
-    ///
-    /// On failure the block goes back exactly as it was, `by_hash` still names
-    /// its arrays as pending, and the error is returned: the transaction that
-    /// owns these writes is still open, and both committing again and rolling
-    /// back have to be able to find them.
-    fn materialize_block(&mut self, key: &DatasetGroupKey) -> Result<()> {
-        let Some(block) = self.pending.remove(key) else {
-            return Ok(());
-        };
-        if block.hashes.is_empty() {
-            return Ok(());
-        }
-        // Saturating because this runs on unwind paths too, where a panic on
-        // drifted bookkeeping would be far worse than an inexact budget.
-        self.pending_bytes = self.pending_bytes.saturating_sub(block.bytes);
-        let (dtype, element_shape, length, group) = key;
-        let outcome = if block.hashes.len() == 1 {
-            let (hash, array) = (&block.hashes[0], &block.arrays[0]);
-            // Both arms overwrite the `Location::Pending` with the physical one
-            // they write, like the block writer below.
-            match group {
-                PackGroup::Irregular(_) if !self.dataset_groups.contains_key(key) => {
-                    self.put_standalone(hash, array, None)
-                }
-                _ => self.put_packed(hash, array, *group),
-            }
-        } else {
-            // The index is only used by `put_packed_block` for its own `written`
-            // bookkeeping, which this caller does not need; the position in the
-            // block is what decides the column, and that is `seg`'s own order.
-            let seg: Vec<(usize, [u8; 32], &TypedArray)> = block
-                .hashes
-                .iter()
-                .zip(&block.arrays)
-                .enumerate()
-                .map(|(i, (&hash, array))| (i, hash, array))
-                .collect();
-            // `put_packed_segment` overwrites each hash's `Location::Pending`
-            // with the packed one it just wrote, so a success needs no further
-            // fixup.
-            self.put_packed_segment(&seg, *dtype, element_shape, *length, *group)
-        };
-        match outcome {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.pending_bytes += block.bytes;
-                self.pending.insert(key.clone(), block);
-                Err(e)
-            }
-        }
-    }
-
-    /// Write every pending block. Stops at the first failure with the rest of
-    /// the buffer intact, for the reason [`Self::materialize_block`] gives.
-    fn materialize_all(&mut self) -> Result<()> {
-        while let Some(key) = self.pending.keys().next().cloned() {
-            self.materialize_block(&key)?;
-        }
-        Ok(())
-    }
-
-    /// Write out the pending blocks holding any of `hashes`, so the caller can
-    /// resolve them to a physical position. Cheap when nothing is pending,
-    /// which is every read outside a transaction.
-    fn materialize_for(&mut self, hashes: impl IntoIterator<Item = [u8; 32]>) -> Result<()> {
-        if self.pending.is_empty() {
-            return Ok(());
-        }
-        let mut keys: Vec<DatasetGroupKey> = Vec::new();
-        for hash in hashes {
-            if let Some(Location::Pending { key, .. }) = self.by_hash.get(&hash)
-                && !keys.contains(key.as_ref())
-            {
-                keys.push((**key).clone());
-            }
-        }
-        for key in &keys {
-            self.materialize_block(key)?;
-        }
-        Ok(())
-    }
-
-    /// The buffered array for a hash `by_hash` reports as pending, or an
-    /// integrity error if the two have drifted apart.
-    fn pending_array(
-        &self,
-        hash: &[u8; 32],
-        key: &DatasetGroupKey,
-        idx: usize,
-    ) -> Result<&TypedArray> {
-        self.pending
-            .get(key)
-            .and_then(|block| block.arrays.get(idx))
-            .ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!(
-                    "array {} is indexed as pending but its block no longer holds it",
-                    hash_hex(hash)
-                ))
-            })
     }
 
     /// Write a block of same-shaped packed arrays into one or more freshly
@@ -1346,12 +1110,10 @@ impl Inner {
             let width = resolve_dataset_cols(Some(remaining), dtype, &element_shape);
             let seg = &new[start..start + width];
             if let Err(e) = self.put_packed_segment(seg, dtype, &element_shape, length, group) {
-                // The segments before this one are indexed but the caller
-                // never learns their hashes -- the `?` discards `written` --
-                // so `Store::settle` could not unwind them and they lingered
-                // as unreferenced columns until `compact`. Unwind them here,
-                // where the hashes are still known; the failing segment itself
-                // indexed nothing.
+                // The segments before this one are indexed, but returning an
+                // error discards `written`, so the caller never learns their
+                // hashes and cannot unwind them. Unwind them here, where the
+                // hashes are still known; the failing segment indexed nothing.
                 for (_, hash, _) in &new[..start] {
                     let _ = self.remove_array_locked(hash);
                 }
@@ -1393,14 +1155,10 @@ impl Inner {
         let mut buf = vec![0u8; length * width * block];
         for (c, (_, _, array)) in seg.iter().enumerate() {
             // Checked once per array rather than trusted per timestep. The
-            // slice below indexes by a stride derived from the *shape*, so a
-            // `TypedArray` whose `bytes` do not match it panicked here —
-            // reachable in safe code, since the fields are public and a
-            // struct literal bypasses `TypedArray::new`. The single-add path
-            // reaches `write_sel`, where ndarray reports the same mismatch as
-            // an `IntegrityError`, so the two write paths disagreed on
-            // error-versus-panic for one input; worse, this panicked *after*
-            // the dataset was created, leaving the store mid-write.
+            // slice below strides by the *shape*, and a `TypedArray` built by
+            // struct literal can carry bytes that do not match it. Unchecked,
+            // that would panic after the dataset was created; the single-add
+            // path reports the same mismatch as an `IntegrityError`.
             let needed = length * block;
             if array.bytes.len() < needed {
                 return Err(TimeSeriesError::IntegrityError(format!(
@@ -1509,166 +1267,121 @@ impl Inner {
         dtype: Dtype,
         range: Option<Range<usize>>,
     ) -> Result<TypedArray> {
-        let loc = self
-            .by_hash
-            .get(hash)
-            .ok_or(TimeSeriesError::NotFound)?
-            .clone();
-        match loc {
+        match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
             Location::Packed { dataset, col } => {
-                let state = self.datasets.get(&dataset).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
-                })?;
+                let state = self.dataset_state(dataset)?;
                 // A packed dataset's name carries its dtype, so here the
                 // caller's value is an assertion the two artifacts agree.
                 super::check_dtype(hash, state.dtype, dtype)?;
-                let total = state.length;
-                let range = range.unwrap_or(0..total);
-                if range.start > range.end || range.end > total {
-                    return Err(TimeSeriesError::InvalidParameter(format!(
-                        "slice {:?} out of bounds for length {}",
-                        range, total
-                    )));
-                }
-                let out_len = range.end - range.start;
-                let ds = self.dataset(&dataset)?;
+                let range = range.unwrap_or(0..state.length);
+                check_slice(&range, state.length)?;
+                let shape = logical_shape(range.len(), &state.element_shape);
+                let ds = self.dataset(dataset)?;
                 let bytes = read_sel(
                     &ds,
                     state.dtype,
-                    packed_ranges(range, col, &state.element_shape),
+                    packed_ranges(range, *col, &state.element_shape),
                 )?;
-                let mut shape = vec![out_len];
-                shape.extend_from_slice(&state.element_shape);
                 TypedArray::new(state.dtype, shape, bytes).map_err(TimeSeriesError::IntegrityError)
             }
             Location::Standalone { var } => {
-                let ds = self.dataset(&var)?;
+                let ds = self.dataset(var)?;
                 check_standalone_dtype(&ds, hash, dtype)?;
                 let full_shape = ds.shape();
-                let total = full_shape.first().copied().unwrap_or(0);
-                match range {
-                    None => {
-                        let bytes = read_all(&ds, dtype)?;
-                        TypedArray::new(dtype, full_shape, bytes)
-                            .map_err(TimeSeriesError::IntegrityError)
-                    }
-                    Some(range) => {
-                        if range.start > range.end || range.end > total {
-                            return Err(TimeSeriesError::InvalidParameter(format!(
-                                "slice {:?} out of bounds for length {}",
-                                range, total
-                            )));
-                        }
-                        let element_shape = &full_shape[1.min(full_shape.len())..];
-                        let out_len = range.end - range.start;
-                        let bytes = read_sel(&ds, dtype, standalone_ranges(range, element_shape))?;
-                        let mut shape = vec![out_len];
-                        shape.extend_from_slice(element_shape);
-                        TypedArray::new(dtype, shape, bytes)
-                            .map_err(TimeSeriesError::IntegrityError)
-                    }
-                }
-            }
-            // Served straight from the buffer rather than by writing the block
-            // out first: a read of what a transaction has just added is the
-            // ordinary case, and cutting the block short for it would undo the
-            // coalescing the deferral exists for.
-            Location::Pending { key, idx } => {
-                let array = self.pending_array(hash, &key, idx)?;
-                super::check_dtype(hash, array.dtype, dtype)?;
-                let total = array.length();
                 let Some(range) = range else {
-                    return Ok(array.clone());
+                    let bytes = read_all(&ds, dtype)?;
+                    return TypedArray::new(dtype, full_shape, bytes)
+                        .map_err(TimeSeriesError::IntegrityError);
                 };
-                if range.start > range.end || range.end > total {
-                    return Err(TimeSeriesError::InvalidParameter(format!(
-                        "slice {:?} out of bounds for length {}",
-                        range, total
-                    )));
-                }
-                let block = element_block_bytes(array.dtype, array.element_shape());
-                let out_len = range.end - range.start;
-                let mut shape = vec![out_len];
-                shape.extend_from_slice(array.element_shape());
-                let bytes = array.bytes[range.start * block..range.end * block].to_vec();
-                TypedArray::new(array.dtype, shape, bytes).map_err(TimeSeriesError::IntegrityError)
+                let total = full_shape.first().copied().unwrap_or(0);
+                check_slice(&range, total)?;
+                let element_shape = &full_shape[1.min(full_shape.len())..];
+                let shape = logical_shape(range.len(), element_shape);
+                let bytes = read_sel(&ds, dtype, standalone_ranges(range, element_shape))?;
+                TypedArray::new(dtype, shape, bytes).map_err(TimeSeriesError::IntegrityError)
             }
         }
     }
 
-    fn read_index_locked(
+    /// Where each of `hashes` is read from, with the packed dtype assertion
+    /// made once per column. `dtype_at(i)` is the dtype the catalog gives
+    /// `hashes[i]`.
+    fn place(
+        &self,
+        hashes: &[[u8; 32]],
+        dtype_at: impl Fn(usize) -> Dtype,
+    ) -> Result<Vec<Placement<'_>>> {
+        hashes
+            .iter()
+            .enumerate()
+            .map(
+                |(i, hash)| match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+                    Location::Packed { dataset, col } => {
+                        self.check_packed_dtype(hash, dataset, dtype_at(i))?;
+                        Ok(Placement::Packed { dataset, col: *col })
+                    }
+                    Location::Standalone { .. } => Ok(Placement::Individual { hash: *hash }),
+                },
+            )
+            .collect()
+    }
+
+    /// One element block per column — row `row_at(i)` of `hashes[i]` —
+    /// gathered into `out` in `hashes` order.
+    ///
+    /// Columns that want the same row of the same packed dataset share one
+    /// hyperslab, over `0..=` the widest of them. With one row for every
+    /// column — the uniform sweep — that is one hyperslab per dataset. A
+    /// persistent reader, whose columns sit on independent breakpoint vectors,
+    /// wants different rows of one pool and pays up to one per distinct
+    /// `(dataset, row)`: the intrinsic price of independent breakpoints, and
+    /// for the data the type exists for — sparse curves, few distinct vectors —
+    /// a small one.
+    fn read_rows_locked(
         &self,
         hashes: &[[u8; 32]],
         dtype: Dtype,
-        index: usize,
+        row_at: impl Fn(usize) -> usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
         out.clear();
         if hashes.is_empty() {
             return Ok(());
         }
+        let placements = self.place(hashes, |_| dtype)?;
 
-        enum Placement {
-            Packed {
-                dataset: String,
-                col: usize,
-            },
-            /// A standalone dataset or an array still buffered in its pool's
-            /// pending block. Neither sits in a packed row, so both are read on
-            /// their own through `read_locked` rather than gathered from one.
-            Individual {
-                hash: [u8; 32],
-            },
-        }
-
-        let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
-        let mut max_col: HashMap<String, usize> = HashMap::new();
-        for hash in hashes {
-            match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
-                Location::Packed { dataset, col } => {
-                    self.check_packed_dtype(hash, dataset, dtype)?;
-                    max_col
-                        .entry(dataset.clone())
-                        .and_modify(|m| *m = (*m).max(*col))
-                        .or_insert(*col);
-                    placements.push(Placement::Packed {
-                        dataset: dataset.clone(),
-                        col: *col,
-                    });
-                }
-                Location::Standalone { .. } | Location::Pending { .. } => {
-                    placements.push(Placement::Individual { hash: *hash });
-                }
+        // Widest column wanted per `(dataset, row)`, so each hyperslab reads
+        // exactly as far as it has to.
+        let mut max_col: HashMap<(&str, usize), usize> = HashMap::new();
+        for (i, placement) in placements.iter().enumerate() {
+            if let Placement::Packed { dataset, col } = *placement {
+                let top = max_col.entry((dataset, row_at(i))).or_insert(0);
+                *top = (*top).max(col);
             }
         }
-
-        let mut rows: HashMap<String, (Vec<u8>, usize)> = HashMap::new();
-        for (dataset, &top) in &max_col {
-            let state = self.datasets.get(dataset).ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
-            })?;
-            if index >= state.length {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "index {index} out of bounds for dataset {dataset} length {}",
-                    state.length
-                )));
-            }
-            let width = top + 1;
-            let elem_bytes =
-                state.element_shape.iter().product::<usize>().max(1) * state.dtype.size();
+        let mut rows: HashMap<(&str, usize), (Vec<u8>, usize)> =
+            HashMap::with_capacity(max_col.len());
+        for (&(dataset, row), &top) in &max_col {
+            let state = self.dataset_state(dataset)?;
+            state.check_row(row, dataset)?;
             let ds = self.dataset(dataset)?;
             let bytes = read_sel(
                 &ds,
                 state.dtype,
-                packed_block_ranges(index..index + 1, 0..width, &state.element_shape),
+                packed_block_ranges(row..row + 1, 0..top + 1, &state.element_shape),
             )?;
-            rows.insert(dataset.clone(), (bytes, elem_bytes));
+            rows.insert((dataset, row), (bytes, state.elem_bytes()));
         }
 
-        for placement in &placements {
-            match placement {
+        // Scatter back in the caller's column order, which is what makes the
+        // result line up with `hashes` (and therefore with the reader's keys).
+        // Getting this wrong produces plausible-looking wrong numbers rather
+        // than an error, so it is asserted directly by the reader tests.
+        for (i, placement) in placements.iter().enumerate() {
+            match *placement {
                 Placement::Packed { dataset, col } => {
-                    let (row, elem_bytes) = rows.get(dataset).expect("dataset row read above");
+                    let (row, elem_bytes) =
+                        rows.get(&(dataset, row_at(i))).expect("row read above");
                     let start = col * elem_bytes;
                     let block = row.get(start..start + elem_bytes).ok_or_else(|| {
                         TimeSeriesError::IntegrityError(format!(
@@ -1678,7 +1391,8 @@ impl Inner {
                     out.extend_from_slice(block);
                 }
                 Placement::Individual { hash } => {
-                    let arr = self.read_locked(hash, dtype, Some(index..index + 1))?;
+                    let row = row_at(i);
+                    let arr = self.read_locked(&hash, dtype, Some(row..row + 1))?;
                     out.extend_from_slice(&arr.bytes);
                 }
             }
@@ -1686,130 +1400,8 @@ impl Inner {
         Ok(())
     }
 
-    /// [`Self::read_index_locked`] with a row index per column.
-    ///
-    /// Bucketed by `(dataset, row)` rather than by dataset alone: the columns
-    /// of a persistent reader can want *different* rows of the same packed
-    /// pool, so one hyperslab per dataset is no longer enough. Columns that do
-    /// happen to want the same row of the same dataset still share one, which
-    /// is the common case — a handful of distinct monthly curves across
-    /// thousands of series.
-    ///
-    /// The cost to know: this is up to one hyperslab per distinct
-    /// `(dataset, row)` pair, against the one-per-dataset the uniform path
-    /// gets. That is the intrinsic price of independent breakpoints, and for
-    /// the data the type exists for — sparse curves, few distinct vectors — it
-    /// is small.
-    fn read_indices_locked(
-        &self,
-        hashes: &[[u8; 32]],
-        dtype: Dtype,
-        indices: &[usize],
-        out: &mut Vec<u8>,
-    ) -> Result<()> {
-        out.clear();
-        if hashes.is_empty() {
-            return Ok(());
-        }
-
-        enum Placement {
-            /// Which `(dataset, row)` bucket this column reads from, and where
-            /// its element sits inside that row.
-            Packed { bucket: (String, usize), col: usize },
-            /// A standalone dataset or a still-buffered pending array: read on
-            /// its own, at its own row.
-            Individual { hash: [u8; 32], index: usize },
-        }
-
-        let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
-        // Widest column wanted per `(dataset, row)`, so each bucket reads
-        // exactly as far as it has to.
-        let mut max_col: HashMap<(String, usize), usize> = HashMap::new();
-        for (hash, &index) in hashes.iter().zip(indices) {
-            match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
-                Location::Packed { dataset, col } => {
-                    self.check_packed_dtype(hash, dataset, dtype)?;
-                    let bucket = (dataset.clone(), index);
-                    max_col
-                        .entry(bucket.clone())
-                        .and_modify(|m| *m = (*m).max(*col))
-                        .or_insert(*col);
-                    placements.push(Placement::Packed { bucket, col: *col });
-                }
-                Location::Standalone { .. } | Location::Pending { .. } => {
-                    placements.push(Placement::Individual { hash: *hash, index });
-                }
-            }
-        }
-
-        let mut rows: HashMap<(String, usize), (Vec<u8>, usize)> = HashMap::new();
-        for (bucket, &top) in &max_col {
-            let (dataset, index) = bucket;
-            let state = self.datasets.get(dataset).ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
-            })?;
-            if *index >= state.length {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "index {index} out of bounds for dataset {dataset} length {}",
-                    state.length
-                )));
-            }
-            let width = top + 1;
-            let elem_bytes =
-                state.element_shape.iter().product::<usize>().max(1) * state.dtype.size();
-            let ds = self.dataset(dataset)?;
-            let bytes = read_sel(
-                &ds,
-                state.dtype,
-                packed_block_ranges(*index..*index + 1, 0..width, &state.element_shape),
-            )?;
-            rows.insert(bucket.clone(), (bytes, elem_bytes));
-        }
-
-        // Scatter back in the caller's column order, which is what makes the
-        // result line up with `hashes` (and therefore with the reader's keys).
-        // Getting this wrong produces plausible-looking wrong numbers rather
-        // than an error, so it is asserted directly by the reader tests.
-        for placement in &placements {
-            match placement {
-                Placement::Packed { bucket, col } => {
-                    let (row, elem_bytes) = rows.get(bucket).expect("bucket row read above");
-                    let start = col * elem_bytes;
-                    let block = row.get(start..start + elem_bytes).ok_or_else(|| {
-                        TimeSeriesError::IntegrityError(format!(
-                            "column {col} out of row bounds for dataset {}",
-                            bucket.0
-                        ))
-                    })?;
-                    out.extend_from_slice(block);
-                }
-                Placement::Individual { hash, index } => {
-                    let arr = self.read_locked(hash, dtype, Some(*index..*index + 1))?;
-                    out.extend_from_slice(&arr.bytes);
-                }
-            }
-        }
-        Ok(())
-    }
-
+    /// Whole arrays, one per hash, in `hashes` order.
     fn read_arrays_locked(&self, hashes: &[[u8; 32]], dtypes: &[Dtype]) -> Result<Vec<TypedArray>> {
-        if hashes.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        enum Placement {
-            Packed {
-                dataset: String,
-                col: usize,
-            },
-            /// A standalone dataset or a still-buffered pending array: read on
-            /// its own rather than gathered out of a packed column span.
-            Individual {
-                hash: [u8; 32],
-                dtype: Dtype,
-            },
-        }
-
         if dtypes.len() != hashes.len() {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "read_arrays: {} dtypes for {} hashes",
@@ -1817,45 +1409,33 @@ impl Inner {
                 hashes.len()
             )));
         }
-        let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placements = self.place(hashes, |i| dtypes[i])?;
+
         // Exactly the columns asked for, per dataset -- not a high-water mark.
         // Ordered, because the fetch below works from the span they cover.
-        let mut wanted_cols: HashMap<String, BTreeSet<usize>> = HashMap::new();
-        for (hash, &dtype) in hashes.iter().zip(dtypes) {
-            match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
-                Location::Packed { dataset, col } => {
-                    self.check_packed_dtype(hash, dataset, dtype)?;
-                    wanted_cols.entry(dataset.clone()).or_default().insert(*col);
-                    placements.push(Placement::Packed {
-                        dataset: dataset.clone(),
-                        col: *col,
-                    });
-                }
-                Location::Standalone { .. } | Location::Pending { .. } => {
-                    placements.push(Placement::Individual { hash: *hash, dtype });
-                }
+        let mut wanted_cols: HashMap<&str, BTreeSet<usize>> = HashMap::new();
+        for placement in &placements {
+            if let Placement::Packed { dataset, col } = *placement {
+                wanted_cols.entry(dataset).or_default().insert(col);
             }
         }
 
         /// The columns of one packed dataset that this call asked for, each
         /// already extracted from however they were fetched.
-        struct DatasetRead {
+        struct DatasetRead<'a> {
             columns: HashMap<usize, Vec<u8>>,
-            length: usize,
-            dtype: Dtype,
-            element_shape: Vec<usize>,
+            state: &'a DatasetState,
         }
-        let mut reads: HashMap<String, DatasetRead> = HashMap::new();
-        for (dataset, cols) in &wanted_cols {
-            let state = self.datasets.get(dataset).ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
-            })?;
-            let elem_bytes =
-                state.element_shape.iter().product::<usize>().max(1) * state.dtype.size();
+        let mut reads: HashMap<&str, DatasetRead<'_>> = HashMap::with_capacity(wanted_cols.len());
+        for (&dataset, cols) in &wanted_cols {
+            let state = self.dataset_state(dataset)?;
+            let elem_bytes = state.elem_bytes();
             let ds = self.dataset(dataset)?;
-            // `cols` is a `BTreeSet`, so first and last bound the span.
-            let first = *cols.iter().next().expect("entry implies a column");
-            let last = *cols.iter().next_back().expect("entry implies a column");
+            let first = *cols.first().expect("entry implies a column");
+            let last = *cols.last().expect("entry implies a column");
             let span = last - first + 1;
             let mut columns: HashMap<usize, Vec<u8>> = HashMap::with_capacity(cols.len());
             if span <= cols.len().saturating_mul(SPAN_DENSITY) {
@@ -1898,36 +1478,26 @@ impl Inner {
                     );
                 }
             }
-            reads.insert(
-                dataset.clone(),
-                DatasetRead {
-                    columns,
-                    length: state.length,
-                    dtype: state.dtype,
-                    element_shape: state.element_shape.clone(),
-                },
-            );
+            reads.insert(dataset, DatasetRead { columns, state });
         }
 
         let mut out: Vec<TypedArray> = Vec::with_capacity(hashes.len());
-        for placement in &placements {
-            match placement {
+        for (i, placement) in placements.iter().enumerate() {
+            match *placement {
                 Placement::Packed { dataset, col } => {
                     let r = reads.get(dataset).expect("dataset read above");
                     // Cloned rather than moved: the same hash may appear more
                     // than once in `hashes`, and each occurrence owns its array.
                     // Present by construction -- the read above fetched exactly
                     // the columns these placements name.
-                    let col_bytes = r.columns.get(col).expect("column read above").clone();
-                    let mut shape = vec![r.length];
-                    shape.extend_from_slice(&r.element_shape);
+                    let col_bytes = r.columns.get(&col).expect("column read above").clone();
                     out.push(
-                        TypedArray::new(r.dtype, shape, col_bytes)
+                        TypedArray::new(r.state.dtype, r.state.column_shape(), col_bytes)
                             .map_err(TimeSeriesError::IntegrityError)?,
                     );
                 }
-                Placement::Individual { hash, dtype } => {
-                    out.push(self.read_locked(hash, *dtype, None)?);
+                Placement::Individual { hash } => {
+                    out.push(self.read_locked(&hash, dtypes[i], None)?);
                 }
             }
         }
@@ -1938,32 +1508,13 @@ impl Inner {
     /// one the catalog says the array has. Only reachable if the two artifacts
     /// have drifted.
     fn check_packed_dtype(&self, hash: &[u8; 32], dataset: &str, dtype: Dtype) -> Result<()> {
-        let state = self
-            .datasets
-            .get(dataset)
-            .ok_or_else(|| TimeSeriesError::IntegrityError(format!("dataset {dataset} missing")))?;
-        super::check_dtype(hash, state.dtype, dtype)
+        super::check_dtype(hash, self.dataset_state(dataset)?.dtype, dtype)
     }
 
     fn array_shape_locked(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
-        let loc = self
-            .by_hash
-            .get(hash)
-            .ok_or(TimeSeriesError::NotFound)?
-            .clone();
-        match loc {
-            Location::Standalone { var } => Ok(self.dataset(&var)?.shape()),
-            Location::Packed { dataset, .. } => {
-                let state = self.datasets.get(&dataset).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
-                })?;
-                let mut shape = vec![state.length];
-                shape.extend_from_slice(&state.element_shape);
-                Ok(shape)
-            }
-            Location::Pending { key, idx } => {
-                Ok(self.pending_array(hash, &key, idx)?.shape.clone())
-            }
+        match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+            Location::Standalone { var } => Ok(self.dataset(var)?.shape()),
+            Location::Packed { dataset, .. } => Ok(self.dataset_state(dataset)?.column_shape()),
         }
     }
 
@@ -1977,11 +1528,6 @@ impl Inner {
         out: &mut Vec<u8>,
     ) -> Result<()> {
         out.clear();
-        let loc = self
-            .by_hash
-            .get(hash)
-            .ok_or(TimeSeriesError::NotFound)?
-            .clone();
         // The window's bounds against the array's logical shape, and the range
         // each logical axis selects: the count axis `start..start + len`, the
         // rest whole.
@@ -2007,9 +1553,9 @@ impl Inner {
                 0..axis_len
             }
         };
-        match loc {
+        match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
             Location::Standalone { var } => {
-                let ds = self.dataset(&var)?;
+                let ds = self.dataset(var)?;
                 // The same assertion `read_locked` makes: HDF5 converts on
                 // read, so decoding with the catalog's dtype alone would hand a
                 // drifted row back as silently truncated values.
@@ -2037,14 +1583,11 @@ impl Inner {
             // so the column is pinned and logical axis `j >= 1` is dataset axis
             // `j + 1`; a unit column axis leaves row-major order unchanged.
             Location::Packed { dataset, col } => {
-                let state = self.datasets.get(&dataset).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
-                })?;
+                let state = self.dataset_state(dataset)?;
                 super::check_dtype(hash, state.dtype, dtype)?;
-                let mut logical = vec![state.length];
-                logical.extend_from_slice(&state.element_shape);
+                let logical = state.column_shape();
                 check_bounds(&logical)?;
-                let mut ranges = vec![axis_range(0, logical[0]), col..col + 1];
+                let mut ranges = vec![axis_range(0, logical[0]), *col..*col + 1];
                 ranges.extend(
                     logical
                         .iter()
@@ -2052,20 +1595,10 @@ impl Inner {
                         .skip(1)
                         .map(|(j, &axis_len)| axis_range(j, axis_len)),
                 );
-                let ds = self.dataset(&dataset)?;
+                let ds = self.dataset(dataset)?;
                 let bytes = read_sel(&ds, state.dtype, ranges)?;
                 out.extend_from_slice(&bytes);
                 Ok(())
-            }
-            // Reachable for the same reason the packed arm is: a dense forecast
-            // whose bytes an already-buffered static array hashes to files under
-            // the location that hash already has. The buffered array is the
-            // whole thing, so the block comes straight out of it.
-            Location::Pending { key, idx } => {
-                let array = self.pending_array(hash, &key, idx)?;
-                super::check_dtype(hash, array.dtype, dtype)?;
-                check_bounds(&array.shape)?;
-                write_window_block(array, count_axis, start, len, out)
             }
         }
     }
@@ -2102,10 +1635,8 @@ impl Inner {
             // Costs a read-modify-write of the touched chunks; removal is not a
             // hot path.
             Location::Packed { dataset, col } => {
-                let (hash_name, dtype, element_shape, length) = {
-                    let state = self.datasets.get_mut(&dataset).ok_or_else(|| {
-                        TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
-                    })?;
+                let (hash_name, dtype, element_shape, length, slab_shape) = {
+                    let state = self.dataset_state_mut(&dataset)?;
                     if col < state.columns.len() {
                         state.columns[col] = None;
                     }
@@ -2114,58 +1645,20 @@ impl Inner {
                         state.dtype,
                         state.element_shape.clone(),
                         state.length,
+                        state.slab_shape(1),
                     )
                 };
                 self.write_hash_row(&hash_name, col, None)?;
                 if length > 0 {
                     let ds = self.dataset(&dataset)?;
-                    let mut slice_shape = vec![length, 1];
-                    slice_shape.extend_from_slice(&element_shape);
-                    let zeros = vec![0u8; slice_shape.iter().product::<usize>() * dtype.size()];
+                    let zeros = vec![0u8; slab_shape.iter().product::<usize>() * dtype.size()];
                     write_sel(
                         &ds,
                         dtype,
                         &zeros,
-                        &slice_shape,
+                        &slab_shape,
                         packed_ranges(0..length, col, &element_shape),
                     )?;
-                }
-                Ok(())
-            }
-            // Never written, so there is nothing to unlink or zero: drop it out
-            // of its block. This is the whole unwind path for a deferred write —
-            // rollback and `Store::settle` call `remove_array` per staged hash,
-            // and a buffered array is staged like any other.
-            //
-            // `swap_remove` rather than `remove`: a rollback removes the block's
-            // arrays one at a time, and shifting the tail on each would be
-            // quadratic in the transaction's size. It reorders the survivors,
-            // which only decides which column they land in — and a rolled-back
-            // span has no column order to preserve.
-            Location::Pending { key, idx } => {
-                let Some(block) = self.pending.get_mut(key.as_ref()) else {
-                    return Ok(());
-                };
-                if idx >= block.hashes.len() {
-                    return Ok(());
-                }
-                block.hashes.swap_remove(idx);
-                let dropped = block.arrays.swap_remove(idx).bytes.len();
-                block.bytes = block.bytes.saturating_sub(dropped);
-                let moved = block.hashes.get(idx).copied();
-                let emptied = block.hashes.is_empty();
-                self.pending_bytes = self.pending_bytes.saturating_sub(dropped);
-                if let Some(moved) = moved {
-                    self.by_hash.insert(
-                        moved,
-                        Location::Pending {
-                            key: key.clone(),
-                            idx,
-                        },
-                    );
-                }
-                if emptied {
-                    self.pending.remove(key.as_ref());
                 }
                 Ok(())
             }
@@ -2181,24 +1674,16 @@ impl StorageBackend for Hdf5Backend {
         data: &TypedArray,
         group: PackGroup,
         layout: ArrayLayout,
-        mode: WriteMode,
     ) -> Result<bool> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
         inner.ensure_writable()?;
         if inner.by_hash.contains_key(hash) {
             return Ok(false);
         }
-        match (layout, mode) {
-            // Buffered for the block writer instead of dropped into the first
-            // free slot of a growth pool: inside a transaction the write is not
-            // durable until the outermost commit anyway, so nothing is owed the
-            // file yet and the whole span can be packed at once.
-            (ArrayLayout::Packed, WriteMode::Deferred) => inner.defer_packed(hash, data, group)?,
-            (ArrayLayout::Packed, WriteMode::Immediate) => inner.put_packed(hash, data, group)?,
-            // A standalone array is its own dataset, so there is nothing to
-            // coalesce and no reason to hold it.
-            (ArrayLayout::Standalone, _) => inner.put_standalone(hash, data, None)?,
-            (ArrayLayout::StandaloneWindowed { count_axis }, _) => {
+        match layout {
+            ArrayLayout::Packed => inner.put_packed(hash, data, group)?,
+            ArrayLayout::Standalone => inner.put_standalone(hash, data, None)?,
+            ArrayLayout::StandaloneWindowed { count_axis } => {
                 inner.put_standalone(hash, data, Some(count_axis))?
             }
         }
@@ -2211,45 +1696,10 @@ impl StorageBackend for Hdf5Backend {
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
         group: PackGroup,
-        mode: WriteMode,
     ) -> Result<Vec<bool>> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
         inner.ensure_writable()?;
-        match mode {
-            WriteMode::Immediate => inner.put_packed_block(hashes, arrays, group),
-            // Appended to the pool's pending block rather than given a dataset
-            // of its own. This is what makes a binding whose single add is a
-            // one-item batch — Julia's, through the C ABI — coalesce inside a
-            // transaction instead of spilling a one-column dataset per call.
-            WriteMode::Deferred => {
-                let mut written = vec![false; hashes.len()];
-                for (i, (hash, &array)) in hashes.iter().zip(arrays).enumerate() {
-                    // Also catches a hash repeated within this block: the first
-                    // occurrence indexes it as pending.
-                    if inner.by_hash.contains_key(hash) {
-                        continue;
-                    }
-                    if let Err(e) = inner.defer_packed(hash, array, group) {
-                        // The `?` would discard `written`, so the caller could
-                        // not unwind the arrays this call had already buffered
-                        // — the same hole the immediate path closes by hand.
-                        for (j, hash) in hashes.iter().enumerate().take(i) {
-                            if written[j] {
-                                let _ = inner.remove_array_locked(hash);
-                            }
-                        }
-                        return Err(e);
-                    }
-                    written[i] = true;
-                }
-                Ok(written)
-            }
-        }
-    }
-
-    fn materialize_pending(&self) -> Result<()> {
-        let mut inner = self.inner.lock().expect("mutex poisoned");
-        inner.materialize_all()
+        inner.put_packed_block(hashes, arrays, group)
     }
 
     fn has_pack_group(
@@ -2261,10 +1711,7 @@ impl StorageBackend for Hdf5Backend {
     ) -> bool {
         let inner = self.inner.lock().expect("mutex poisoned");
         let key = (dtype, element_shape.to_vec(), length, group);
-        // A pending block is a pool too, as far as the question this answers is
-        // concerned: the irregular write path asks whether a cohort exists to
-        // join, and a block on its way to becoming a dataset is one.
-        inner.dataset_groups.contains_key(&key) || inner.pending.contains_key(&key)
+        inner.dataset_groups.contains_key(&key)
     }
 
     #[tracing::instrument(skip(self, hash))]
@@ -2288,7 +1735,7 @@ impl StorageBackend for Hdf5Backend {
         out: &mut Vec<u8>,
     ) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_index_locked(hashes, dtype, index, out)
+        inner.read_rows_locked(hashes, dtype, |_| index, out)
     }
 
     fn read_indices_into(
@@ -2306,7 +1753,7 @@ impl StorageBackend for Hdf5Backend {
             )));
         }
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_indices_locked(hashes, dtype, indices, out)
+        inner.read_rows_locked(hashes, dtype, |i| indices[i], out)
     }
 
     #[tracing::instrument(skip(self, hashes), fields(n = hashes.len()))]
@@ -2384,13 +1831,7 @@ impl StorageBackend for Hdf5Backend {
     }
 
     fn locate(&self, hash: &[u8; 32]) -> Result<ArrayLocation> {
-        let mut inner = self.inner.lock().expect("mutex poisoned");
-        // The one read that cannot be served from the buffer: the answer *is* a
-        // physical position, and this exists so a caller can go and look at the
-        // bytes with h5dump. So a buffered array is written out first — the
-        // "materialize on read" rule, which cuts that pool's block short in
-        // exchange for an answer that is true of the file.
-        inner.materialize_for([*hash])?;
+        let inner = self.inner.lock().expect("mutex poisoned");
         // Both layouts live in the same group; `path` makes the name absolute
         // so it can be pasted straight into h5dump/h5py.
         let path = |name: &str| format!("/{ROOT_GROUP}/{SINGLE_GROUP}/{name}");
@@ -2401,14 +1842,6 @@ impl StorageBackend for Hdf5Backend {
                     column: *col,
                 },
                 Location::Standalone { var } => ArrayLocation::Standalone { dataset: path(var) },
-                // `materialize_for` above left no pending location behind, so
-                // this only fires if the index and the buffer have drifted.
-                Location::Pending { .. } => {
-                    return Err(TimeSeriesError::IntegrityError(format!(
-                        "array {} is still buffered after being materialized",
-                        hash_hex(hash)
-                    )));
-                }
             },
         )
     }
@@ -2430,11 +1863,6 @@ impl StorageBackend for Hdf5Backend {
         })
     }
 
-    /// Counts what the *file* holds. An array still buffered by a deferred put
-    /// has no dataset and no slot, so it appears in neither figure — which
-    /// cannot mislead the caller this exists for, `Store::compact`, because
-    /// compaction refuses to run while a transaction is open and only a
-    /// transaction defers.
     fn stats(&self) -> BackendStats {
         let inner = self.inner.lock().expect("mutex poisoned");
         BackendStats {
@@ -2474,16 +1902,10 @@ impl StorageBackend for Hdf5Backend {
     }
 
     fn flush(&mut self) -> Result<()> {
-        if self.inner.lock().expect("mutex poisoned").read_only {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        if inner.read_only {
             return Ok(());
         }
-        // Buffered blocks first: a flush is the point at which everything put so
-        // far is on disk, and this is what makes the outermost
-        // `commit_transaction` — which flushes before it releases — write the
-        // span's adds as one block per pool. Called before the lock below is
-        // taken, because it takes the same one.
-        self.materialize_pending()?;
-        let inner = self.inner.lock().expect("mutex poisoned");
         inner.file.flush().map_err(map_h5)
     }
 
@@ -2536,19 +1958,27 @@ impl StorageBackend for Hdf5Backend {
     fn compression(&self) -> Compression {
         Hdf5Backend::compression(self)
     }
+}
 
-    fn write_buffer_bytes(&self) -> usize {
-        self.inner.lock().expect("mutex poisoned").max_pending_bytes
+#[cfg(test)]
+impl Hdf5Backend {
+    /// Put an empty group under `name` in the array group, so the next dataset
+    /// created under that name fails — the only way to make a write fail
+    /// without a full disk.
+    pub(crate) fn occupy_name_for_test(&self, name: &str) {
+        self.inner
+            .lock()
+            .expect("mutex poisoned")
+            .single
+            .create_group(name)
+            .unwrap();
     }
 
-    /// Lowering the budget below what the buffer already holds writes blocks
-    /// out on the spot rather than waiting for the next add, so the bound the
-    /// caller just asked for is true when the call returns. That is the one
-    /// case this can do file I/O, and the one case it can fail.
-    fn set_write_buffer_bytes(&mut self, bytes: usize) -> Result<()> {
-        let mut inner = self.inner.lock().expect("mutex poisoned");
-        inner.max_pending_bytes = bytes;
-        inner.evict_pending_over_budget()
+    /// A dataset's shape and chunk shape.
+    pub(crate) fn dataset_shape_for_test(&self, name: &str) -> (Vec<usize>, Option<Vec<usize>>) {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        let ds = inner.dataset(name).unwrap();
+        (ds.shape(), ds.chunk())
     }
 }
 
@@ -2566,18 +1996,15 @@ pub(crate) fn stamp_generation(path: &Path, generation: &str) -> Result<()> {
 /// What a sniff of `path` found.
 ///
 /// Three outcomes, not two. "Opened as HDF5 but is not ours" and "could not be
-/// opened at all" are different problems with different remedies, and
-/// collapsing them into `false` made the caller give the wrong advice for the
-/// second: a store held open read-write by another process (HDF5 takes an
+/// opened at all" are different problems with different remedies. A store held
+/// open read-write by another process is the second kind (HDF5 takes an
 /// exclusive lock, and does not set `O_CLOEXEC`, so a forked child can hold one
-/// too) was reported as a netcdf-era artifact needing migration — telling the
-/// user to re-create a perfectly healthy store.
+/// too); treating it as the first would tell the user a healthy store is not a
+/// store at all.
 pub(crate) enum BackendSniff {
     /// Written by this backend: the `storage_backend` root attribute is ours.
     Ours,
-    /// A readable HDF5 file without our attribute. A netcdf-written store lands
-    /// here, since netcdf4 *is* HDF5 underneath — which is what makes the
-    /// migration advice right on this branch and only this one.
+    /// A readable HDF5 file without our attribute.
     NotOurs,
     /// libhdf5 could not open it. Carries its own complaint, which names the
     /// real cause (a lock held elsewhere, a truncated file, a permission
@@ -2609,7 +2036,6 @@ pub(crate) fn is_hdf5_backend_file(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::hash::array_hash;
-    use crate::storage::common::DEFAULT_COLS_PER_DATASET;
     use crate::types::array::TypedArray;
     use crate::types::period::Period;
 
@@ -2741,19 +2167,10 @@ mod tests {
         let (ha, hb) = (array_hash(&a), array_hash(&b));
         {
             let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
-            assert!(
-                be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Immediate)
-                    .unwrap()
-            );
-            assert!(
-                be.put_array(&hb, &b, res(), ArrayLayout::Packed, WriteMode::Immediate)
-                    .unwrap()
-            );
+            assert!(be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
+            assert!(be.put_array(&hb, &b, res(), ArrayLayout::Packed).unwrap());
             // Duplicate put is a no-op.
-            assert!(
-                !be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Immediate)
-                    .unwrap()
-            );
+            assert!(!be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
             assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
             assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), b);
             let slice = be.get_slice(&ha, Dtype::F64, 6..18).unwrap();
@@ -2806,279 +2223,6 @@ mod tests {
         assert!(be.timestamp_hashes().unwrap().is_empty());
     }
 
-    /// A deferred put is stored the moment it is accepted, and stays stored
-    /// when the write it was waiting for fails.
-    ///
-    /// The failure is injected by putting something else under the name the
-    /// block writer is about to claim, which is the only way to make
-    /// `create_packed_dataset` fail without a full disk. What matters is what
-    /// survives it: the transaction that owns these writes is still open, and
-    /// both committing again and rolling back have to be able to find them —
-    /// `Store::commit_transaction` flushes *before* it releases precisely so a
-    /// flush failure leaves the bookkeeping intact.
-    #[test]
-    fn a_failed_materialization_keeps_the_pending_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.h5");
-        let a = f64_array(vec![4], 0.0);
-        let ha = array_hash(&a);
-        let mut be = Hdf5Backend::create(&path, Compression::None).unwrap();
-        assert!(
-            be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Deferred)
-                .unwrap()
-        );
-        // Buffered, and indistinguishable from stored to everything else.
-        assert!(be.contains(&ha).unwrap());
-        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
-        assert_eq!(be.array_shape(&ha).unwrap(), vec![4]);
-        assert!(be.has_pack_group(Dtype::F64, &[], 4, res()));
-
-        // Occupy the name the block writer will ask for.
-        {
-            let inner = be.inner.lock().unwrap();
-            let name = dataset_base_name(Dtype::F64, &[], 4, res());
-            inner.single.create_group(&name).unwrap();
-        }
-        assert!(be.flush().is_err(), "the dataset name is taken");
-
-        // Still buffered, still readable, still removable.
-        assert_eq!(be.inner.lock().unwrap().pending.len(), 1);
-        assert!(be.contains(&ha).unwrap());
-        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
-        be.remove_array(&ha).unwrap();
-        assert!(!be.contains(&ha).unwrap());
-        assert!(be.inner.lock().unwrap().pending.is_empty());
-        // Nothing of it reached the file, so a flush now has nothing to fail on.
-        be.flush().unwrap();
-    }
-
-    /// A deferred put whose block has to spill immediately, and cannot, reports
-    /// that it stored nothing — and really has stored nothing.
-    ///
-    /// The caller stages for rollback only what a put says it wrote, so an
-    /// array left in the buffer by a failing put would be written by the next
-    /// successful commit with no row naming it. An element block of exactly the
-    /// chunk budget caps the pool at one column, which makes the very first put
-    /// materialize.
-    #[test]
-    fn a_deferred_put_that_cannot_spill_stores_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.h5");
-        let elements = MAX_CHUNK_BYTES / std::mem::size_of::<f64>();
-        let a = f64_array(vec![1, elements], 0.0);
-        let ha = array_hash(&a);
-        let mut be = Hdf5Backend::create(&path, Compression::None).unwrap();
-        {
-            let inner = be.inner.lock().unwrap();
-            let name = dataset_base_name(Dtype::F64, &[elements], 1, res());
-            inner.single.create_group(&name).unwrap();
-        }
-        assert!(
-            be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Deferred)
-                .is_err()
-        );
-        assert!(!be.contains(&ha).unwrap());
-        assert!(be.inner.lock().unwrap().pending.is_empty());
-    }
-
-    /// A deferred block is written as one dataset sized to it, the same way a
-    /// bulk block of the same arrays would be — and a hash the store already
-    /// holds is not buffered a second time.
-    #[test]
-    fn deferred_puts_accumulate_into_one_block_sized_dataset() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.h5");
-        let arrays: Vec<TypedArray> = (0..5).map(|i| f64_array(vec![6], i as f64)).collect();
-        let hashes: Vec<[u8; 32]> = arrays.iter().map(array_hash).collect();
-        let mut be = Hdf5Backend::create(&path, Compression::None).unwrap();
-        for (hash, array) in hashes.iter().zip(&arrays) {
-            assert!(
-                be.put_array(hash, array, res(), ArrayLayout::Packed, WriteMode::Deferred)
-                    .unwrap()
-            );
-        }
-        // A re-put of a buffered hash is a no-op, as it is for a stored one.
-        assert!(
-            !be.put_array(
-                &hashes[0],
-                &arrays[0],
-                res(),
-                ArrayLayout::Packed,
-                WriteMode::Deferred
-            )
-            .unwrap()
-        );
-        be.flush().unwrap();
-
-        let name = dataset_base_name(Dtype::F64, &[], 6, res());
-        {
-            let inner = be.inner.lock().unwrap();
-            assert!(inner.pending.is_empty());
-            let ds = inner.dataset(&name).unwrap();
-            assert_eq!(ds.shape(), vec![6, 5]);
-            // Five f64 columns is a 40-byte timestamp row, far under
-            // `MIN_CHUNK_BYTES`, so the chunk takes every row the dataset has
-            // rather than leaving 40-byte chunks on disk.
-            assert_eq!(ds.chunk(), Some(vec![6, 5]));
-        }
-        // Columns in the order the puts arrived.
-        for (i, (hash, array)) in hashes.iter().zip(&arrays).enumerate() {
-            assert_eq!(
-                be.locate(hash).unwrap(),
-                ArrayLocation::Packed {
-                    dataset: format!("/{ROOT_GROUP}/{SINGLE_GROUP}/{name}"),
-                    column: i,
-                }
-            );
-            assert_eq!(&be.get_array(hash, Dtype::F64).unwrap(), array);
-        }
-    }
-
-    /// A block that never grew past one array fills a growth-pool slot instead
-    /// of claiming a dataset sized to it.
-    ///
-    /// Sizing a dataset to one column gives a scalar `f64` series an eight-byte
-    /// chunk and one chunk per timestep, whose per-chunk overhead dwarfs the
-    /// data — the same reason `Store::add_time_series_bulk` refuses to size a
-    /// dataset to a batch of one. From two columns up the block is what a bulk
-    /// add of the same arrays writes, and stays that way.
-    #[test]
-    fn a_block_of_one_fills_a_slot_and_a_block_of_two_sizes_a_dataset() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.h5");
-        let a = f64_array(vec![6], 0.0);
-        let ha = array_hash(&a);
-        let mut be = Hdf5Backend::create(&path, Compression::None).unwrap();
-        be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Deferred)
-            .unwrap();
-        be.flush().unwrap();
-
-        let name = dataset_base_name(Dtype::F64, &[], 6, res());
-        {
-            let inner = be.inner.lock().unwrap();
-            let ds = inner.dataset(&name).unwrap();
-            assert_eq!(
-                ds.shape(),
-                vec![6, DEFAULT_COLS_PER_DATASET],
-                "the growth pool, not a one-column dataset"
-            );
-        }
-        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
-
-        // Two arrays in one block do get a dataset of their own, in a fresh
-        // store so the pool above cannot absorb them.
-        let path2 = dir.path().join("s2.h5");
-        let arrays: Vec<TypedArray> = (0..2).map(|i| f64_array(vec![6], i as f64)).collect();
-        let hashes: Vec<[u8; 32]> = arrays.iter().map(array_hash).collect();
-        let mut be2 = Hdf5Backend::create(&path2, Compression::None).unwrap();
-        for (hash, array) in hashes.iter().zip(&arrays) {
-            be2.put_array(hash, array, res(), ArrayLayout::Packed, WriteMode::Deferred)
-                .unwrap();
-        }
-        be2.flush().unwrap();
-        let inner = be2.inner.lock().unwrap();
-        assert_eq!(inner.dataset(&name).unwrap().shape(), vec![6, 2]);
-    }
-
-    /// The pending buffer is bounded twice: by the chunk budget per pool, and
-    /// by bytes across every pool.
-    ///
-    /// The width cap is the chunk budget's own — 131,072 for scalar `f64`, the
-    /// width a bulk add's block spills at — and never the growth pool's
-    /// [`DEFAULT_COLS_PER_DATASET`], which would cut a wide batch inside a
-    /// transaction into datasets ten times narrower than the same batch writes
-    /// outside one. It shrinks below the chunk budget only for a series long
-    /// enough that a chunk row's worth of columns would not fit the byte budget.
-    #[test]
-    fn the_pending_width_cap_is_the_chunk_budget_bounded_by_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let be = Hdf5Backend::create(&dir.path().join("s.h5"), Compression::None).unwrap();
-        let inner = be.inner.lock().unwrap();
-
-        // Short scalar series: the chunk budget binds, not the growth pool.
-        assert_eq!(
-            inner.pending_width_cap(Dtype::F64, &[], 24),
-            MAX_CHUNK_BYTES / std::mem::size_of::<f64>()
-        );
-        assert!(inner.pending_width_cap(Dtype::F64, &[], 24) > DEFAULT_COLS_PER_DATASET);
-        // A wide element shape meets the chunk budget sooner.
-        assert_eq!(inner.pending_width_cap(Dtype::F64, &[1024], 2), 128);
-        // Long enough that a chunk row of columns would exceed the byte budget:
-        // the cap falls to what does fit, and never below one.
-        let long = MAX_PENDING_BYTES / std::mem::size_of::<f64>();
-        assert_eq!(inner.pending_width_cap(Dtype::F64, &[], long), 1);
-        assert_eq!(
-            inner.pending_width_cap(Dtype::F64, &[], long / 4),
-            4,
-            "the byte budget divided by one column's bytes"
-        );
-    }
-
-    /// Crossing the global byte budget writes the widest block out, and the
-    /// running total is exact through every path that touches the buffer:
-    /// accepting an array, writing a block, and unwinding one.
-    ///
-    /// The budget is lowered here rather than crossed in earnest, which would
-    /// take the hundred-plus megabytes `MAX_PENDING_BYTES` is set to.
-    #[test]
-    fn the_byte_budget_evicts_the_widest_block_and_the_total_stays_exact() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.h5");
-        let mut be = Hdf5Backend::create(&path, Compression::None).unwrap();
-        // Two pools: length 4 (32 bytes an array) and length 6 (48). Against a
-        // 200-byte budget their width caps are 6 and 4, so neither pool fills
-        // below — what fires here is the budget, not the width.
-        be.inner.lock().unwrap().max_pending_bytes = 200;
-
-        let short: Vec<TypedArray> = (0..4).map(|i| f64_array(vec![4], i as f64)).collect();
-        let long: Vec<TypedArray> = (0..2)
-            .map(|i| f64_array(vec![6], 50.0 + i as f64))
-            .collect();
-        let short_h: Vec<[u8; 32]> = short.iter().map(array_hash).collect();
-        let long_h: Vec<[u8; 32]> = long.iter().map(array_hash).collect();
-        fn put(be: &mut Hdf5Backend, hash: &[u8; 32], array: &TypedArray) {
-            be.put_array(hash, array, res(), ArrayLayout::Packed, WriteMode::Deferred)
-                .unwrap();
-        }
-
-        for (hash, array) in short_h.iter().zip(&short).take(3) {
-            put(&mut be, hash, array);
-        }
-        for (hash, array) in long_h.iter().zip(&long) {
-            put(&mut be, hash, array);
-        }
-        assert_eq!(be.inner.lock().unwrap().pending_bytes, 3 * 32 + 2 * 48);
-
-        // 224 bytes against a 200-byte budget: the widest pool — now four
-        // length-4 arrays — is written out, and the other is left to grow.
-        put(&mut be, &short_h[3], &short[3]);
-        {
-            let inner = be.inner.lock().unwrap();
-            assert_eq!(inner.pending_bytes, 2 * 48);
-            assert_eq!(inner.pending.len(), 1);
-        }
-        assert_eq!(
-            be.locate(&short_h[0]).unwrap(),
-            ArrayLocation::Packed {
-                dataset: format!(
-                    "/{ROOT_GROUP}/{SINGLE_GROUP}/{}",
-                    dataset_base_name(Dtype::F64, &[], 4, res())
-                ),
-                column: 0,
-            }
-        );
-        assert_eq!(be.get_array(&short_h[3], Dtype::F64).unwrap(), short[3]);
-
-        // Unwinding a buffered array gives its bytes back...
-        be.remove_array(&long_h[1]).unwrap();
-        assert_eq!(be.inner.lock().unwrap().pending_bytes, 48);
-        // ...and writing the rest out returns the total to zero.
-        be.flush().unwrap();
-        let inner = be.inner.lock().unwrap();
-        assert_eq!(inner.pending_bytes, 0);
-        assert!(inner.pending.is_empty());
-    }
-
     #[test]
     fn packed_block_write_and_bulk_reads() {
         let dir = tempfile::tempdir().unwrap();
@@ -3087,9 +2231,7 @@ mod tests {
         let hashes: Vec<[u8; 32]> = arrays.iter().map(array_hash).collect();
         let refs: Vec<&TypedArray> = arrays.iter().collect();
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
-        let written = be
-            .put_packed_block(&hashes, &refs, res(), WriteMode::Immediate)
-            .unwrap();
+        let written = be.put_packed_block(&hashes, &refs, res()).unwrap();
         assert!(written.iter().all(|&w| w));
         // Every column of the pool: one hyperslab per dataset.
         let out = be
@@ -3110,9 +2252,7 @@ mod tests {
     /// together or scattered across a wide pool.
     ///
     /// The two fetch shapes are a cost decision, not a semantic one, so the
-    /// values must not depend on which one runs: a scattered request used to
-    /// read every column from the first wanted one to the last, over the pool's
-    /// full time extent, and slice the rest away.
+    /// values must not depend on which one runs.
     #[test]
     fn bulk_read_of_scattered_columns_returns_the_same_arrays() {
         let dir = tempfile::tempdir().unwrap();
@@ -3124,7 +2264,7 @@ mod tests {
         let refs: Vec<&TypedArray> = arrays.iter().collect();
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
         assert!(
-            be.put_packed_block(&hashes, &refs, res(), WriteMode::Immediate)
+            be.put_packed_block(&hashes, &refs, res())
                 .unwrap()
                 .iter()
                 .all(|&w| w)
@@ -3168,16 +2308,10 @@ mod tests {
         let (ha, hb, hc) = (array_hash(&a), array_hash(&b), array_hash(&c));
 
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
-        be.put_packed_block(&[ha, hb], &[&a, &b], cohort(1), WriteMode::Immediate)
+        be.put_packed_block(&[ha, hb], &[&a, &b], cohort(1))
             .unwrap();
-        be.put_array(
-            &hc,
-            &c,
-            cohort(2),
-            ArrayLayout::Packed,
-            WriteMode::Immediate,
-        )
-        .unwrap();
+        be.put_array(&hc, &c, cohort(2), ArrayLayout::Packed)
+            .unwrap();
         assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(1)));
         assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(2)));
         // A cohort nothing has written yet, and the regular pool at the same
@@ -3213,14 +2347,8 @@ mod tests {
         assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(1)));
         let d = f64_array(vec![8], 300.0);
         let hd = array_hash(&d);
-        be.put_array(
-            &hd,
-            &d,
-            cohort(1),
-            ArrayLayout::Packed,
-            WriteMode::Immediate,
-        )
-        .unwrap();
+        be.put_array(&hd, &d, cohort(1), ArrayLayout::Packed)
+            .unwrap();
         // The block write sized that first dataset to its batch, so it is full
         // and this add spills — into a sibling of the *same* pool, which is what
         // the rebuilt index has to get right.
@@ -3255,22 +2383,10 @@ mod tests {
         assert_ne!(hb, hu);
 
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
-        be.put_array(
-            &hb,
-            &bools,
-            res(),
-            ArrayLayout::Standalone,
-            WriteMode::Immediate,
-        )
-        .unwrap();
-        be.put_array(
-            &hu,
-            &bytes,
-            res(),
-            ArrayLayout::Standalone,
-            WriteMode::Immediate,
-        )
-        .unwrap();
+        be.put_array(&hb, &bools, res(), ArrayLayout::Standalone)
+            .unwrap();
+        be.put_array(&hu, &bytes, res(), ArrayLayout::Standalone)
+            .unwrap();
         assert_eq!(be.get_array(&hb, Dtype::Bool).unwrap(), bools);
         assert_eq!(be.get_array(&hu, Dtype::U8).unwrap(), bytes);
         assert_eq!(be.array_shape(&hb).unwrap(), vec![4]);
@@ -3298,8 +2414,7 @@ mod tests {
         let a = f64_array(vec![4], 0.0);
         let ha = array_hash(&a);
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
-        be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Immediate)
-            .unwrap();
+        be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
 
         let err = be.get_array(&ha, Dtype::I64).unwrap_err();
         assert!(
@@ -3322,7 +2437,6 @@ mod tests {
             &a,
             res(),
             ArrayLayout::StandaloneWindowed { count_axis: 1 },
-            WriteMode::Immediate,
         )
         .unwrap();
         assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
@@ -3352,7 +2466,6 @@ mod tests {
             &big,
             res(),
             ArrayLayout::StandaloneWindowed { count_axis: 1 },
-            WriteMode::Immediate,
         )
         .unwrap();
         assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), big);
@@ -3384,14 +2497,12 @@ mod tests {
         let f = f64_array(vec![6, 4], 9.0);
         let hf = array_hash(&f);
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
-        be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Immediate)
-            .unwrap();
+        be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
         be.put_array(
             &hf,
             &f,
             res(),
             ArrayLayout::StandaloneWindowed { count_axis: 1 },
-            WriteMode::Immediate,
         )
         .unwrap();
         be.remove_array(&ha).unwrap();
@@ -3413,17 +2524,13 @@ mod tests {
             );
         }
         // Re-adding reuses the freed packed slot; the standalone is rewritten.
-        assert!(
-            be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Immediate)
-                .unwrap()
-        );
+        assert!(be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
         assert!(
             be.put_array(
                 &hf,
                 &f,
                 res(),
-                ArrayLayout::StandaloneWindowed { count_axis: 1 },
-                WriteMode::Immediate,
+                ArrayLayout::StandaloneWindowed { count_axis: 1 }
             )
             .unwrap()
         );
@@ -3444,7 +2551,6 @@ mod tests {
                 &f,
                 res(),
                 ArrayLayout::StandaloneWindowed { count_axis: 1 },
-                WriteMode::Immediate,
             )
             .unwrap();
             be.remove_array(&hf).unwrap();
@@ -3463,8 +2569,7 @@ mod tests {
         let a = f64_array(vec![24], 7.5);
         let ha = array_hash(&a);
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
-        be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Immediate)
-            .unwrap();
+        be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
         let (dataset, col) = match be.locate(&ha).unwrap() {
             ArrayLocation::Packed { dataset, column } => (dataset, column),
             other => panic!("expected a packed location, got {other:?}"),
@@ -3490,15 +2595,14 @@ mod tests {
         let ha = array_hash(&a);
         {
             let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
-            be.put_array(&ha, &a, res(), ArrayLayout::Packed, WriteMode::Immediate)
-                .unwrap();
+            be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
         }
         let mut be = Hdf5Backend::open(&path, true).unwrap();
         assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
         let b = f64_array(vec![4], 5.0);
         let hb = array_hash(&b);
         assert!(matches!(
-            be.put_array(&hb, &b, res(), ArrayLayout::Packed, WriteMode::Immediate),
+            be.put_array(&hb, &b, res(), ArrayLayout::Packed),
             Err(TimeSeriesError::ReadOnlyStore)
         ));
     }
@@ -3509,8 +2613,8 @@ mod tests {
         let h5_path = dir.path().join("h.h5");
         let plain_path = dir.path().join("p.h5");
         Hdf5Backend::create(&h5_path, Compression::default()).unwrap();
-        // A valid HDF5 file without the backend attribute (e.g. one written by
-        // the removed netcdf backend) is not recognized as ours.
+        // A valid HDF5 file without the backend attribute is not recognized as
+        // ours.
         h5::File::create(&plain_path).unwrap();
         assert!(is_hdf5_backend_file(&h5_path));
         assert!(!is_hdf5_backend_file(&plain_path));
@@ -3518,8 +2622,8 @@ mod tests {
 
     /// The sniff has three answers, and the two failing ones are different
     /// problems: one file is not ours, the other could not be read at all.
-    /// Collapsing them sent "re-create the store to migrate" — advice to
-    /// destroy the artifact — to whoever merely had it open elsewhere.
+    /// Collapsing them would tell whoever merely had a store open elsewhere
+    /// that it is not a store.
     #[test]
     fn the_sniff_separates_not_ours_from_could_not_open() {
         let dir = tempfile::tempdir().unwrap();
@@ -3528,9 +2632,7 @@ mod tests {
         Hdf5Backend::create(&ours, Compression::default()).unwrap();
         assert!(matches!(sniff_hdf5_backend_file(&ours), BackendSniff::Ours));
 
-        // Opens as HDF5, lacks our attribute. This is the shape a netcdf-era
-        // store has — netcdf4 is HDF5 underneath — so it is the one case where
-        // the migration advice is right.
+        // Opens as HDF5, lacks our attribute: a foreign HDF5 file.
         let foreign = dir.path().join("foreign.h5");
         h5::File::create(&foreign).unwrap();
         assert!(matches!(
@@ -3568,17 +2670,10 @@ mod tests {
             &windowed,
             res(),
             ArrayLayout::StandaloneWindowed { count_axis: 1 },
-            WriteMode::Immediate,
         )
         .unwrap();
-        be.put_array(
-            &hn,
-            &whole,
-            res(),
-            ArrayLayout::Standalone,
-            WriteMode::Immediate,
-        )
-        .unwrap();
+        be.put_array(&hn, &whole, res(), ArrayLayout::Standalone)
+            .unwrap();
         let inner = be.inner.lock().unwrap();
         // Full on the horizon axis, blocked along the count axis.
         let cols = super::super::common::window_block_cols(Dtype::F64, &[3, 4000], 1);

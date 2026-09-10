@@ -6,12 +6,12 @@
 /// and moves independently: a catalog change the idempotent DDL cannot make to
 /// an existing table needs a revision bump and a migration, not a bump here.
 /// Bumping this constant for a catalog-only change strands every existing store
-/// for no reason -- which is exactly what it used to do.
+/// for no reason.
 ///
 /// # Three-tier compatibility
 ///
-/// The version is no longer checked by strict equality. [`compatibility`]
-/// sorts a version stamp found on an HDF5 file into one of three tiers:
+/// The version is not checked by strict equality. [`compatibility`] sorts a
+/// version stamp found on an HDF5 file into one of three tiers:
 ///
 /// * [`Compat::Current`] — the stamp equals this constant. Opened as-is.
 /// * [`Compat::Upgradable`] — the stamp is at least [`MIN_UPGRADABLE_VERSION`]
@@ -29,8 +29,7 @@
 /// * [`Compat::Incompatible`] — anything older than
 ///   [`MIN_UPGRADABLE_VERSION`], anything newer than this constant, and
 ///   anything unparseable (including the `"unspecified"` a file with no stamp
-///   reads as). Rejected with [`crate::TimeSeriesError::IncompatibleFormat`],
-///   exactly as before.
+///   reads as). Rejected with [`crate::TimeSeriesError::IncompatibleFormat`].
 ///
 /// # Which constant moves, and when
 ///
@@ -47,14 +46,14 @@
 ///   describes the **SQLite catalog** alone. **Any catalog change the
 ///   idempotent DDL cannot make to an existing table — a new column, a changed
 ///   CHECK, a rebuilt table, a backfill — needs a `CATALOG_SCHEMA_REVISION`
-///   bump plus an append-only entry in `MIGRATIONS`.** It no longer needs a
-///   re-created store.
+///   bump plus an append-only entry in `MIGRATIONS`.** An existing store then
+///   upgrades in place on its first writable open.
 ///
 /// A purely additive new *table* or *index* still needs neither: the DDL is
 /// idempotent, so an older store picks it up on its first writable open, and
-/// old readers ignore it. The obligation that comes with that is unchanged —
-/// every read of such a table must tolerate its absence, because a read-only
-/// open cannot run DDL. See the DDL comment in `metadata/schema.rs`.
+/// old readers ignore it. The obligation that comes with that: every read of
+/// such a table must tolerate its absence, because a read-only open cannot run
+/// DDL. See the DDL comment in `metadata/schema.rs`.
 ///
 /// # History
 ///
@@ -108,13 +107,13 @@
 /// milliseconds rather than the delta-varint blob — so stores written by
 /// 0.18.0 and earlier are rejected on open.
 ///
-/// Catalog revision 2 is the first catalog change to take no bump at all, and
-/// the one the ladder was built for. It widens the `time_series_type` CHECK
-/// from `BETWEEN 0 AND 5` to `>= 0`, moving that column's domain off SQLite and
-/// onto `TimeSeriesType::from_code`, which already gates every read and every
-/// write. Nothing in the HDF5 file changes, so there is nothing to bump: the
-/// table rebuild is entirely on the catalog side, and a 0.19.0 store upgrades
-/// in place on its first writable open.
+/// Catalog revision 2 is the first catalog change to take no bump at all. It
+/// widens the `time_series_type` CHECK from `BETWEEN 0 AND 5` to `>= 0`,
+/// moving that column's domain off SQLite and onto `TimeSeriesType::from_code`,
+/// which already gates every read and every write. Nothing in the HDF5 file
+/// changes, so there is nothing to bump: the table rebuild is entirely on the
+/// catalog side, and a 0.19.0 store upgrades in place on its first writable
+/// open.
 ///
 /// `PersistentTimeSeries` (storage code 6) is the first *type* to arrive
 /// through that door, and it likewise takes no bump. The HDF5 layout is
@@ -129,9 +128,9 @@ pub const DATA_FORMAT_VERSION: &str = "0.19.0";
 /// A store stamped between this and [`DATA_FORMAT_VERSION`] is
 /// [`Compat::Upgradable`]: its arrays are readable as they stand, and its
 /// catalog is brought forward by the migration ladder on the first writable
-/// open. Anything older is [`Compat::Incompatible`] and keeps the pre-ladder
-/// behavior — the format changes that produced those stamps rewrote bytes the
-/// current reader cannot interpret, so there is nothing to migrate.
+/// open. Anything older is [`Compat::Incompatible`] and is rejected on open —
+/// the format changes that produced those stamps rewrote bytes the current
+/// reader cannot interpret, so there is nothing to migrate.
 ///
 /// Raise this to the new [`DATA_FORMAT_VERSION`] whenever a bump really does
 /// strand older stores; leave it alone for a bump the ladder can absorb.

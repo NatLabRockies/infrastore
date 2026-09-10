@@ -277,7 +277,7 @@ fn a_read_only_open_of_a_stale_catalog_reports_migration_required() {
         Err(TimeSeriesError::CatalogMigrationRequired { found, expected }) => {
             assert_eq!((found, expected), (1, 2));
             // The message has to name the remedy, not just the numbers: this is
-            // the error a read-only consumer (the gRPC server) now surfaces.
+            // the error a read-only consumer (the gRPC server) surfaces.
             let rendered =
                 TimeSeriesError::CatalogMigrationRequired { found, expected }.to_string();
             assert!(
@@ -297,11 +297,11 @@ fn a_read_only_open_of_a_stale_catalog_reports_migration_required() {
 }
 
 /// A stale catalog must still be *copyable*. `open_copy` opens the source
-/// read-only only to `VACUUM INTO` the destination, and running the read-only
-/// schema check on that connection made a stale store impossible to copy —
-/// which is backwards, since taking a writable copy is precisely how a consumer
-/// migrates one without touching the user's artifact. Both shipped consumers
-/// (infrasys, IS3.jl) depend on this path.
+/// read-only only to `VACUUM INTO` the destination, so the read-only schema
+/// check must not run on that connection: it would make a stale store
+/// impossible to copy, which is backwards, since taking a writable copy is
+/// precisely how a consumer migrates one without touching the user's artifact.
+/// Both shipped consumers (infrasys, IS3.jl) depend on this path.
 #[test]
 fn a_stale_catalog_can_still_be_copied_and_the_copy_migrates() {
     let (dir, path) = stale_store();
@@ -426,9 +426,9 @@ fn a_mismatched_pair_is_refused_before_anything_migrates() {
         Ok(_) => panic!("a mismatched pair must not open"),
     }
 
-    // The catalog is still at revision 1: the ladder never ran. Before the
-    // preflight this assertion read 2, because the rejected artifact had
-    // already been rebuilt.
+    // The catalog is still at revision 1: the ladder never ran. Had it run
+    // before the stamp check, this would read 2, the rejected artifact already
+    // rebuilt.
     assert_eq!(revision_on_disk(&path), 1);
 }
 
@@ -482,9 +482,9 @@ fn the_readable_view_renders_a_code_it_does_not_name() {
     );
 }
 
-/// The other half: a code the view *does* name renders as its type name. Added
-/// with `PersistentTimeSeries`, the first type to reach the catalog through the
-/// widened CHECK rather than through a format bump.
+/// The other half: a code the view *does* name renders as its type name.
+/// `PersistentTimeSeries` is the one to check: its code lies outside the
+/// revision-1 CHECK, so it reaches the catalog only through the widened one.
 #[test]
 fn the_readable_view_names_the_new_type() {
     let dir = tempfile::tempdir().unwrap();

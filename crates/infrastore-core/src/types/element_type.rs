@@ -221,11 +221,11 @@ impl ElementType {
             let n = raw as usize;
             // Checked, because `n` comes out of the array's own data and so is
             // caller-controlled up to `usize::MAX`. Unchecked, `1 + 2 * n`
-            // panicked in a debug build and — worse — wrapped in a release one,
+            // would panic in a debug build and — worse — wrap in a release one,
             // where the workspace profile leaves `overflow-checks` off: a
-            // wrapped `needed` of 0 satisfies the width test, so the row is
-            // *accepted*, and `codec::decode` then indexes it unchecked on this
-            // function's promise that every count was validated.
+            // wrapped `needed` of 0 satisfies the width test, so the row would
+            // be *accepted*, and `codec::decode` then indexes it unchecked on
+            // this function's promise that every count was validated.
             let needed = match self {
                 ElementType::PiecewiseLinear => n.checked_mul(2).and_then(|k| k.checked_add(1)),
                 // `n` x-coords and `n - 1` y-values, plus the count itself.

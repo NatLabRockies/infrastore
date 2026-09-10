@@ -8,15 +8,12 @@
 //! the arrays, in the half of the artifact that is built for bulk numeric data:
 //! chunked, filtered, and readable by any HDF5 tool without this crate.
 //!
-//! They used to live in the SQLite catalog instead, as a hand-rolled
-//! delta-varint blob interned in a `timestamp_sets` table. That encoding existed
-//! to keep a *catalog* small, on the assumption that a store held one short time
-//! axis; neither half of that holds up. A store can hold many axes, each of them
-//! long, and the JSON document round trip that arrived since needs the
-//! timestamps to travel with the artifact rather than be locked inside the
-//! catalog. Plain `i64` milliseconds compressed by the store's own filter policy
-//! are smaller than the varint blob was on a regular grid and simpler
-//! everywhere.
+//! The SQLite catalog is the wrong home for them: a store can hold many axes,
+//! each of them long, and the JSON document round trip needs the timestamps to
+//! travel with the artifact rather than be locked inside the catalog. Nor is a
+//! hand-rolled delta-varint encoding worth its cost: plain `i64` milliseconds
+//! compressed by the store's own filter policy are smaller than a varint blob on
+//! a regular grid and simpler everywhere.
 //!
 //! Milliseconds are the store's precision floor
 //! ([`require_millisecond_precision`], which refuses a finer instant and a leap
@@ -31,9 +28,9 @@ use crate::error::{Result, TimeSeriesError};
 /// The store's timestamp precision contract: a stored instant must be a whole
 /// number of milliseconds.
 ///
-/// This is the same floor a [`Period`](crate::Period) has always had (see the
-/// `period.rs` module docs — `is_positive` counts whole milliseconds, and the
-/// ISO-8601 encoding emits at most three fractional digits). Applying it to the
+/// This is the same floor a [`Period`](crate::Period) has (see the `period.rs`
+/// module docs — `is_positive` counts whole milliseconds, and the ISO-8601
+/// encoding emits at most three fractional digits). Applying it to the
 /// *instants* as well as the *spans* is what makes a timestamp mean the same
 /// thing in every consumer: the C ABI and the Julia binding exchange instants as
 /// `i64` unix milliseconds, and Python's `datetime` is microsecond. A finer

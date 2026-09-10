@@ -248,8 +248,8 @@ mod tests {
         assert_ne!(array_hash(&c), array_hash(&b));
     }
 
-    /// The pre-optimization loop: decode every element, canonicalize NaNs, and
-    /// feed the bits back one element at a time. `array_hash`'s run-batching
+    /// The element-at-a-time reference: decode every element, canonicalize NaNs,
+    /// and feed the bits back one element at a time. `array_hash`'s run-batching
     /// must be indistinguishable from this, since the result is on-disk state.
     fn reference_array_hash(data: &TypedArray) -> [u8; 32] {
         let mut hasher = Sha256::new();
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(hex.len(), 64);
         assert!(hex.starts_with("000fa5"));
         assert!(hex.ends_with("ff"));
-        // Matches the `format!`-per-byte encoding it replaced.
+        // Matches the straightforward `format!`-per-byte encoding.
         let expected: String = hash.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, expected);
     }
