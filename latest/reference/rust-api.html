@@ -1211,11 +1211,16 @@ differently in a differently-shaped series. That is the storage layout, not a pr
 — see <a href="./element-types.html">Element types</a> for the byte layouts and
 <code>conformance/element_type_vectors.json</code> for the pinned vectors every binding is held to.</p>
 <h3 id="typedarray-and-dtype"><a class="header" href="#typedarray-and-dtype"><code>TypedArray</code> and <code>Dtype</code></a></h3>
-<p>The storage array type: an element <code>dtype</code>, an N-dimensional <code>shape</code> <code>[length, k1, k2, …]</code> (first
-axis time, trailing axes the per-step element shape), and raw row-major, little-endian bytes.</p>
+<p>The array type every read and write carries: an element <code>dtype</code>, an N-dimensional <code>shape</code>
+<code>[length, k1, k2, …]</code> (first axis time, trailing axes the per-step element shape), and raw
+row-major, little-endian bytes. Little-endian describes the buffer, not the HDF5 file, whose
+datasets record their own byte order.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub enum Dtype { F64, F32, I64, I32, U64, Bool }   // codes 0..=5; size() = 8/4/8/4/8/1
+</span>pub enum Dtype {
+    F64, F32, I64, I32, U64, Bool,   // codes 0..=5;  size() = 8/4/8/4/8/1
+    I16, I8, U32, U16, U8,           // codes 6..=10; size() = 2/1/4/2/1
+}
 
 pub struct TypedArray {
     pub dtype: Dtype,

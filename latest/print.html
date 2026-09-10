@@ -5893,10 +5893,9 @@ conformance corpus every binding's codec is tested against.</li>
 <p>The SQLite catalog path is the HDF5 path with <code>.sqlite</code> appended to the file name. This page is the
 authoritative description of both. For the rationale behind the split, see the
 <a href="reference/../explanation/storage-model.html">Storage Model</a>.</p>
-<p>The array file is a <strong>plain HDF5 file</strong>, written directly against libhdf5 — not a NetCDF4 file.
-Earlier releases wrote it through netcdf-c; the layout below is unchanged, but the file no longer
-carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</code> accepts only files it wrote itself
-(see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
+<p>The array file is a <strong>plain HDF5 file</strong>, written directly against libhdf5. <code>Store::open</code> accepts
+only files it wrote itself (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the
+store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries four global attributes:</p>
 <pre><code class="language-text">data_format_version = "0.19.0"
@@ -5914,9 +5913,7 @@ reopening reuse the same filter. It is <strong>not</strong> part of the compatib
 <a href="reference/file-format.html#compression">Compression</a> below.</p>
 <p><code>storage_backend</code> marks the file as one infrastore wrote. <code>Store::open</code> checks it before reading
 anything else and rejects a file that lacks it with <code>InvalidParameter</code> — this is what distinguishes
-an infrastore store from an arbitrary HDF5 file, and it is why stores written by the older
-netcdf-backed releases are refused rather than misread. Such a store has to be regenerated; there is
-no in-place migration.</p>
+an infrastore store from an arbitrary HDF5 file, so a foreign file is refused rather than misread.</p>
 <p><code>catalog_generation</code> pairs this file with exactly one catalog; the same value lives in the catalog's
 <a href="reference/file-format.html#catalog_identity"><code>catalog_identity</code></a> table. <code>Store::open</code> compares the two and rejects a mismatch
 with <code>MismatchedArtifact</code>. It is written at creation and re-minted by every <code>persist_to</code>, which is
@@ -6041,10 +6038,15 @@ whole seconds.</p>
 <p><strong><code>0.1.0</code></strong> — stored only 1-D <code>f64</code>.</p>
 <h2 id="arrays-are-typed-and-n-dimensional"><a class="header" href="#arrays-are-typed-and-n-dimensional">Arrays Are Typed and N-Dimensional</a></h2>
 <p>Every stored array is a <strong><code>TypedArray</code></strong>: an element <code>dtype</code>, a <code>shape</code> <code>[length, k1, k2, …]</code> whose
-first axis is time and whose trailing axes are a fixed per-step element shape, and the raw
-row-major, little-endian element bytes. The supported dtypes and their stable integer codes (shared
-with the bindings and the C ABI). Codes 0–5 are the original set and never move; new widths are
-appended:</p>
+first axis is time and whose trailing axes are a fixed per-step element shape, and the row-major
+element values.</p>
+<p>Byte order differs between the file and everything outside it. In the HDF5 file each dataset's
+datatype records its byte order, which is the native order of the host that wrote it, and libhdf5
+converts on every read. Outside the file, a <code>TypedArray</code>'s buffer is always little-endian: that is
+what the content hash covers and what every binding and the C ABI exchange. A reader using its own
+HDF5 tools gets correct values from any host's file without knowing either fact.</p>
+<p>The supported dtypes and their stable integer codes (shared with the bindings and the C ABI). Codes
+0–5 are the original set and never move; new widths are appended:</p>
 <div class="table-wrapper"><table><thead><tr><th>Code</th><th>dtype</th><th>Width</th><th>Code</th><th>dtype</th><th>Width</th></tr></thead><tbody>
 <tr><td>0</td><td><code>f64</code></td><td>8</td><td>6</td><td><code>i16</code></td><td>2</td></tr>
 <tr><td>1</td><td><code>f32</code></td><td>4</td><td>7</td><td><code>i8</code></td><td>1</td></tr>
@@ -6087,10 +6089,8 @@ time axes in a sibling group of their own:</p>
         └── ...
 </code></pre>
 <p>Datasets carry <strong>no dimension scales and no dimension names</strong> — shape is read straight off the HDF5
-dataspace. (The netcdf-backed releases created a named dimension per axis, <code>{dataset}_t</code>,
-<code>{dataset}_c</code>, and so on; those objects are gone.) On open the backend recovers each packed
-dataset's column count from the second extent of its dataspace, which is how per-dataset widths
-round-trip.</p>
+dataspace. On open the backend recovers each packed dataset's column count from the second extent of
+its dataspace, which is how per-dataset widths round-trip.</p>
 <p>The hash companion <code>{dataset}_h</code> is a <code>(cols, 64)</code> array of <code>u8</code> holding each column's 64 lowercase
 hex characters as raw bytes — not an HDF5 string dataset. <strong>An all-zero row marks a free slot.</strong></p>
 <h3 id="packed-mode"><a class="header" href="#packed-mode">Packed mode</a></h3>
@@ -6136,10 +6136,11 @@ when a read needs one of them to have a physical position. A loop of single adds
 transaction therefore produces exactly the datasets one bulk add of the same items produces — <strong>so
 long as the span reaches its commit without materializing early</strong>; only an un-transactioned single
 add takes the default width.</p>
-<p>The byte ceiling below and an early materialization are what can break that equivalence: crossing
-the ceiling, or asking a buffered array for its physical location, writes the span out as it stands.
-Each split costs an extra dataset and nothing else — the datasets are still block-written and
-chunk-aligned.</p>
+<p>The buffer is the store's, not the file's: nothing on disk records it, and a reopen never sees one.
+The byte ceiling below and an early materialization are what can break that equivalence: crossing
+the ceiling, or asking a buffered array for its physical location (<code>Store::locate_array</code>, which
+takes <code>&amp;mut self</code> for that reason), writes the span out as it stands. Each split costs an extra
+dataset and nothing else — the datasets are still block-written and chunk-aligned.</p>
 <p>Two limits keep that buffer from being unbounded, and both simply write a block out early — the same
 spill a too-wide batch already performs, costing an extra dataset and nothing else:</p>
 <p>A pool's block width is the <strong>lower of two</strong> ceilings, and the buffer as a whole has a third:</p>
@@ -8125,11 +8126,16 @@ differently in a differently-shaped series. That is the storage layout, not a pr
 — see <a href="reference/./element-types.html">Element types</a> for the byte layouts and
 <code>conformance/element_type_vectors.json</code> for the pinned vectors every binding is held to.</p>
 <h3 id="typedarray-and-dtype"><a class="header" href="#typedarray-and-dtype"><code>TypedArray</code> and <code>Dtype</code></a></h3>
-<p>The storage array type: an element <code>dtype</code>, an N-dimensional <code>shape</code> <code>[length, k1, k2, …]</code> (first
-axis time, trailing axes the per-step element shape), and raw row-major, little-endian bytes.</p>
+<p>The array type every read and write carries: an element <code>dtype</code>, an N-dimensional <code>shape</code>
+<code>[length, k1, k2, …]</code> (first axis time, trailing axes the per-step element shape), and raw
+row-major, little-endian bytes. Little-endian describes the buffer, not the HDF5 file, whose
+datasets record their own byte order.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub enum Dtype { F64, F32, I64, I32, U64, Bool }   // codes 0..=5; size() = 8/4/8/4/8/1
+</span>pub enum Dtype {
+    F64, F32, I64, I32, U64, Bool,   // codes 0..=5;  size() = 8/4/8/4/8/1
+    I16, I8, U32, U16, U8,           // codes 6..=10; size() = 2/1/4/2/1
+}
 
 pub struct TypedArray {
     pub dtype: Dtype,
