@@ -470,11 +470,11 @@ of the file.</p>
 <p><strong>A block of one is not a block.</strong> If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked <code>(1, 1)</code>, that would
 give a scalar <code>f64</code> series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the
-data. It is the same rule <code>add_time_series_bulk</code> applies to a batch of one. For an <strong>irregular</strong>
-pool the fallback is a standalone <code>arr_</code> dataset instead of a slot, because an <code>nsts_</code> pool is
-shared only by the series on that exact axis: a cohort of one is a dataset spread over <code>length</code>
-chunks for no reason, where a regular pool is shared by every series on the resolution. From two
-columns up the block is what the bulk add of those items writes.</p>
+data. It is the same rule <code>add_time_series_bulk</code> applies to a pool its batch gives one array. For an
+<strong>irregular</strong> pool the fallback is a standalone <code>arr_</code> dataset instead of a slot, because an <code>nsts_</code>
+pool is shared only by the series on that exact axis: a cohort of one is a dataset spread over
+<code>length</code> chunks for no reason, where a regular pool is shared by every series on the resolution.
+From two columns up the block is what the bulk add of those items writes.</p>
 <p>This is a write-time policy like every other choice on this page: the layouts it produces are ones
 the format already had, so it does not affect <code>data_format_version</code> and stores written either way
 stay mutually readable.</p>

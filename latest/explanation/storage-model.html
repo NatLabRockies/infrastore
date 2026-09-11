@@ -354,14 +354,17 @@ staged <em>in this call</em> is removed, returning the store to its prior state.
 <li><strong>Bulk writes are all-or-nothing.</strong> <code>add_time_series_bulk</code> (and the buffered <code>bulk_add</code> session)
 group packed series by shape and stage each group as one batch-sized block — filling whole chunks
 — then insert every association in one transaction; any error rolls the whole batch back and
-removes the staged arrays. A one-item batch outside a transaction is the exception: sizing a
-dataset to a batch of one would claim a one-column dataset per call, so it takes the single-add
-path and fills a shared pool's slot instead.</li>
+removes the staged arrays. A pool the batch gives a single array is the exception: sizing a
+dataset to it would claim a one-column dataset, so that array fills a shared pool's slot instead,
+as a single add does — or, for an irregular series, is written as a standalone <code>arr_</code> dataset
+unless the file already holds a pool for its time axis (see
+<a href="../reference/file-format.html#packed-mode">Packed mode</a>). A one-item batch is the commonest case of
+it.</li>
 <li><strong>Single adds inside a transaction take the block path too.</strong> Nothing a transaction wrote is
 durable until its outermost commit, so its packed adds are buffered per pool and written together
 by the same block writer at the commit — bounded per pool by a column width and across all pools
-by a byte ceiling, and with a span holding one array falling back to a growth-pool slot for the
-same reason a one-item batch does. See
+by a byte ceiling, and with a span holding one array for a pool falling back to a growth-pool slot
+by the same rule. See
 <a href="./design-choices.html#make-transactions-span-operations-without-enlisting-hdf5">Make Transactions Span Operations</a>.</li>
 </ul>
 <p>On delete, the order reverses and is reference-counted: the association rows are removed inside a
