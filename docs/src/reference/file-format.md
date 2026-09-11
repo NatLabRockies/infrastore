@@ -339,11 +339,11 @@ of the file.
 **A block of one is not a block.** If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked `(1, 1)`, that would
 give a scalar `f64` series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the
-data. It is the same rule `add_time_series_bulk` applies to a batch of one. For an **irregular**
-pool the fallback is a standalone `arr_` dataset instead of a slot, because an `nsts_` pool is
-shared only by the series on that exact axis: a cohort of one is a dataset spread over `length`
-chunks for no reason, where a regular pool is shared by every series on the resolution. From two
-columns up the block is what the bulk add of those items writes.
+data. It is the same rule `add_time_series_bulk` applies to a pool its batch gives one array. For an
+**irregular** pool the fallback is a standalone `arr_` dataset instead of a slot, because an `nsts_`
+pool is shared only by the series on that exact axis: a cohort of one is a dataset spread over
+`length` chunks for no reason, where a regular pool is shared by every series on the resolution.
+From two columns up the block is what the bulk add of those items writes.
 
 This is a write-time policy like every other choice on this page: the layouts it produces are ones
 the format already had, so it does not affect `data_format_version` and stores written either way

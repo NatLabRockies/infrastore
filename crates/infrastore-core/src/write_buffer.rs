@@ -4,9 +4,9 @@
 //! packed single add inside one owes the file nothing yet. Instead of filling
 //! one slot of a growth pool — a read-modify-write of every timestamp-row chunk
 //! in it, for one column — the array joins a block for its pool, and the block
-//! is written with the same block writer a bulk add uses. A loop of single adds
-//! inside one transaction therefore produces the datasets one bulk add of the
-//! same items would: same names, same widths, same chunking.
+//! is written with [`put_block`], the block writer a bulk add uses. A loop of
+//! single adds inside one transaction therefore produces the datasets one bulk
+//! add of the same items would: same names, same widths, same chunking.
 //!
 //! The buffer is the store's, not the backend's. A backend knows physical
 //! positions; "accepted but not yet positioned" is transaction state, and the
@@ -21,7 +21,7 @@
 //! whole blocks out early, which costs an extra dataset and nothing else — the
 //! same spill a batch wider than one chunk already performs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
 use crate::storage::common::{MAX_PENDING_BYTES, element_block_bytes, resolve_dataset_cols};
@@ -39,6 +39,68 @@ pub(crate) fn pool_key(array: &TypedArray, group: PackGroup) -> PoolKey {
         array.length(),
         group,
     )
+}
+
+/// Write one pool's arrays to the backend, reporting which this call stored.
+///
+/// The block writer both write paths share — a transaction's buffered block
+/// and an add outside one — so the same arrays make the same file either way.
+///
+/// Two or more new arrays go to the backend's block writer, which sizes a
+/// fresh dataset to them. **A lone new array fills a growth-pool slot
+/// instead**: a dataset sized to one column is a dataset and a hash companion
+/// per series, and a columnar read pays one hyperslab per dataset per
+/// timestep, where series sharing a growth pool share one. **A lone irregular
+/// array is standalone** unless the file already holds a pool for its axis:
+/// packing is a bet the pool will be wider than one column, and a pool of one
+/// has lost it.
+///
+/// Getting either bet "wrong" costs space, never correctness: reads resolve an
+/// array by content hash and handle either layout. Deciding it from the
+/// block's final membership is what matters — a cohort added one series at a
+/// time inside a transaction reaches this as one block, so it makes the pooled
+/// cohort the bulk add of it would, not N standalone arrays.
+///
+/// "New" discounts what the backend already holds and repeats within the
+/// block, since neither is written.
+pub(crate) fn put_block(
+    backend: &mut dyn StorageBackend,
+    hashes: &[[u8; 32]],
+    arrays: &[&TypedArray],
+    group: PackGroup,
+) -> Result<Vec<bool>> {
+    // Two new arrays already make a block, so the scan stops there.
+    let mut seen = HashSet::new();
+    let mut new = Vec::with_capacity(2);
+    for (i, hash) in hashes.iter().enumerate() {
+        if seen.insert(*hash) && !backend.contains(hash)? {
+            new.push(i);
+            if new.len() == 2 {
+                break;
+            }
+        }
+    }
+    match new[..] {
+        [] => Ok(vec![false; hashes.len()]),
+        [i] => {
+            let array = arrays[i];
+            let layout = if matches!(group, PackGroup::Irregular(_))
+                && !backend.has_pack_group(
+                    array.dtype,
+                    array.element_shape(),
+                    array.length(),
+                    group,
+                ) {
+                ArrayLayout::Standalone
+            } else {
+                ArrayLayout::Packed
+            };
+            let mut written = vec![false; hashes.len()];
+            written[i] = backend.put_array(&hashes[i], array, group, layout)?;
+            Ok(written)
+        }
+        _ => backend.put_packed_block(hashes, arrays, group),
+    }
 }
 
 /// One pool's unwritten arrays, in arrival order — which is the column order
@@ -182,8 +244,24 @@ impl WriteBuffer {
     /// Write every block. Stops at the first failure with the rest of the
     /// buffer intact, for the reason [`Self::write_block`] gives.
     pub(crate) fn write_all(&mut self, backend: &mut dyn StorageBackend) -> Result<()> {
-        while let Some(key) = self.blocks.keys().next().cloned() {
-            self.write_block(&key, backend)?;
+        self.write_all_except(&HashSet::new(), backend)
+    }
+
+    /// [`Self::write_all`], leaving the arrays in `skip` buffered.
+    ///
+    /// For a commit that has already decided to remove them: writing one would
+    /// only be undone, and leaving it out keeps a removed column out of its
+    /// block's width. They stay *buffered* rather than being dropped because
+    /// the commit can still fail after this and be rolled back, to a state
+    /// whose rows name them.
+    pub(crate) fn write_all_except(
+        &mut self,
+        skip: &HashSet<[u8; 32]>,
+        backend: &mut dyn StorageBackend,
+    ) -> Result<()> {
+        let keys: Vec<PoolKey> = self.blocks.keys().cloned().collect();
+        for key in &keys {
+            self.write_block_except(key, skip, backend)?;
         }
         Ok(())
     }
@@ -227,59 +305,65 @@ impl WriteBuffer {
         resolve_dataset_cols(Some(usize::MAX), dtype, element_shape).min(by_bytes)
     }
 
-    /// Write one pool's block and drop it from the buffer. A no-op if the pool
-    /// has no block.
-    ///
-    /// A block of two or more goes to the block writer, which sizes a fresh dataset
-    /// to it — the point of buffering. **A block of one fills a growth-pool slot
-    /// instead**, exactly as an un-transactioned single add does, and for the
-    /// reason `add_time_series_bulk` gives for a batch of one: a dataset sized to
-    /// one column is a dataset and a hash companion per series, and a columnar read
-    /// pays one hyperslab per dataset per timestep, where series sharing a growth
-    /// pool share one. **An irregular block of one is a standalone array** unless
-    /// the file already holds a pool for its axis: packing is a bet the pool will
-    /// be wider than one column, and this is where the block's final membership
-    /// settles it for a span.
+    /// Write one pool's block with [`put_block`] and drop it from the buffer. A
+    /// no-op if the pool has no block. This is where a span's pool membership
+    /// is final, so it is where [`put_block`]'s rules for a block of one settle.
     ///
     /// On failure the block goes back exactly as it was: the transaction that
     /// owns these writes is still open, and both committing again and rolling
     /// back have to be able to find them.
     fn write_block(&mut self, key: &PoolKey, backend: &mut dyn StorageBackend) -> Result<()> {
+        self.write_block_except(key, &HashSet::new(), backend)
+    }
+
+    /// [`Self::write_block`] for the block's arrays outside `skip`; the rest
+    /// stay buffered as the pool's block, in their original relative order.
+    /// The block-of-one rule is settled on what is written, so a pair whose
+    /// other half is skipped fills a growth-pool slot.
+    fn write_block_except(
+        &mut self,
+        key: &PoolKey,
+        skip: &HashSet<[u8; 32]>,
+        backend: &mut dyn StorageBackend,
+    ) -> Result<()> {
         let Some(block) = self.blocks.remove(key) else {
             return Ok(());
         };
         self.bytes = self.bytes.saturating_sub(block.bytes);
-        let group = key.3;
-        let outcome = if block.hashes.len() == 1 {
-            let layout = if matches!(group, PackGroup::Irregular(_))
-                && !backend.has_pack_group(key.0, &key.1, key.2, group)
-            {
-                ArrayLayout::Standalone
-            } else {
-                ArrayLayout::Packed
-            };
-            backend
-                .put_array(&block.hashes[0], &block.arrays[0], group, layout)
-                .map(|_| ())
-        } else {
-            let arrays: Vec<&TypedArray> = block.arrays.iter().collect();
-            backend
-                .put_packed_block(&block.hashes, &arrays, group)
-                .map(|_| ())
-        };
-        match outcome {
-            Ok(()) => {
-                for hash in &block.hashes {
-                    self.by_hash.remove(hash);
-                }
-                Ok(())
-            }
-            Err(e) => {
-                self.bytes += block.bytes;
-                self.blocks.insert(key.clone(), block);
-                Err(e)
+        let mut hashes = Vec::with_capacity(block.hashes.len());
+        let mut arrays = Vec::with_capacity(block.hashes.len());
+        for (hash, array) in block.hashes.iter().zip(&block.arrays) {
+            if !skip.contains(hash) {
+                hashes.push(*hash);
+                arrays.push(array);
             }
         }
+        let outcome = if hashes.is_empty() {
+            Ok(())
+        } else {
+            put_block(backend, &hashes, &arrays, key.3).map(drop)
+        };
+        if let Err(e) = outcome {
+            self.bytes += block.bytes;
+            self.blocks.insert(key.clone(), block);
+            return Err(e);
+        }
+        let mut kept = Block::default();
+        for (hash, array) in block.hashes.into_iter().zip(block.arrays) {
+            if skip.contains(&hash) {
+                self.by_hash.insert(hash, (key.clone(), kept.hashes.len()));
+                kept.bytes += array.bytes.len();
+                kept.hashes.push(hash);
+                kept.arrays.push(array);
+            } else {
+                self.by_hash.remove(&hash);
+            }
+        }
+        if !kept.hashes.is_empty() {
+            self.bytes += kept.bytes;
+            self.blocks.insert(key.clone(), kept);
+        }
+        Ok(())
     }
 
     /// Write out whole blocks, widest first, until the buffer is back inside

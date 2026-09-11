@@ -1119,6 +1119,14 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Whether the connection is outside any transaction. A `SAVEPOINT` issued
+    /// in this state opens one, so while a cross-operation transaction is open
+    /// this is false — unless SQLite has rolled that transaction back on its
+    /// own, which is what the store reads it to detect.
+    pub(crate) fn in_autocommit(&self) -> bool {
+        self.conn.is_autocommit()
+    }
+
     /// Insert a metadata record + its features inside the supplied transaction.
     /// Returns the association id. Caller is responsible for committing.
     pub fn insert(tx: &Connection, meta: &TimeSeriesMetadata) -> Result<i64> {

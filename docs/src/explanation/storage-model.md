@@ -190,14 +190,17 @@ sequenceDiagram
 - **Bulk writes are all-or-nothing.** `add_time_series_bulk` (and the buffered `bulk_add` session)
   group packed series by shape and stage each group as one batch-sized block — filling whole chunks
   — then insert every association in one transaction; any error rolls the whole batch back and
-  removes the staged arrays. A one-item batch outside a transaction is the exception: sizing a
-  dataset to a batch of one would claim a one-column dataset per call, so it takes the single-add
-  path and fills a shared pool's slot instead.
+  removes the staged arrays. A pool the batch gives a single array is the exception: sizing a
+  dataset to it would claim a one-column dataset, so that array fills a shared pool's slot instead,
+  as a single add does — or, for an irregular series, is written as a standalone `arr_` dataset
+  unless the file already holds a pool for its time axis (see
+  [Packed mode](../reference/file-format.md#packed-mode)). A one-item batch is the commonest case of
+  it.
 - **Single adds inside a transaction take the block path too.** Nothing a transaction wrote is
   durable until its outermost commit, so its packed adds are buffered per pool and written together
   by the same block writer at the commit — bounded per pool by a column width and across all pools
-  by a byte ceiling, and with a span holding one array falling back to a growth-pool slot for the
-  same reason a one-item batch does. See
+  by a byte ceiling, and with a span holding one array for a pool falling back to a growth-pool slot
+  by the same rule. See
   [Make Transactions Span Operations](./design-choices.md#make-transactions-span-operations-without-enlisting-hdf5).
 
 On delete, the order reverses and is reference-counted: the association rows are removed inside a

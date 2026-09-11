@@ -437,7 +437,7 @@ fn rollback_survives_a_reopen() {
 /// The catalog half of this is pinned above; this is the physical half, and it
 /// needs a signal the catalog cannot give. `commit_transaction` only consults
 /// `pending_free`, so an inner rollback that unwound the rows without sweeping
-/// the span's `staged_hashes` would leave the bytes in the file with no row
+/// what the span wrote would leave the bytes in the file with no row
 /// referencing them — an orphan invisible to `verify_integrity`, which walks only
 /// catalog-referenced arrays, and reclaimable only by `compact`.
 #[test]

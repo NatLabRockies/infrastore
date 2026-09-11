@@ -178,7 +178,7 @@ fn a_single_add_outside_a_transaction_still_fills_a_growth_pool() {
 /// its own, and the Julia binding's `add_time_series!` makes exactly that call
 /// for every series it adds: nineteen calls would leave nineteen datasets
 /// `…_PT1H__0` through `…__18`. Inside a transaction it coalesces instead,
-/// which is the better answer and the one the delegation cannot give.
+/// which is the better answer and the one a lone batch cannot give.
 #[test]
 fn one_item_bulk_adds_fill_a_slot_outside_a_transaction_and_coalesce_inside_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -221,9 +221,10 @@ fn one_item_bulk_adds_fill_a_slot_outside_a_transaction_and_coalesce_inside_one(
 /// The same, through the buffered guard: a `BulkAdd` holding one request is the
 /// single add too.
 ///
-/// `BulkAdd::commit` does not go through `add_time_series_bulk`, so the one-item
-/// test has to live below both of them — in `flush_bulk_add` — or a Rust caller
-/// buffering exactly one request still claims a one-column dataset per commit.
+/// `BulkAdd::commit` does not go through `add_time_series_bulk`, so the
+/// block-of-one rule has to live below both of them — in the block writer — or a
+/// Rust caller buffering exactly one request still claims a one-column dataset
+/// per commit.
 #[test]
 fn a_one_item_bulk_add_guard_fills_a_slot_outside_a_transaction() {
     use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
@@ -248,6 +249,57 @@ fn a_one_item_bulk_add_guard_fills_a_slot_outside_a_transaction() {
     );
 }
 
+/// The block-of-one rule is per pool, not per batch: a bulk add whose items
+/// span two pools, one of which gets a single array, writes a block for the
+/// wide one and a growth-pool slot for the lone one — the same file the same
+/// bulk add writes inside a transaction.
+#[test]
+fn a_pool_with_one_array_in_a_bulk_add_fills_a_slot() {
+    use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
+
+    let lone = || {
+        let vals: Vec<f64> = (0..12).map(|i| 5000.0 + i as f64).collect();
+        AddRequest::new(
+            9,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                t0(),
+                Duration::hours(1),
+                TypedArray::from_f64(vec![12], &vals),
+                "load",
+            )),
+        )
+    };
+    let batch = || vec![request(1, 100.0), request(2, 200.0), lone()];
+
+    let dir = tempfile::tempdir().unwrap();
+    let loose = dir.path().join("loose.h5");
+    {
+        let mut store = create_store(Some(&loose), false).unwrap();
+        store.add_time_series_bulk(batch()).unwrap();
+        store.flush().unwrap();
+    }
+    let spanned = dir.path().join("spanned.h5");
+    {
+        let mut store = create_store(Some(&spanned), false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add_time_series_bulk(batch()).unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+
+    let layout = packed_layout(&loose);
+    assert_eq!(layout, packed_layout(&spanned));
+    assert_eq!(layout["sts_f64_s_24_PT1H"].0, vec![24, 2]);
+    assert_eq!(
+        layout["sts_f64_s_12_PT1H"].0,
+        vec![12, DEFAULT_COLS_PER_DATASET],
+        "the growth pool, not a one-column dataset"
+    );
+    assert_eq!(layout.len(), 2);
+}
+
 /// A transaction spanning a *single* packed add fills a growth-pool slot, the
 /// way that add would outside one — it does not size a dataset to a block of
 /// one.
@@ -256,7 +308,7 @@ fn a_one_item_bulk_add_guard_fills_a_slot_outside_a_transaction() {
 /// atomic together" is usually a removal and a replacement, or one add beside
 /// some catalog work, not a bulk ingest. Sizing a dataset to it would give
 /// every such transaction a one-column dataset of its own — the layout the
-/// delegation above exists to avoid — where the growth pool shares one dataset
+/// block-of-one rule above exists to avoid — where the growth pool shares one dataset
 /// across every series at the resolution.
 ///
 /// From two columns up the block is what a bulk add of the same items writes,
@@ -293,6 +345,104 @@ fn a_transaction_around_one_add_fills_a_slot_rather_than_sizing_a_dataset() {
     for owner in 1..6 {
         assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
     }
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// One batch carrying the same array under two pools — identical values at two
+/// resolutions — writes it once, under the pool of its *first* request, the
+/// way arrival order decides inside a transaction. Here that makes the hourly
+/// pool a block of two and leaves the five-minute pool with nothing to write;
+/// were the claim decided by map iteration order instead, either pool could
+/// end up a block of one in a growth pool, differing from run to run.
+#[test]
+fn a_repeated_hash_across_pools_goes_to_its_first_request() {
+    let five_minute = |owner: i64, base: f64| {
+        let vals: Vec<f64> = (0..24).map(|i| base + i as f64).collect();
+        AddRequest::new(
+            owner,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                t0(),
+                Duration::minutes(5),
+                TypedArray::from_f64(vec![24], &vals),
+                "load",
+            )),
+        )
+    };
+    let batch = || vec![request(1, 100.0), request(2, 200.0), five_minute(3, 100.0)];
+
+    let dir = tempfile::tempdir().unwrap();
+    let loose = dir.path().join("loose.h5");
+    {
+        let mut store = create_store(Some(&loose), false).unwrap();
+        store.add_time_series_bulk(batch()).unwrap();
+        store.flush().unwrap();
+    }
+    let spanned = dir.path().join("spanned.h5");
+    {
+        let mut store = create_store(Some(&spanned), false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add_time_series_bulk(batch()).unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+
+    let layout = packed_layout(&loose);
+    assert_eq!(layout, packed_layout(&spanned));
+    assert_eq!(
+        layout,
+        BTreeMap::from([(
+            "sts_f64_s_24_PT1H".to_string(),
+            (vec![24, 2], Some(vec![24, 2]))
+        )]),
+        "the hourly pool holds both arrays; the five-minute pool wrote nothing"
+    );
+
+    let store = open_store(&loose, true).unwrap();
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 3);
+    assert_eq!(
+        first_value(&store, 3),
+        100.0,
+        "the five-minute series reads from the shared array"
+    );
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// An array a span both adds and removes is never written: the commit decides
+/// what to free before it flushes, and leaves the doomed array out of its
+/// block. What remains is a block of one, so it fills a growth-pool slot — the
+/// file the surviving add alone would have written — rather than a two-column
+/// dataset with one column zeroed.
+#[test]
+fn an_array_added_and_removed_in_one_span_stays_out_of_the_block() {
+    use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("added_and_removed.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        store.begin_transaction().unwrap();
+        store.add(request(1, 100.0)).unwrap();
+        let doomed = store.add(request(2, 200.0)).unwrap();
+        store.remove_by_ids(&[doomed]).unwrap();
+        store.commit_transaction().unwrap();
+        store.flush().unwrap();
+    }
+    assert_eq!(
+        packed_layout(&path),
+        BTreeMap::from([(
+            "sts_f64_s_24_PT1H".to_string(),
+            (
+                vec![24, DEFAULT_COLS_PER_DATASET],
+                Some(vec![5, DEFAULT_COLS_PER_DATASET])
+            )
+        )]),
+        "the survivor is a block of one and fills a slot"
+    );
+    let store = open_store(&path, true).unwrap();
+    assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
+    assert_eq!(first_value(&store, 1), 100.0);
     assert!(store.verify_integrity().unwrap().ok());
 }
 
@@ -364,14 +514,14 @@ fn kinds(path: &Path) -> BTreeMap<String, Vec<Vec<usize>>> {
 /// A cohort of irregular series added one at a time inside a span pools into
 /// one dataset, exactly as the bulk add of the same requests does.
 ///
-/// Packing an irregular series is a bet that its axis will be shared, and
-/// `resolve_irregular_layouts` settles that bet before the write from the
-/// requests it can see. Inside a span it cannot see them: each add is one
-/// request against a file holding no pool for the axis -- and because a
-/// standalone array never *becomes* a pool, the next add would see exactly the
-/// same thing, and six series on one timeline would come out as six standalone
-/// datasets where the bulk add of them writes one `(12, 6)` cohort. So the bet
-/// is settled where the answer is known, in the block.
+/// Packing an irregular series is a bet that its axis will be shared, and the
+/// block writer settles that bet from the block's membership. Settled per add,
+/// each would be one request against a file holding no pool for the axis --
+/// and because a standalone array never *becomes* a pool, the next add would
+/// see exactly the same thing, and six series on one timeline would come out as
+/// six standalone datasets where the bulk add of them writes one `(12, 6)`
+/// cohort. So the bet is settled where the answer is known, in the buffered
+/// block.
 #[test]
 fn irregular_singles_in_a_span_pool_like_a_bulk_add_of_them() {
     let dir = tempfile::tempdir().unwrap();
