@@ -11,7 +11,7 @@ end
 
 function close!(s::Store)
     if s.handle != C_NULL
-        @ccall lib_path().infrastore_store_free(s::Ptr{Cvoid})::Cvoid
+        @ccall libinfrastore.infrastore_store_free(s::Ptr{Cvoid})::Cvoid
         s.handle = C_NULL
     end
 end
@@ -130,7 +130,7 @@ function Store(;
         )
         path === nothing &&
             throw(ArgumentError("path is required when in_memory=false"))
-        code = @ccall lib_path().infrastore_store_create_replacing(
+        code = @ccall libinfrastore.infrastore_store_create_replacing(
             String(path)::Cstring,
             compression_kind::UInt8,
             UInt8(compression_level)::UInt8,
@@ -140,7 +140,7 @@ function Store(;
         )::Int32
     else
         cpath = path === nothing ? C_NULL : String(path)
-        code = @ccall lib_path().infrastore_store_create_with_catalog(
+        code = @ccall libinfrastore.infrastore_store_create_with_catalog(
             cpath::Cstring,
             in_memory::Bool,
             compression_kind::UInt8,
@@ -172,7 +172,7 @@ function open_store(
 )
     catalog_mode = _catalog_code(catalog, false)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall lib_path().infrastore_store_open_with_catalog(
+    code = @ccall libinfrastore.infrastore_store_open_with_catalog(
         path::Cstring, read_only::Bool, catalog_mode::UInt8, out::Ref{Ptr{Cvoid}}
     )::Int32
     _check(code)
@@ -208,7 +208,7 @@ function open_store_without_catalog(
 )
     catalog_mode = _catalog_code(catalog, false)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall lib_path().infrastore_store_open_without_catalog(
+    code = @ccall libinfrastore.infrastore_store_open_without_catalog(
         path::Cstring, catalog_mode::UInt8, out::Ref{Ptr{Cvoid}}
     )::Int32
     _check(code)
@@ -238,7 +238,7 @@ function open_copy(
 )
     catalog_mode = _catalog_code(catalog, false)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall lib_path().infrastore_store_open_copy(
+    code = @ccall libinfrastore.infrastore_store_open_copy(
         src::Cstring, dest::Cstring, catalog_mode::UInt8, out::Ref{Ptr{Cvoid}}
     )::Int32
     _check(code)
@@ -271,7 +271,7 @@ Where `store`'s catalog lives: `:attached` or `:memory`. See [`Store`](@ref).
 """
 function catalog_mode(s::Store)
     out = Ref{UInt8}(0)
-    code = @ccall lib_path().infrastore_store_catalog_mode(
+    code = @ccall libinfrastore.infrastore_store_catalog_mode(
         s::Ptr{Cvoid}, out::Ref{UInt8}
     )::Int32
     _check(code)
@@ -332,7 +332,7 @@ a transaction to the span that actually needs atomicity.
 """
 function begin_transaction!(store::Store)
     _check(
-        @ccall lib_path().infrastore_store_begin_transaction(
+        @ccall libinfrastore.infrastore_store_begin_transaction(
             store::Ptr{Cvoid}
         )::Int32
     )
@@ -347,7 +347,7 @@ whole span durable. Errors if no transaction is open.
 """
 function commit_transaction!(store::Store)
     _check(
-        @ccall lib_path().infrastore_store_commit_transaction(
+        @ccall libinfrastore.infrastore_store_commit_transaction(
             store::Ptr{Cvoid}
         )::Int32
     )
@@ -362,7 +362,7 @@ Errors if no transaction is open.
 """
 function rollback_transaction!(store::Store)
     _check(
-        @ccall lib_path().infrastore_store_rollback_transaction(
+        @ccall libinfrastore.infrastore_store_rollback_transaction(
             store::Ptr{Cvoid}
         )::Int32
     )
@@ -377,7 +377,7 @@ Whether a transaction is currently open on `store`.
 function in_transaction(store::Store)
     out = Ref{Bool}(false)
     _check(
-        @ccall lib_path().infrastore_store_in_transaction(
+        @ccall libinfrastore.infrastore_store_in_transaction(
             store::Ptr{Cvoid}, out::Ref{Bool}
         )::Int32
     )
@@ -393,7 +393,7 @@ The byte budget an open transaction's buffered adds are held to. See
 function write_buffer_bytes(store::Store)
     out = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_store_write_buffer_bytes(
+        @ccall libinfrastore.infrastore_store_write_buffer_bytes(
             store::Ptr{Cvoid}, out::Ref{UInt64}
         )::Int32
     )
@@ -440,7 +440,7 @@ function set_write_buffer_bytes!(store::Store, bytes::Integer)
     bytes <= typemax(Int) ||
         throw(ArgumentError("bytes must be at most $(typemax(Int)), got $bytes"))
     _check(
-        @ccall lib_path().infrastore_store_set_write_buffer_bytes(
+        @ccall libinfrastore.infrastore_store_set_write_buffer_bytes(
             store::Ptr{Cvoid}, UInt64(bytes)::UInt64
         )::Int32
     )
@@ -515,7 +515,7 @@ set_store_attribute!(store, "source_system", "WECC 2032 ADS")
 """
 function set_store_attribute!(store::Store, key::AbstractString, value::AbstractString)
     _check(
-        @ccall lib_path().infrastore_store_set_store_attribute(
+        @ccall libinfrastore.infrastore_store_set_store_attribute(
             store::Ptr{Cvoid}, key::Cstring, value::Cstring
         )::Int32
     )
@@ -535,7 +535,7 @@ function get_store_attribute(store::Store, key::AbstractString)
     out_value = Ref{Ptr{Cchar}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_store_get_store_attribute(
+        @ccall libinfrastore.infrastore_store_get_store_attribute(
             store::Ptr{Cvoid},
             key::Cstring,
             out_value::Ref{Ptr{Cchar}},
@@ -548,7 +548,7 @@ function get_store_attribute(store::Store, key::AbstractString)
     try
         return unsafe_string(Ptr{UInt8}(ptr), Int(out_len[]))
     finally
-        @ccall lib_path().infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
+        @ccall libinfrastore.infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
     end
 end
 
@@ -559,7 +559,7 @@ Every store attribute. Empty for a store that carries none.
 """
 function list_store_attributes(store::Store)
     json = _owned_str(
-        (out_json, out_len) -> @ccall lib_path().infrastore_store_list_store_attributes(
+        (out_json, out_len) -> @ccall libinfrastore.infrastore_store_list_store_attributes(
             store::Ptr{Cvoid}, out_json::Ref{Ptr{Cchar}}, out_len::Ref{UInt64}
         )::Int32
     )
@@ -580,7 +580,7 @@ write, so the reservation cannot be worked around by deleting one.
 function remove_store_attribute!(store::Store, key::AbstractString)
     out = Ref{Bool}(false)
     _check(
-        @ccall lib_path().infrastore_store_remove_store_attribute(
+        @ccall libinfrastore.infrastore_store_remove_store_attribute(
             store::Ptr{Cvoid}, key::Cstring, out::Ref{Bool}
         )::Int32
     )

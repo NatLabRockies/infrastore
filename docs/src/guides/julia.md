@@ -12,7 +12,7 @@ fixed tuples; every function-valued element type; feature-based selection; and c
 
 ## Install
 
-Julia 1.10 or newer. `InfraStore.jl` is registered in General, and the native library comes with it:
+Julia 1.11 or newer. `InfraStore.jl` is registered in General, and the native library comes with it:
 
 ```julia
 using Pkg

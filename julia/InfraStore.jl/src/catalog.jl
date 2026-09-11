@@ -356,7 +356,7 @@ Repeats are returned once each, in place.
 function list_metadata_by_ids(store::Store, ids::AbstractVector{<:Integer})
     raw = Int64[Int64(i) for i in ids]
     json = _owned_str(
-        (out_json, out_len) -> @ccall lib_path().infrastore_store_list_metadata_by_ids(
+        (out_json, out_len) -> @ccall libinfrastore.infrastore_store_list_metadata_by_ids(
             store::Ptr{Cvoid},
             raw::Ptr{Int64},
             length(raw)::UInt64,
@@ -415,7 +415,7 @@ function remove_by_filter!(
         component_field, name_glob, zoneless, initial_timestamp, length,
     )
     out_removed = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_store_remove_by_filter(
+    code = @ccall libinfrastore.infrastore_store_remove_by_filter(
         store::Ptr{Cvoid},
         has_owner::Bool,
         owner_arg::Int64,
@@ -477,7 +477,7 @@ function remove_by_ids!(
     id_vec = Int64[Int64(id) for id in ids]
     (has_owner, owner_id, owner_category) = _owner_guard(owner)
     out_removed = Ref{UInt64}(0)
-    code = GC.@preserve id_vec @ccall lib_path().infrastore_store_remove_by_ids(
+    code = GC.@preserve id_vec @ccall libinfrastore.infrastore_store_remove_by_ids(
         store::Ptr{Cvoid},
         id_vec::Ptr{Int64},
         UInt64(length(id_vec))::UInt64,
@@ -529,7 +529,7 @@ function has_any_time_series(
         component_field, name_glob, zoneless, initial_timestamp, length,
     )
     out = Ref{Bool}(false)
-    code = @ccall lib_path().infrastore_store_has_any_by_filter(
+    code = @ccall libinfrastore.infrastore_store_has_any_by_filter(
         store::Ptr{Cvoid},
         has_owner::Bool,
         owner_arg::Int64,
@@ -563,7 +563,7 @@ function get_counts(store::Store)
     a = Ref{Int64}(0)
     b = Ref{Int64}(0)
     c = Ref{Int64}(0)
-    code = @ccall lib_path().infrastore_store_counts(
+    code = @ccall libinfrastore.infrastore_store_counts(
         store::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}
     )::Int32
     _check(code)
@@ -579,7 +579,7 @@ catalog query in the core.
 """
 function counts_by_type(store::Store)
     json = _probe(
-        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_counts_by_type(
+        (buf, cap, out_len) -> @ccall libinfrastore.infrastore_store_counts_by_type(
             store::Ptr{Cvoid},
             buf::Ptr{UInt8},
             cap::UInt64,
@@ -601,7 +601,7 @@ Number of distinct stored arrays (content hashes); series that share an array
 """
 function num_distinct_arrays(store::Store)
     out = Ref{Int64}(0)
-    code = @ccall lib_path().infrastore_store_num_distinct_arrays(
+    code = @ccall libinfrastore.infrastore_store_num_distinct_arrays(
         store::Ptr{Cvoid}, out::Ref{Int64}
     )::Int32
     _check(code)
@@ -619,7 +619,7 @@ function time_series_counts(store::Store)
     b = Ref{Int64}(0)
     c = Ref{Int64}(0)
     d = Ref{Int64}(0)
-    code = @ccall lib_path().infrastore_store_counts_detailed(
+    code = @ccall libinfrastore.infrastore_store_counts_detailed(
         store::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}, d::Ref{Int64}
     )::Int32
     _check(code)
@@ -644,7 +644,7 @@ function list_owner_ids(
     resolution_iso = _period_to_cstr(resolution)
     cat = _category_int(owner_category)
     json = _probe(
-        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_list_owner_ids(
+        (buf, cap, out_len) -> @ccall libinfrastore.infrastore_store_list_owner_ids(
             store::Ptr{Cvoid},
             cat::Int32,
             has_type::Bool,
@@ -698,7 +698,7 @@ presentation table (e.g. a DataFrame).
 """
 function static_summary(store::Store)
     json = _probe(
-        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_static_summary(
+        (buf, cap, out_len) -> @ccall libinfrastore.infrastore_store_static_summary(
             store::Ptr{Cvoid},
             buf::Ptr{UInt8},
             cap::UInt64,
@@ -717,7 +717,7 @@ window_count)` with `count` = the number of associations in the group.
 """
 function forecast_summary(store::Store)
     json = _probe(
-        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_forecast_summary(
+        (buf, cap, out_len) -> @ccall libinfrastore.infrastore_store_forecast_summary(
             store::Ptr{Cvoid},
             buf::Ptr{UInt8},
             cap::UInt64,

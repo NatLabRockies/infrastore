@@ -82,7 +82,7 @@ end
 
 function _finalize_static_reader(r::StaticReader)
     if r.handle != C_NULL
-        @ccall lib_path().infrastore_static_reader_free(r::Ptr{Cvoid})::Cvoid
+        @ccall libinfrastore.infrastore_static_reader_free(r::Ptr{Cvoid})::Cvoid
         r.handle = C_NULL
     end
 end
@@ -94,7 +94,7 @@ function _static_group_layout(reader::StaticReader, gi::Integer)
     out_dtype = Ref{Int32}(0)
     out_ncols = Ref{UInt64}(0)
     out_shape_len = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_static_reader_group_info(
+    code = @ccall libinfrastore.infrastore_static_reader_group_info(
         reader::Ptr{Cvoid},
         UInt64(gi)::UInt64,
         out_dtype::Ref{Int32},
@@ -106,7 +106,7 @@ function _static_group_layout(reader::StaticReader, gi::Integer)
     _check(code)
     shape = Vector{Int64}(undef, Int(out_shape_len[]))
     if out_shape_len[] > 0
-        code = @ccall lib_path().infrastore_static_reader_group_info(
+        code = @ccall libinfrastore.infrastore_static_reader_group_info(
             reader::Ptr{Cvoid},
             UInt64(gi)::UInt64,
             out_dtype::Ref{Int32},
@@ -120,7 +120,7 @@ function _static_group_layout(reader::StaticReader, gi::Integer)
     ids = Vector{Int64}(undef, Int(out_ncols[]))
     for col in 0:(Int(out_ncols[]) - 1)
         out_id = Ref{Int64}(0)
-        code = @ccall lib_path().infrastore_static_reader_group_id(
+        code = @ccall libinfrastore.infrastore_static_reader_group_id(
             reader::Ptr{Cvoid},
             UInt64(gi)::UInt64,
             UInt64(col)::UInt64,
@@ -236,7 +236,7 @@ function build_static_reader(
     has_initial = initial_timestamp !== nothing
     initial_arg = has_initial ? _to_unix_ms(initial_timestamp) : Int64(0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall lib_path().infrastore_store_build_static_reader(
+    code = @ccall libinfrastore.infrastore_store_build_static_reader(
         store::Ptr{Cvoid},
         _type_code(static_type)::Int32,
         has_owner::Bool,
@@ -266,7 +266,7 @@ function build_static_reader(
     reader = StaticReader(out[], store, StaticGroup[])
     out_n = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_static_reader_num_groups(
+        @ccall libinfrastore.infrastore_static_reader_num_groups(
             reader::Ptr{Cvoid}, out_n::Ref{UInt64}
         )::Int32
     )
@@ -292,7 +292,7 @@ function static_grid(reader::StaticReader)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_static_reader_grid(
+        @ccall libinfrastore.infrastore_static_reader_grid(
             reader::Ptr{Cvoid},
             out_initial::Ref{Int64},
             out_res::Ref{Ptr{Cchar}},
@@ -314,7 +314,7 @@ end
 function _static_reader_reference(reader::StaticReader)
     out_ref = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_static_reader_time_reference(
+        @ccall libinfrastore.infrastore_static_reader_time_reference(
             reader::Ptr{Cvoid}, out_ref::Ref{Ptr{Cchar}}
         )::Int32
     )
@@ -331,7 +331,7 @@ loop written against it works for either kind of reader.
 function static_timestamps(reader::StaticReader)
     out_len = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_static_reader_timestamps(
+        @ccall libinfrastore.infrastore_static_reader_timestamps(
             reader::Ptr{Cvoid}, C_NULL::Ptr{Int64}, UInt64(0)::UInt64,
             out_len::Ref{UInt64},
         )::Int32
@@ -339,7 +339,7 @@ function static_timestamps(reader::StaticReader)
     millis = Vector{Int64}(undef, Int(out_len[]))
     if out_len[] > 0
         _check(
-            @ccall lib_path().infrastore_static_reader_timestamps(
+            @ccall libinfrastore.infrastore_static_reader_timestamps(
                 reader::Ptr{Cvoid}, millis::Ptr{Int64},
                 UInt64(length(millis))::UInt64, out_len::Ref{UInt64},
             )::Int32
@@ -430,7 +430,7 @@ function static_values(reader::StaticReader, group_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_static_reader_group_values(
+        @ccall libinfrastore.infrastore_static_reader_group_values(
             reader::Ptr{Cvoid},
             UInt64(group_index - 1)::UInt64,
             out_ptr::Ref{Ptr{UInt8}},
@@ -481,7 +481,7 @@ end
 
 function _finalize_forecast_reader(r::ForecastReader)
     if r.handle != C_NULL
-        @ccall lib_path().infrastore_forecast_reader_free(r::Ptr{Cvoid})::Cvoid
+        @ccall libinfrastore.infrastore_forecast_reader_free(r::Ptr{Cvoid})::Cvoid
         r.handle = C_NULL
     end
 end
@@ -492,7 +492,7 @@ Base.unsafe_convert(::Type{Ptr{Cvoid}}, r::ForecastReader) = r.handle
 function _forecast_entry_layout(reader::ForecastReader, ei::Integer)
     out_dtype = Ref{Int32}(0)
     out_shape_len = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_forecast_reader_entry_info(
+    code = @ccall libinfrastore.infrastore_forecast_reader_entry_info(
         reader::Ptr{Cvoid},
         UInt64(ei)::UInt64,
         out_dtype::Ref{Int32},
@@ -503,7 +503,7 @@ function _forecast_entry_layout(reader::ForecastReader, ei::Integer)
     _check(code)
     shape = Vector{Int64}(undef, Int(out_shape_len[]))
     if out_shape_len[] > 0
-        code = @ccall lib_path().infrastore_forecast_reader_entry_info(
+        code = @ccall libinfrastore.infrastore_forecast_reader_entry_info(
             reader::Ptr{Cvoid},
             UInt64(ei)::UInt64,
             out_dtype::Ref{Int32},
@@ -515,13 +515,13 @@ function _forecast_entry_layout(reader::ForecastReader, ei::Integer)
     end
     out_id = Ref{Int64}(0)
     _check(
-        @ccall lib_path().infrastore_forecast_reader_entry_id(
+        @ccall libinfrastore.infrastore_forecast_reader_entry_id(
             reader::Ptr{Cvoid}, UInt64(ei)::UInt64, out_id::Ref{Int64}
         )::Int32
     )
     out_slot = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_forecast_reader_entry_slot(
+        @ccall libinfrastore.infrastore_forecast_reader_entry_slot(
             reader::Ptr{Cvoid}, UInt64(ei)::UInt64, out_slot::Ref{UInt64}
         )::Int32
     )
@@ -578,7 +578,7 @@ function build_forecast_reader(
     has_initial = initial_timestamp !== nothing
     initial_arg = has_initial ? _to_unix_ms(initial_timestamp) : Int64(0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall lib_path().infrastore_store_build_forecast_reader(
+    code = @ccall libinfrastore.infrastore_store_build_forecast_reader(
         store::Ptr{Cvoid},
         has_owner::Bool,
         owner_arg::Int64,
@@ -603,7 +603,7 @@ function build_forecast_reader(
     reader = ForecastReader(out[], store, ForecastEntry[])
     out_n = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_forecast_reader_num_entries(
+        @ccall libinfrastore.infrastore_forecast_reader_num_entries(
             reader::Ptr{Cvoid}, out_n::Ref{UInt64}
         )::Int32
     )
@@ -619,7 +619,7 @@ end
 function _forecast_reader_reference(reader::ForecastReader)
     out_ref = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_forecast_reader_time_reference(
+        @ccall libinfrastore.infrastore_forecast_reader_time_reference(
             reader::Ptr{Cvoid}, out_ref::Ref{Ptr{Cchar}}
         )::Int32
     )
@@ -638,7 +638,7 @@ function forecast_timeline(reader::ForecastReader)
     out_interval = Ref{Ptr{Cchar}}(C_NULL)
     out_count = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_forecast_reader_timeline(
+        @ccall libinfrastore.infrastore_forecast_reader_timeline(
             reader::Ptr{Cvoid},
             out_initial::Ref{Int64},
             out_res::Ref{Ptr{Cchar}},
@@ -674,7 +674,7 @@ plan collapse to one slot, so this is `≤ length(forecast_entries(reader))`.
 function forecast_num_slots(reader::ForecastReader)
     out_n = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_forecast_reader_num_slots(
+        @ccall libinfrastore.infrastore_forecast_reader_num_slots(
             reader::Ptr{Cvoid}, out_n::Ref{UInt64}
         )::Int32
     )
@@ -689,7 +689,7 @@ function static_read!(reader::StaticReader, t)
         on_mismatch=() -> _invalidate_reader!(reader),
     )
     _check(
-        @ccall lib_path().infrastore_static_reader_read(
+        @ccall libinfrastore.infrastore_static_reader_read(
             reader::Ptr{Cvoid},
             reader.store::Ptr{Cvoid},
             _to_unix_ms(t)::Int64,
@@ -712,12 +712,12 @@ end
 # this runs on the way to throwing, and a second error would replace the one the
 # caller needs to see.
 function _invalidate_reader!(reader::StaticReader)
-    @ccall lib_path().infrastore_static_reader_invalidate(reader::Ptr{Cvoid})::Int32
+    @ccall libinfrastore.infrastore_static_reader_invalidate(reader::Ptr{Cvoid})::Int32
     return nothing
 end
 
 function _invalidate_reader!(reader::ForecastReader)
-    @ccall lib_path().infrastore_forecast_reader_invalidate(reader::Ptr{Cvoid})::Int32
+    @ccall libinfrastore.infrastore_forecast_reader_invalidate(reader::Ptr{Cvoid})::Int32
     return nothing
 end
 
@@ -741,7 +741,7 @@ function forecast_read!(reader::ForecastReader, t)
         on_mismatch=() -> _invalidate_reader!(reader),
     )
     _check(
-        @ccall lib_path().infrastore_forecast_reader_read(
+        @ccall libinfrastore.infrastore_forecast_reader_read(
             reader::Ptr{Cvoid},
             reader.store::Ptr{Cvoid},
             _to_unix_ms(t)::Int64,
@@ -761,7 +761,7 @@ function forecast_values(reader::ForecastReader, entry_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_forecast_reader_entry_values(
+        @ccall libinfrastore.infrastore_forecast_reader_entry_values(
             reader::Ptr{Cvoid},
             UInt64(entry_index - 1)::UInt64,
             out_ptr::Ref{Ptr{UInt8}},

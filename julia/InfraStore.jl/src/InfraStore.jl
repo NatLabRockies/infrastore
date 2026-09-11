@@ -3,7 +3,7 @@ module InfraStore
 using Artifacts: @artifact_str
 using Dates
 using JSON: JSON
-using Libdl: dlopen, dlsym
+using Libdl: LazyLibrary, dlopen, dlsym
 
 export LinearFunction,
     QuadraticFunction,

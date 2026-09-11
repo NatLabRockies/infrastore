@@ -100,7 +100,7 @@ The rest of this page covers building the workspace from a checkout.
 ## Build Prerequisites
 
 A Rust toolchain, `cmake`, a C compiler, and `protobuf` for the gRPC codegen. The Python and Julia
-bindings additionally need a Python interpreter (3.11+) or Julia (1.10+).
+bindings additionally need a Python interpreter (3.11+) or Julia (1.11+).
 
 ```sh
 brew install cmake protobuf maturin              # macOS

@@ -102,7 +102,7 @@ function transform_single_time_series!(
     # buffer (INTERVAL_BUF_LEN in the C header) rather than a probe-then-fetch.
     out_interval = Vector{UInt8}(undef, 64)
     out_normalized = Ref{Bool}(false)
-    code = @ccall lib_path().infrastore_store_transform_single_time_series(
+    code = @ccall libinfrastore.infrastore_store_transform_single_time_series(
         store::Ptr{Cvoid},
         _period_to_iso(horizon)::Cstring,
         _period_to_iso(interval)::Cstring,
@@ -149,7 +149,7 @@ function has_time_series(
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     out = Ref{Bool}(false)
-    code = @ccall lib_path().infrastore_store_has_typed(
+    code = @ccall libinfrastore.infrastore_store_has_typed(
         store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
@@ -196,7 +196,7 @@ function copy_time_series!(
 )
     renamed = new_name === nothing ? C_NULL : new_name
     out_id = Ref{Int64}(0)
-    code = @ccall lib_path().infrastore_store_copy_time_series(
+    code = @ccall libinfrastore.infrastore_store_copy_time_series(
         store::Ptr{Cvoid},
         Int64(src_id)::Int64,
         Int64(dst_owner_id)::Int64,

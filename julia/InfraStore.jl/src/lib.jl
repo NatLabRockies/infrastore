@@ -45,28 +45,36 @@ function lib_path()
     return p
 end
 
+# Every `@ccall` names its library as `libinfrastore`, never as `lib_path()`.
+# Julia 1.13 accepts only a literal or a constant binding in a `ccall`'s library
+# position (JuliaLang/julia#59165) and fails a call expression there at
+# precompile, although the 1.12 manual documented exactly that form. The path
+# must still be resolved at run time — `INFRASTORE_LIB` is read in the user's
+# session, not baked into the precompile cache — so the constant is a
+# `LazyLibrary` whose path prints as `lib_path()`: it opens on the first
+# `ccall`, and a missing library surfaces `lib_path`'s own error there.
+struct _LibraryPath end
+Base.print(io::IO, ::_LibraryPath) = print(io, lib_path())
+
+const libinfrastore = LazyLibrary(_LibraryPath())
+
 # ---- Runtime symbol resolution ----------------------------------------------
 #
 # `_filter_list_json` (catalog.jl) shares one call site across several exports,
 # so its FFI symbol is a runtime `Symbol` argument rather than a literal
 # `@ccall` target, and must be resolved with `dlsym`. Doing that on every call
-# via `dlsym(dlopen(lib_path()), fname)` reopens the library each time — bumping
-# its reference count with no matching `dlclose`, and walking the dynamic symbol
-# table from scratch — about 190x the cost of a cached lookup, measured over a
-# `list_metadata` loop. `_cached_dlsym` opens the library at most once and
-# memoizes each symbol thereafter; the lock covers both the lazy `dlopen` and
+# walks the dynamic symbol table from scratch — measured over a `list_metadata`
+# loop, with a `dlopen` per call as well, about 190x the cost of a cached
+# lookup. `dlopen(libinfrastore)` returns the handle the `LazyLibrary` already
+# holds, and `_cached_dlsym` memoizes each symbol on top of it; the lock covers
 # the dict, since Julia may call into this from multiple tasks.
 const _SYMBOL_CACHE_LOCK = ReentrantLock()
 const _SYMBOL_CACHE = Dict{Symbol, Ptr{Cvoid}}()
-const _LIB_HANDLE = Ref{Ptr{Cvoid}}(C_NULL)
 
 function _cached_dlsym(fname::Symbol)
     return lock(_SYMBOL_CACHE_LOCK) do
         get!(_SYMBOL_CACHE, fname) do
-            if _LIB_HANDLE[] == C_NULL
-                _LIB_HANDLE[] = dlopen(lib_path())
-            end
-            return dlsym(_LIB_HANDLE[], fname)
+            return dlsym(dlopen(libinfrastore), fname)
         end
     end
 end
@@ -541,13 +549,13 @@ end
 
 function _last_error_message()
     needed = Ref{UInt64}(0)
-    @ccall lib_path().infrastore_last_error_message(
+    @ccall libinfrastore.infrastore_last_error_message(
         C_NULL::Ptr{UInt8}, UInt64(0)::UInt64, needed::Ptr{UInt64}
     )::Int32
     n = Int(needed[])
     n == 0 && return ""
     buf = Vector{UInt8}(undef, n + 1)
-    @ccall lib_path().infrastore_last_error_message(
+    @ccall libinfrastore.infrastore_last_error_message(
         buf::Ptr{UInt8}, UInt64(n + 1)::UInt64, C_NULL::Ptr{UInt64}
     )::Int32
     return String(buf[1:n])
@@ -624,7 +632,7 @@ function _owned_str(ccall_once)
     try
         return unsafe_string(Ptr{UInt8}(ptr), Int(out_len[]))
     finally
-        @ccall lib_path().infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
+        @ccall libinfrastore.infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
     end
 end
 
@@ -651,7 +659,7 @@ an invalid directive string).
 """
 function init_logging(level::AbstractString="")
     filter_ptr = isempty(level) ? C_NULL : level
-    ret = @ccall lib_path().infrastore_store_init_logging(filter_ptr::Cstring)::Int32
+    ret = @ccall libinfrastore.infrastore_store_init_logging(filter_ptr::Cstring)::Int32
     if ret != 0
         @warn "InfraStore.init_logging: infrastore_store_init_logging returned error code $ret"
     end

@@ -25,7 +25,7 @@ mutable struct AddBatch
     handle::Ptr{Cvoid}
     count::Int
     function AddBatch()
-        handle = @ccall lib_path().infrastore_batch_new()::Ptr{Cvoid}
+        handle = @ccall libinfrastore.infrastore_batch_new()::Ptr{Cvoid}
         batch = new(handle, 0)
         finalizer(_finalize_batch, batch)
         return batch
@@ -34,7 +34,7 @@ end
 
 function _finalize_batch(b::AddBatch)
     if b.handle != C_NULL
-        @ccall lib_path().infrastore_batch_free(b::Ptr{Cvoid})::Cvoid
+        @ccall libinfrastore.infrastore_batch_free(b::Ptr{Cvoid})::Cvoid
         b.handle = C_NULL
     end
     return nothing
@@ -56,7 +56,7 @@ function add_time_series!(
     features::Union{Nothing, AbstractDict}=nothing,
 )
     element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
-    code = @ccall lib_path().infrastore_batch_add_single(
+    code = @ccall libinfrastore.infrastore_batch_add_single(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
@@ -92,7 +92,7 @@ function add_time_series!(
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
-    code = @ccall lib_path().infrastore_batch_add_non_sequential(
+    code = @ccall libinfrastore.infrastore_batch_add_non_sequential(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
@@ -131,7 +131,7 @@ function add_time_series!(
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
-    code = @ccall lib_path().infrastore_batch_add_persistent(
+    code = @ccall libinfrastore.infrastore_batch_add_persistent(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
@@ -207,7 +207,7 @@ function _batch_add_dense_forecast!(
     features::Union{Nothing, AbstractDict}=nothing,
 )
     element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
-    code = @ccall lib_path().infrastore_batch_add_forecast(
+    code = @ccall libinfrastore.infrastore_batch_add_forecast(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
@@ -246,7 +246,7 @@ function add_time_series!(
     features::Union{Nothing, AbstractDict}=nothing,
 )
     element_type_arg, dims, bytes = _wire_array(ts.element_type, ts.data)
-    code = @ccall lib_path().infrastore_batch_add_probabilistic(
+    code = @ccall libinfrastore.infrastore_batch_add_probabilistic(
         batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
@@ -287,7 +287,7 @@ all cases — on error nothing was committed and the batch is left empty.
 function add_time_series_bulk!(store::Store, batch::AddBatch)
     out_len = Ref{UInt64}(0)
     out_ids = Ref{Ptr{Int64}}(C_NULL)
-    code = @ccall lib_path().infrastore_store_add_batch(
+    code = @ccall libinfrastore.infrastore_store_add_batch(
         store::Ptr{Cvoid},
         batch::Ptr{Cvoid},
         out_len::Ref{UInt64},
@@ -303,7 +303,7 @@ function add_time_series_bulk!(store::Store, batch::AddBatch)
             ids = unsafe_wrap(Array, out_ids[], n; own=false)
             copyto!(added, ids)
         finally
-            @ccall lib_path().infrastore_buffer_free_i64(
+            @ccall libinfrastore.infrastore_buffer_free_i64(
                 out_ids[]::Ptr{Int64}, out_len[]::UInt64
             )::Cvoid
         end
