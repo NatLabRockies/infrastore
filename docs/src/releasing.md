@@ -346,10 +346,12 @@ recipe lives on under `yggdrasil/`, pinned to the release it was last synced wit
 
 2. Once `InfraStore_jll` is registered, cut the next `InfraStore.jl` version: delete
    `Artifacts.toml` and `julia/generate_artifacts.jl`, swap `lib_path()` to the JLL (the shape is
-   parked on the `julia-jll-dep` branch), add `InfraStore_jll` to `[deps]` with a `[compat]` bound
-   matching the version the JLL **first registers as** (check the registry: a bound below the
-   earliest published version resolves to nothing), and drop the `julia-artifact` CI job. JLL UUIDs
-   are deterministic — `BinaryBuilder.jll_uuid("InfraStore_jll")`.
+   parked on the `julia-jll-dep` branch, which predates the `libinfrastore` constant: every `@ccall`
+   must keep naming a constant library, since Julia 1.13 refuses a call there), add `InfraStore_jll`
+   to `[deps]` with a `[compat]` bound matching the version the JLL **first registers as** (check
+   the registry: a bound below the earliest published version resolves to nothing), and drop the
+   `julia-artifact` CI job. JLL UUIDs are deterministic —
+   `BinaryBuilder.jll_uuid("InfraStore_jll")`.
 
 3. Register that version with the same Registrator comment; it auto-merges in about 15 minutes. The
    artifact-era release assets stay up forever regardless (see above).

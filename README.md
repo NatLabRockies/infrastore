@@ -311,7 +311,7 @@ sudo apt-get install cmake protobuf-compiler     # Linux (Debian/Ubuntu)
 ```
 
 The first build compiles HDF5 from source, which takes a few minutes; the result is cached and later
-builds are unaffected. The cdylib tests additionally need Python 3.11+ and Julia 1.10+.
+builds are unaffected. The cdylib tests additionally need Python 3.11+ and Julia 1.11+.
 
 ### Build and test
 

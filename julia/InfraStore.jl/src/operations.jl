@@ -201,7 +201,7 @@ end
 function _take_cstr(ptr::Ptr{Cchar})
     ptr == C_NULL && return nothing
     s = unsafe_string(ptr)
-    @ccall lib_path().infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
+    @ccall libinfrastore.infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
     return s
 end
 
@@ -231,23 +231,25 @@ end
 
 # Null-tolerant frees for FFI-owned allocations, used from `finally` blocks.
 function _free_cstr(ptr::Ptr{Cchar})
-    @ccall lib_path().infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
+    @ccall libinfrastore.infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
 end
 function _free_i64(ptr::Ptr{Int64}, len::Integer)
-    @ccall lib_path().infrastore_buffer_free_i64(
+    @ccall libinfrastore.infrastore_buffer_free_i64(
         ptr::Ptr{Int64}, UInt64(len)::UInt64
     )::Cvoid
 end
 function _free_u8(ptr::Ptr{UInt8}, len::Integer)
-    @ccall lib_path().infrastore_buffer_free_u8(ptr::Ptr{UInt8}, UInt64(len)::UInt64)::Cvoid
+    @ccall libinfrastore.infrastore_buffer_free_u8(
+        ptr::Ptr{UInt8}, UInt64(len)::UInt64
+    )::Cvoid
 end
 function _free_u64(ptr::Ptr{UInt64}, len::Integer)
-    @ccall lib_path().infrastore_buffer_free_u64(
+    @ccall libinfrastore.infrastore_buffer_free_u64(
         ptr::Ptr{UInt64}, UInt64(len)::UInt64
     )::Cvoid
 end
 function _free_f64(ptr::Ptr{Float64}, len::Integer)
-    @ccall lib_path().infrastore_buffer_free_f64(
+    @ccall libinfrastore.infrastore_buffer_free_f64(
         ptr::Ptr{Float64}, UInt64(len)::UInt64
     )::Cvoid
 end
@@ -317,7 +319,7 @@ building the row.
 function get_metadata_by_id(store::Store, id::Integer)
     out_present = Ref{Bool}(false)
     json = _probe(
-        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_get_metadata_by_id(
+        (buf, cap, out_len) -> @ccall libinfrastore.infrastore_store_get_metadata_by_id(
             store::Ptr{Cvoid},
             Int64(id)::Int64,
             buf::Ptr{UInt8},
@@ -343,7 +345,7 @@ stale — it can never come to mean a different series.
 function association_exists(store::Store, id::Integer)
     out_present = Ref{Bool}(false)
     _check(
-        @ccall lib_path().infrastore_store_association_exists(
+        @ccall libinfrastore.infrastore_store_association_exists(
             store::Ptr{Cvoid}, Int64(id)::Int64, out_present::Ref{Bool}
         )::Int32
     )
@@ -369,7 +371,7 @@ function get_array_by_hash(
     out_dtype = Ref{Int32}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_store_get_array_by_hash(
+    code = @ccall libinfrastore.infrastore_store_get_array_by_hash(
         store::Ptr{Cvoid},
         data_hash::Ptr{UInt8},
         out_dtype::Ref{Int32},
@@ -408,7 +410,7 @@ function count_array_references(store::Store, data_hash::Vector{UInt8})
     length(data_hash) == 32 || throw(InvalidParameterError("data_hash must be 32 bytes"))
     out_sts = Ref{UInt64}(0)
     out_dst = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_store_count_array_references(
+    code = @ccall libinfrastore.infrastore_store_count_array_references(
         store::Ptr{Cvoid},
         data_hash::Ptr{UInt8},
         out_sts::Ref{UInt64},
@@ -450,7 +452,7 @@ function has_time_series(
     features_json =
         (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
     out = Ref{Bool}(false)
-    code = @ccall lib_path().infrastore_store_has_by_attrs(
+    code = @ccall libinfrastore.infrastore_store_has_by_attrs(
         store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
@@ -479,7 +481,7 @@ function has_for_owner(
 )
     out = Ref{Bool}(false)
     use_type = time_series_type !== nothing
-    code = @ccall lib_path().infrastore_store_has_for_owner(
+    code = @ccall libinfrastore.infrastore_store_has_for_owner(
         store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
@@ -527,7 +529,7 @@ function _bulk_single(
     out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_bulk_result_get_single(
+        @ccall libinfrastore.infrastore_bulk_result_get_single(
             result::Ptr{Cvoid},
             UInt64(idx)::UInt64,
             out_initial::Ref{Int64},
@@ -597,7 +599,7 @@ function _bulk_non_sequential(
     out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_bulk_result_get_non_sequential(
+        @ccall libinfrastore.infrastore_bulk_result_get_non_sequential(
             result::Ptr{Cvoid},
             UInt64(idx)::UInt64,
             out_ts::Ref{Ptr{Int64}},
@@ -669,7 +671,7 @@ function _bulk_persistent(
     out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_bulk_result_get_persistent(
+        @ccall libinfrastore.infrastore_bulk_result_get_persistent(
             result::Ptr{Cvoid},
             UInt64(idx)::UInt64,
             out_ts::Ref{Ptr{Int64}},
@@ -746,7 +748,7 @@ function _bulk_forecast(
     out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_bulk_result_get_forecast(
+        @ccall libinfrastore.infrastore_bulk_result_get_forecast(
             result::Ptr{Cvoid},
             UInt64(idx)::UInt64,
             out_initial::Ref{Int64},
@@ -841,7 +843,7 @@ end
 function _bulk_item_name(result::Ptr{Cvoid}, idx::Integer)
     out_name = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_bulk_result_item_name(
+        @ccall libinfrastore.infrastore_bulk_result_item_name(
             result::Ptr{Cvoid}, UInt64(idx)::UInt64, out_name::Ref{Ptr{Cchar}}
         )::Int32
     )
@@ -863,7 +865,7 @@ function _decode_bulk_result(
         for i in 1:n
             out_type = Ref{Int32}(0)
             _check(
-                @ccall lib_path().infrastore_bulk_result_item_type(
+                @ccall libinfrastore.infrastore_bulk_result_item_type(
                     result::Ptr{Cvoid}, UInt64(i - 1)::UInt64, out_type::Ref{Int32}
                 )::Int32
             )
@@ -880,7 +882,7 @@ function _decode_bulk_result(
             end
         end
     finally
-        @ccall lib_path().infrastore_bulk_result_free(result::Ptr{Cvoid})::Cvoid
+        @ccall libinfrastore.infrastore_bulk_result_free(result::Ptr{Cvoid})::Cvoid
     end
     return out
 end
@@ -923,7 +925,7 @@ function read_by_ids(
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
     if time_range === nothing
         _check(
-            @ccall lib_path().infrastore_store_read_by_ids(
+            @ccall libinfrastore.infrastore_store_read_by_ids(
                 store::Ptr{Cvoid},
                 id_vec::Ptr{Int64},
                 UInt64(n)::UInt64,
@@ -933,7 +935,7 @@ function read_by_ids(
     else
         _, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
         _check(
-            @ccall lib_path().infrastore_store_read_by_ids_range(
+            @ccall libinfrastore.infrastore_store_read_by_ids_range(
                 store::Ptr{Cvoid},
                 id_vec::Ptr{Int64},
                 UInt64(n)::UInt64,
@@ -1008,7 +1010,7 @@ function read_by_id(
     (has_owner, owner_id, owner_category) = _owner_guard(owner)
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_store_read_by_id(
+        @ccall libinfrastore.infrastore_store_read_by_id(
             store::Ptr{Cvoid},
             Int64(id)::Int64,
             start_present::Bool,

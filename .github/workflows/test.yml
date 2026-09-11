@@ -134,20 +134,36 @@ jobs:
             python "$example"
           done
 
-      - name: Setup Julia
+      # Two Julias: the oldest the package's `[compat]` admits and the newest
+      # release. They bracket the FFI's library binding -- 1.11 is the first
+      # with the `LazyLibrary` every `@ccall` names, and 1.13 the first to
+      # refuse the call expression it replaced -- so a regression at either end
+      # fails here. The later setup lands first on PATH, which makes a bare
+      # `julia` in every step below 1.13; only the test step reaches 1.11,
+      # through its setup's `julia-bindir` output.
+      - name: Setup Julia 1.11
+        id: julia-oldest
         uses: julia-actions/setup-julia@v2
         with:
-          version: "1.12"
+          version: "1.11"
+
+      - name: Setup Julia 1.13
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.13"
 
       # InfraStore.jl dlopens the cdylib that `cargo build --workspace` already
       # produced, located via INFRASTORE_LIB.
       #
-      # On Linux the run also emits Julia's own line counts. That is a separate
-      # measurement from the llvm-cov instrumentation above: llvm-cov sees the
-      # Rust code this suite drives through the C ABI, `--code-coverage` sees the
-      # Julia wrapper itself. Both are uploaded, under different Codecov flags.
+      # On Linux the 1.13 run also emits Julia's own line counts. That is a
+      # separate measurement from the llvm-cov instrumentation above: llvm-cov
+      # sees the Rust code this suite drives through the C ABI, `--code-coverage`
+      # sees the Julia wrapper itself. Both are uploaded, under different Codecov
+      # flags. One version's counts are enough, as one platform's are.
       - name: Run Julia tests
         shell: bash
+        env:
+          JULIA_OLDEST_BINDIR: ${{ steps.julia-oldest.outputs.julia-bindir }}
         run: |
           case "$RUNNER_OS" in
             Linux) root=$PWD; lib=libinfrastore_ffi.so ;;
@@ -159,30 +175,45 @@ jobs:
           esac
           export INFRASTORE_LIB="$root/target/debug/$lib"
           test -f "$INFRASTORE_LIB" || { echo "missing cdylib: $INFRASTORE_LIB" >&2; exit 1; }
-          # An `if` rather than `[ ... ] && covflags=(...)`: GitHub runs this
-          # shell with `-e`, and a trailing AND-list that evaluates false is
-          # itself a failing command, which would abort the step on non-Linux.
-          # `user` rather than the narrower `--code-coverage=@<path>`: the path
-          # form silently produces nothing if the prefix does not match how
-          # Julia records the file, whereas `user` cannot miss. Scoping happens
-          # in the report step, which reads only the package's src tree.
-          covflags=()
-          if [ "$RUNNER_OS" = Linux ]; then
-            covflags=(--code-coverage=user)
+          # The bindir is a native C:\... path on Windows, which bash cannot
+          # execute; the one it runs must be the /c/... form.
+          oldest="$JULIA_OLDEST_BINDIR/julia"
+          if [ "$RUNNER_OS" = Windows ]; then
+            oldest="$(cygpath -u "$JULIA_OLDEST_BINDIR")/julia"
           fi
-          julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
-          julia --project=julia/InfraStore.jl "${covflags[@]}" \
-            julia/InfraStore.jl/test/runtests.jl
-          # Again through Pkg.test, which is the only environment that has the
-          # TimeZones weak dependency and can therefore load
-          # InfraStoreTimeZonesExt. The run above skips those tests with a
-          # warning, because a weak dependency is not loadable from the
-          # package's own project; this is what actually exercises them.
-          # Linux only: it is one platform's worth of a pure-Julia conversion,
-          # and it pays a second full suite plus a tz-database install.
-          if [ "$RUNNER_OS" = Linux ]; then
-            julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
-          fi
+          for jl in "$oldest" julia; do
+            echo "::group::$("$jl" --version)"
+            # An `if` rather than `[ ... ] && covflags=(...)`: GitHub runs this
+            # shell with `-e`, and a trailing AND-list that evaluates false is
+            # itself a failing command, which would abort the step on non-Linux.
+            # `user` rather than the narrower `--code-coverage=@<path>`: the
+            # path form silently produces nothing if the prefix does not match
+            # how Julia records the file, whereas `user` cannot miss. Scoping
+            # happens in the report step, which reads only the package's src
+            # tree.
+            covflags=()
+            if [ "$RUNNER_OS" = Linux ] && [ "$jl" = julia ]; then
+              covflags=(--code-coverage=user)
+            fi
+            # The manifest is untracked and records the stdlib versions of the
+            # Julia that resolved it, so each version resolves its own.
+            rm -f julia/InfraStore.jl/Manifest.toml
+            "$jl" --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
+            "$jl" --project=julia/InfraStore.jl "${covflags[@]}" \
+              julia/InfraStore.jl/test/runtests.jl
+            # Again through Pkg.test, which is the only environment that has
+            # the TimeZones weak dependency and can therefore load
+            # InfraStoreTimeZonesExt. The run above skips those tests with a
+            # warning, because a weak dependency is not loadable from the
+            # package's own project; this is what actually exercises them.
+            # Linux only: it is one platform's worth of a pure-Julia
+            # conversion, and it pays a second full suite plus a tz-database
+            # install.
+            if [ "$RUNNER_OS" = Linux ]; then
+              "$jl" --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
+            fi
+            echo "::endgroup::"
+          done
 
       # Keep the documentation examples executable on every supported runner,
       # as the Python ones above are. `shared.jl` is included by the examples;
@@ -331,9 +362,16 @@ jobs:
   # out-pointer (`out_key`/`out_id`), and widening one is exactly what a
   # release cycle does, so a write here reports an ABI skew that is expected
   # as a crash in an unrelated PR. Reads take no out-pointer of that shape.
+  #
+  # Both ends of the supported range, as in the test job above: resolution is
+  # exactly the code the two versions disagree about.
   julia-artifact:
-    name: Julia artifact resolution
+    name: Julia ${{ matrix.julia }} artifact resolution
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        julia: ["1.11", "1.13"]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -341,7 +379,7 @@ jobs:
       - name: Setup Julia
         uses: julia-actions/setup-julia@v2
         with:
-          version: "1.12"
+          version: ${{ matrix.julia }}
 
       - name: Resolve the library through Artifacts.toml
         shell: bash

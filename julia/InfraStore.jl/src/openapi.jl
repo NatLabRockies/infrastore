@@ -43,7 +43,7 @@ function export_time_series_associations_openapi(
     )
     return _owned_str(
         (out_json, out_len) ->
-            @ccall lib_path().infrastore_store_export_time_series_associations_openapi(
+            @ccall libinfrastore.infrastore_store_export_time_series_associations_openapi(
                 store::Ptr{Cvoid},
                 has_owner::Bool,
                 owner_arg::Int64,
@@ -88,7 +88,7 @@ function import_time_series_associations_openapi!(store::Store, json::AbstractSt
     out = Ref{UInt64}(0)
     json_arg = String(json)
     _check(
-        @ccall lib_path().infrastore_store_import_time_series_associations_openapi(
+        @ccall libinfrastore.infrastore_store_import_time_series_associations_openapi(
             store::Ptr{Cvoid}, json_arg::Cstring, out::Ref{UInt64}
         )::Int32
     )
@@ -104,7 +104,7 @@ JSON array, sorted by `(component_id, attribute_id)`.
 function export_supplemental_attribute_associations_openapi(store::Store)
     return _owned_str(
         (out_json, out_len) ->
-            @ccall lib_path().infrastore_store_export_supplemental_attribute_associations_openapi(
+            @ccall libinfrastore.infrastore_store_export_supplemental_attribute_associations_openapi(
                 store::Ptr{Cvoid}, out_json::Ref{Ptr{Cchar}}, out_len::Ref{UInt64}
             )::Int32
     )
@@ -124,7 +124,7 @@ function import_supplemental_attribute_associations_openapi!(
     out = Ref{UInt64}(0)
     json_arg = String(json)
     _check(
-        @ccall lib_path().infrastore_store_import_supplemental_attribute_associations_openapi(
+        @ccall libinfrastore.infrastore_store_import_supplemental_attribute_associations_openapi(
             store::Ptr{Cvoid}, json_arg::Cstring, out::Ref{UInt64}
         )::Int32
     )

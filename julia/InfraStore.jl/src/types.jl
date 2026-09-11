@@ -283,7 +283,7 @@ function infer_resolution(timestamps::AbstractVector)
     millis = Int64[_to_unix_ms(t) for t in timestamps]
     out_iso = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall lib_path().infrastore_infer_period(
+        @ccall libinfrastore.infrastore_infer_period(
             millis::Ptr{Int64}, UInt64(length(millis))::UInt64, out_iso::Ref{Ptr{Cchar}}
         )::Int32
     )

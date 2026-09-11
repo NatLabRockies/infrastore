@@ -121,14 +121,14 @@ function timestamps(ts::SingleTimeSeries)
     initial = _to_unix_ms(ts.initial_timestamp)
     iso = _period_to_iso(ts.resolution)
     _check(
-        @ccall lib_path().infrastore_grid_timestamps(
+        @ccall libinfrastore.infrastore_grid_timestamps(
             initial::Int64, iso::Cstring, UInt64(steps)::UInt64,
             C_NULL::Ptr{Int64}, UInt64(0)::UInt64, out_len::Ref{UInt64},
         )::Int32
     )
     millis = Vector{Int64}(undef, Int(out_len[]))
     _check(
-        @ccall lib_path().infrastore_grid_timestamps(
+        @ccall libinfrastore.infrastore_grid_timestamps(
             initial::Int64, iso::Cstring, UInt64(steps)::UInt64,
             millis::Ptr{Int64}, UInt64(length(millis))::UInt64, out_len::Ref{UInt64},
         )::Int32

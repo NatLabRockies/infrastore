@@ -223,7 +223,7 @@ for (T, api) in (
         quote
             out = Ref{Bool}(false)
             _check(
-                @ccall lib_path().$sym(
+                @ccall libinfrastore.$sym(
                     store::Ptr{Cvoid}, filter_json::Cstring, out::Ref{Bool}
                 )::Int32
             )
@@ -232,7 +232,7 @@ for (T, api) in (
     elseif shape === :rows
         quote
             json = _probe(
-                (buf, cap, len) -> @ccall lib_path().$sym(
+                (buf, cap, len) -> @ccall libinfrastore.$sym(
                     store::Ptr{Cvoid},
                     filter_json::Cstring,
                     buf::Ptr{UInt8},
@@ -245,7 +245,7 @@ for (T, api) in (
     elseif shape === :owned_rows
         quote
             json = _owned_str(
-                (out_json, out_len) -> @ccall lib_path().$sym(
+                (out_json, out_len) -> @ccall libinfrastore.$sym(
                     store::Ptr{Cvoid},
                     filter_json::Cstring,
                     out_json::Ref{Ptr{Cchar}},
@@ -257,7 +257,7 @@ for (T, api) in (
     elseif shape === :ids
         quote
             json = _probe(
-                (buf, cap, len) -> @ccall lib_path().$sym(
+                (buf, cap, len) -> @ccall libinfrastore.$sym(
                     store::Ptr{Cvoid},
                     filter_json::Cstring,
                     buf::Ptr{UInt8},
@@ -270,7 +270,7 @@ for (T, api) in (
     elseif shape === :endpoint_ids
         quote
             json = _probe(
-                (buf, cap, len) -> @ccall lib_path().$sym(
+                (buf, cap, len) -> @ccall libinfrastore.$sym(
                     store::Ptr{Cvoid},
                     filter_json::Cstring,
                     Int32($selector)::Int32,
@@ -285,7 +285,7 @@ for (T, api) in (
         quote
             out = Ref{UInt64}(0)
             _check(
-                @ccall lib_path().$sym(
+                @ccall libinfrastore.$sym(
                     store::Ptr{Cvoid}, filter_json::Cstring, out::Ref{UInt64}
                 )::Int32
             )
@@ -295,7 +295,7 @@ for (T, api) in (
         quote
             out = Ref{Int64}(0)
             _check(
-                @ccall lib_path().$sym(
+                @ccall libinfrastore.$sym(
                     store::Ptr{Cvoid}, filter_json::Cstring, out::Ref{Int64}
                 )::Int32
             )
@@ -305,7 +305,7 @@ for (T, api) in (
         quote
             out = Ref{Int64}(0)
             _check(
-                @ccall lib_path().$sym(
+                @ccall libinfrastore.$sym(
                     store::Ptr{Cvoid},
                     filter_json::Cstring,
                     Int32($selector)::Int32,
@@ -336,7 +336,7 @@ for (fname, T, sym) in (
     @eval function $fname(store::Store, association::$T)
         out_id = Ref{Int64}(0)
         _check(
-            @ccall lib_path().$sym(
+            @ccall libinfrastore.$sym(
                 store::Ptr{Cvoid},
                 association.$id1::Int64,
                 association.$type1::Cstring,
@@ -360,7 +360,7 @@ for (fname, T, sym) in (
         out = Ref{UInt64}(0)
         out_ids = Ref{Ptr{Int64}}(C_NULL)
         _check(
-            @ccall lib_path().$sym(
+            @ccall libinfrastore.$sym(
                 store::Ptr{Cvoid}, payload::Cstring, out::Ref{UInt64},
                 out_ids::Ref{Ptr{Int64}},
             )::Int32
@@ -386,7 +386,7 @@ for (fname, sym) in (
     @eval function $fname(store::Store, old_id::Integer, new_id::Integer)
         out = Ref{UInt64}(0)
         _check(
-            @ccall lib_path().$sym(
+            @ccall libinfrastore.$sym(
                 store::Ptr{Cvoid},
                 Int64(old_id)::Int64,
                 Int64(new_id)::Int64,
@@ -566,7 +566,7 @@ Attachment counts grouped by attribute type, ordered by type.
 function supplemental_attribute_counts_by_type(store::Store)
     json = _probe(
         (buf, cap, len) ->
-            @ccall lib_path().infrastore_store_supplemental_attribute_counts_by_type(
+            @ccall libinfrastore.infrastore_store_supplemental_attribute_counts_by_type(
                 store::Ptr{Cvoid}, buf::Ptr{UInt8}, cap::UInt64, len::Ref{UInt64}
             )::Int32
     )
@@ -585,7 +585,7 @@ component type. The core does the GROUP BY; callers build any presentation table
 function supplemental_attribute_summary(store::Store)
     json = _probe(
         (buf, cap, len) ->
-            @ccall lib_path().infrastore_store_supplemental_attribute_summary(
+            @ccall libinfrastore.infrastore_store_supplemental_attribute_summary(
                 store::Ptr{Cvoid}, buf::Ptr{UInt8}, cap::UInt64, len::Ref{UInt64}
             )::Int32
     )
@@ -617,7 +617,7 @@ function get_forecast_parameters(
     resolution_out = Ref{Ptr{Cchar}}(C_NULL)
     initial_out = Ref{Int64}(-1)
     _check(
-        @ccall lib_path().infrastore_store_get_forecast_parameters(
+        @ccall libinfrastore.infrastore_store_get_forecast_parameters(
             store::Ptr{Cvoid},
             _period_to_cstr(resolution)::Cstring,
             _period_to_cstr(interval)::Cstring,
@@ -653,7 +653,7 @@ resolution disagree on their `(initial_timestamp, length)`. One catalog query.
 function check_static_consistency(store::Store; resolution::Union{Nothing, Period}=nothing)
     fres = _period_to_cstr(resolution)
     json = _probe(
-        (buf, cap, len) -> @ccall lib_path().infrastore_store_check_static_consistency(
+        (buf, cap, len) -> @ccall libinfrastore.infrastore_store_check_static_consistency(
             store::Ptr{Cvoid},
             fres::Cstring,
             buf::Ptr{UInt8},
@@ -680,7 +680,7 @@ for (fname, sym) in (
         has_type = time_series_type !== nothing
         type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
         json = _probe(
-            (buf, cap, len) -> @ccall lib_path().$sym(
+            (buf, cap, len) -> @ccall libinfrastore.$sym(
                 store::Ptr{Cvoid},
                 has_type::Bool,
                 type_arg::Int32,
@@ -719,7 +719,7 @@ Whether the store was opened read-only.
 function read_only(store::Store)
     out = Ref{Bool}(false)
     _check(
-        @ccall lib_path().infrastore_store_read_only(
+        @ccall libinfrastore.infrastore_store_read_only(
             store::Ptr{Cvoid}, out::Ref{Bool}
         )::Int32
     )
@@ -740,7 +740,7 @@ when the catalog gains a table.
 function is_empty(store::Store)
     out = Ref{Bool}(false)
     _check(
-        @ccall lib_path().infrastore_store_is_empty(
+        @ccall libinfrastore.infrastore_store_is_empty(
             store::Ptr{Cvoid}, out::Ref{Bool}
         )::Int32
     )
@@ -758,7 +758,7 @@ function get_compression(store::Store)
     level = Ref{UInt8}(0)
     shuffle = Ref{Bool}(false)
     _check(
-        @ccall lib_path().infrastore_store_get_compression(
+        @ccall libinfrastore.infrastore_store_get_compression(
             store::Ptr{Cvoid},
             kind::Ref{UInt8},
             level::Ref{UInt8},
@@ -777,7 +777,7 @@ in-memory store.
 function get_path(store::Store)
     has_path = Ref{Bool}(false)
     json = _probe(
-        (buf, cap, len) -> @ccall lib_path().infrastore_store_get_path(
+        (buf, cap, len) -> @ccall libinfrastore.infrastore_store_get_path(
             store::Ptr{Cvoid},
             has_path::Ref{Bool},
             buf::Ptr{UInt8},
@@ -807,7 +807,7 @@ reports what went — an expected state, not corruption).
 function verify_integrity(store::Store)
     out = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_store_verify(
+        @ccall libinfrastore.infrastore_store_verify(
             store::Ptr{Cvoid}, out::Ref{UInt64}
         )::Int32
     )
@@ -834,7 +834,7 @@ tombstone bookkeeping and sweeps the catalog.
 """
 function compact!(store::Store)
     json = _owned_str(
-        (out_json, out_len) -> @ccall lib_path().infrastore_store_compact(
+        (out_json, out_len) -> @ccall libinfrastore.infrastore_store_compact(
             store::Ptr{Cvoid}, out_json::Ref{Ptr{Cchar}}, out_len::Ref{UInt64}
         )::Int32
     )
@@ -855,7 +855,7 @@ Flush pending writes (HDF5 arrays + SQLite metadata) to disk. After this the
 on-disk `<path>.h5` and `<path>.sqlite` artifacts can be copied for persistence.
 """
 function flush!(store::Store)
-    return _check(@ccall lib_path().infrastore_store_flush(store::Ptr{Cvoid})::Int32)
+    return _check(@ccall libinfrastore.infrastore_store_flush(store::Ptr{Cvoid})::Int32)
 end
 
 """
@@ -866,7 +866,7 @@ an in-memory store to disk. Existing target files are overwritten.
 """
 function persist!(store::Store, path::AbstractString)
     _check(
-        @ccall lib_path().infrastore_store_persist(
+        @ccall libinfrastore.infrastore_store_persist(
             store::Ptr{Cvoid}, path::Cstring
         )::Int32
     )
@@ -898,7 +898,7 @@ arrays under it would leave its rows dangling.
 """
 function persist_arrays!(store::Store, path::AbstractString)
     _check(
-        @ccall lib_path().infrastore_store_persist_arrays(
+        @ccall libinfrastore.infrastore_store_persist_arrays(
             store::Ptr{Cvoid}, path::Cstring
         )::Int32
     )
@@ -923,7 +923,7 @@ are again RAM-only until the next call. For `catalog = :attached` this is
 """
 function persist_catalog!(store::Store)
     _check(
-        @ccall lib_path().infrastore_store_persist_catalog(store::Ptr{Cvoid})::Int32
+        @ccall libinfrastore.infrastore_store_persist_catalog(store::Ptr{Cvoid})::Int32
     )
     return nothing
 end
@@ -946,7 +946,7 @@ function clear!(
         throw(ArgumentError("clear! with owner_id also requires owner_category"))
     end
     _check(
-        @ccall lib_path().infrastore_store_clear(
+        @ccall libinfrastore.infrastore_store_clear(
             store::Ptr{Cvoid},
             has_owner::Bool,
             (has_owner ? Int64(owner_id) : Int64(0))::Int64,
@@ -973,7 +973,7 @@ function replace_owner!(
 )
     out = Ref{UInt64}(0)
     _check(
-        @ccall lib_path().infrastore_store_replace_owner(
+        @ccall libinfrastore.infrastore_store_replace_owner(
             store::Ptr{Cvoid},
             Int64(old_owner_id)::Int64,
             Int64(new_owner_id)::Int64,
