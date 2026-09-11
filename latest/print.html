@@ -623,7 +623,7 @@ JLL.</p>
 <p>The rest of this page covers building the workspace from a checkout.</p>
 <h2 id="build-prerequisites"><a class="header" href="#build-prerequisites">Build Prerequisites</a></h2>
 <p>A Rust toolchain, <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen. The Python and Julia
-bindings additionally need a Python interpreter (3.11+) or Julia (1.10+).</p>
+bindings additionally need a Python interpreter (3.11+) or Julia (1.11+).</p>
 <pre><code class="language-sh">brew install cmake protobuf maturin              # macOS
 sudo apt-get install cmake protobuf-compiler     # Linux (Debian / Ubuntu)
 </code></pre>
@@ -4481,7 +4481,7 @@ They cover static, non-sequential, persistent, deterministic, probabilistic, and
 fixed tuples; every function-valued element type; feature-based selection; and conversion to
 <code>DataFrame</code>s.</p>
 <h2 id="install-1"><a class="header" href="#install-1">Install</a></h2>
-<p>Julia 1.10 or newer. <code>InfraStore.jl</code> is registered in General, and the native library comes with it:</p>
+<p>Julia 1.11 or newer. <code>InfraStore.jl</code> is registered in General, and the native library comes with it:</p>
 <pre><code class="language-julia">using Pkg
 Pkg.add("InfraStore")
 </code></pre>
@@ -14413,10 +14413,12 @@ platforms carry no extra tags, so bare triplets are exactly right.</p>
 <li>
 <p>Once <code>InfraStore_jll</code> is registered, cut the next <code>InfraStore.jl</code> version: delete
 <code>Artifacts.toml</code> and <code>julia/generate_artifacts.jl</code>, swap <code>lib_path()</code> to the JLL (the shape is
-parked on the <code>julia-jll-dep</code> branch), add <code>InfraStore_jll</code> to <code>[deps]</code> with a <code>[compat]</code> bound
-matching the version the JLL <strong>first registers as</strong> (check the registry: a bound below the
-earliest published version resolves to nothing), and drop the <code>julia-artifact</code> CI job. JLL UUIDs
-are deterministic — <code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>.</p>
+parked on the <code>julia-jll-dep</code> branch, which predates the <code>libinfrastore</code> constant: every <code>@ccall</code>
+must keep naming a constant library, since Julia 1.13 refuses a call there), add <code>InfraStore_jll</code>
+to <code>[deps]</code> with a <code>[compat]</code> bound matching the version the JLL <strong>first registers as</strong> (check
+the registry: a bound below the earliest published version resolves to nothing), and drop the
+<code>julia-artifact</code> CI job. JLL UUIDs are deterministic —
+<code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>.</p>
 </li>
 <li>
 <p>Register that version with the same Registrator comment; it auto-merges in about 15 minutes. The

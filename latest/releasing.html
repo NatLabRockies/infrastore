@@ -475,10 +475,12 @@ platforms carry no extra tags, so bare triplets are exactly right.</p>
 <li>
 <p>Once <code>InfraStore_jll</code> is registered, cut the next <code>InfraStore.jl</code> version: delete
 <code>Artifacts.toml</code> and <code>julia/generate_artifacts.jl</code>, swap <code>lib_path()</code> to the JLL (the shape is
-parked on the <code>julia-jll-dep</code> branch), add <code>InfraStore_jll</code> to <code>[deps]</code> with a <code>[compat]</code> bound
-matching the version the JLL <strong>first registers as</strong> (check the registry: a bound below the
-earliest published version resolves to nothing), and drop the <code>julia-artifact</code> CI job. JLL UUIDs
-are deterministic — <code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>.</p>
+parked on the <code>julia-jll-dep</code> branch, which predates the <code>libinfrastore</code> constant: every <code>@ccall</code>
+must keep naming a constant library, since Julia 1.13 refuses a call there), add <code>InfraStore_jll</code>
+to <code>[deps]</code> with a <code>[compat]</code> bound matching the version the JLL <strong>first registers as</strong> (check
+the registry: a bound below the earliest published version resolves to nothing), and drop the
+<code>julia-artifact</code> CI job. JLL UUIDs are deterministic —
+<code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>.</p>
 </li>
 <li>
 <p>Register that version with the same Registrator comment; it auto-merges in about 15 minutes. The
