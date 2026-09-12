@@ -428,11 +428,8 @@ impl Descriptor {
     }
 
     fn features(&self) -> Result<Features, String> {
-        let mut out = Features::new();
-        for (k, v) in &self.features {
-            out.insert(k.clone(), parse::feature_from_json(k, v)?);
-        }
-        Ok(out)
+        let plain = self.features.clone().into_iter().collect();
+        infrastore_core::features_from_plain(&plain).map_err(|e| e.to_string())
     }
 
     /// The raw text of the timestamp this series is anchored on: the

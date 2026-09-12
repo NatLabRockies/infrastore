@@ -469,36 +469,6 @@ pub fn infer_feature_value(s: &str) -> FeatureValue {
     FeatureValue::Str(s.to_string())
 }
 
-/// Convert a JSON scalar into a [`FeatureValue`] for descriptor `features`.
-pub fn feature_from_json(key: &str, v: &serde_json::Value) -> Result<FeatureValue, String> {
-    Ok(match v {
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                FeatureValue::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                FeatureValue::Float(f)
-            } else {
-                return Err(format!(
-                    "feature '{key}' has a number that cannot be represented as i64 or f64"
-                ));
-            }
-        }
-        serde_json::Value::Bool(b) => FeatureValue::Bool(*b),
-        serde_json::Value::String(s) => FeatureValue::Str(s.clone()),
-        other => {
-            let type_name = match other {
-                serde_json::Value::Null => "null",
-                serde_json::Value::Array(_) => "array",
-                serde_json::Value::Object(_) => "object",
-                _ => unreachable!(),
-            };
-            return Err(format!(
-                "feature '{key}' has unsupported type {type_name}; use int, float, bool, or string"
-            ));
-        }
-    })
-}
-
 /// Parse a compression spec: `none`, `deflate`, or `deflate:LEVEL` (0-9).
 /// `shuffle` is threaded from its own flag.
 pub fn parse_compression(

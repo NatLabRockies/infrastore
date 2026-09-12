@@ -1,7 +1,6 @@
 //! The `add` command: load one or more series from a descriptor JSON + CSV, or
 //! from flags for a one-off.
 
-use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -187,11 +186,14 @@ impl InlineArgs {
             Some("wide") => ColumnLayout::Wide,
             Some(other) => return Err(format!("invalid --layout '{other}' (use long or wide)")),
         };
-        let mut features = BTreeMap::new();
-        for pair in &self.feature {
-            let (k, v) = parse::parse_feature_kv(pair)?;
-            features.insert(k, crate::fields::feature_value_json(&v));
-        }
+        let features = self
+            .feature
+            .iter()
+            .map(|pair| parse::parse_feature_kv(pair))
+            .collect::<Result<infrastore_core::Features, String>>()?;
+        let features = infrastore_core::features_to_plain(&features)
+            .into_iter()
+            .collect();
         Ok(Descriptor {
             owner_id: self.owner_id,
             owner_type: self.owner_type.clone(),
@@ -544,7 +546,7 @@ fn report_dry_run(requests: &[AddRequest], format: Format) -> Result<(), String>
     let rows: Vec<Vec<String>> = requests
         .iter()
         .map(|r| {
-            let arr = data_array(&r.data);
+            let arr = r.data.array();
             vec![
                 r.owner_id.to_string(),
                 r.owner_type.clone(),
@@ -563,7 +565,7 @@ fn report_dry_run(requests: &[AddRequest], format: Format) -> Result<(), String>
             let items: Vec<Value> = requests
                 .iter()
                 .map(|r| {
-                    let arr = data_array(&r.data);
+                    let arr = r.data.array();
                     json!({
                         "owner_id": r.owner_id,
                         "owner_type": r.owner_type,
@@ -592,17 +594,6 @@ fn report_dry_run(requests: &[AddRequest], format: Format) -> Result<(), String>
         }
     }
     Ok(())
-}
-
-fn data_array(d: &TimeSeriesData) -> &infrastore_core::TypedArray {
-    match d {
-        TimeSeriesData::SingleTimeSeries(s) => &s.data,
-        TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
-        TimeSeriesData::PersistentTimeSeries(s) => &s.data,
-        TimeSeriesData::Deterministic(d) => &d.data,
-        TimeSeriesData::Probabilistic(p) => &p.data,
-        TimeSeriesData::Scenarios(s) => &s.data,
-    }
 }
 
 /// The descriptors to load, the directory their relative `csv` paths resolve

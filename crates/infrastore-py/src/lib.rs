@@ -10,7 +10,7 @@
 //!     TimeSeriesError, NotFoundError, OwnerMismatchError, DuplicateTimeSeriesError,
 //!     InvalidParameterError,
 //!     IntegrityError, ReadOnlyStoreError, IoError, ConnectionError,
-//!     IncompatibleFormatError, IncompatibleForecastError, StorageError,
+//!     IncompatibleFormatError, StorageError,
 //!     DuplicateAssociationError,
 //!     DuplicateAssociationIdError,
 //! )
@@ -58,7 +58,6 @@ exceptions!(
     IoError,
     ConnectionError,
     IncompatibleFormatError,
-    IncompatibleForecastError,
     StorageError,
     StoreExistsError,
     MismatchedArtifactError,
@@ -82,9 +81,6 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         E::IntegrityError(m) => IntegrityError::new_err(m),
         E::ReadOnlyStore => ReadOnlyStoreError::new_err("store is read-only"),
         E::ConnectionError(m) => ConnectionError::new_err(m),
-        E::IncompatibleForecast => IncompatibleForecastError::new_err(
-            "forecast parameters are incompatible with existing forecasts",
-        ),
         ref e @ E::IncompatibleFormat { .. } => IncompatibleFormatError::new_err(e.to_string()),
         ref e @ E::StoreExists { .. } => StoreExistsError::new_err(e.to_string()),
         ref e @ E::MismatchedArtifact { .. } => MismatchedArtifactError::new_err(e.to_string()),

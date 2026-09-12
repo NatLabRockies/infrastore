@@ -1442,8 +1442,7 @@ mod convert_coverage_tests {
 
     #[test]
     fn application_data_is_always_empty_in_read_resp() {
-        // FINDING F1 (TEST_COVERAGE_PLAN.md §9), resolved as documented
-        // behavior: `GetResp.application_data` is always the empty string, and this test is
+        // Documented behavior: `GetResp.application_data` is always the empty string, and this test is
         // the tripwire that keeps it that way.
         //
         // It is not a value being dropped. `application_data` belongs to the association row

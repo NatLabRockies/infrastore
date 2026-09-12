@@ -634,7 +634,7 @@ pub fn info(
                 infrastore_core::ReadWindow::full(),
             )
             .map_err(|e| e.to_string())?;
-        let arr = data_array(&data);
+        let arr = data.array();
         rows.push(("shape".into(), json!(arr.shape)));
         append_stats(arr, &mut rows);
     }
@@ -796,7 +796,7 @@ fn render_forecast(
     rows_window: RowWindow,
     window: Option<usize>,
 ) -> Result<(), String> {
-    let arr = data_array(data);
+    let arr = data.array();
     let (headers, mut rows) = forecast_csv_rows(meta, data)?;
 
     // One window is a contiguous run of `horizon` rows, because
@@ -943,7 +943,7 @@ fn render_plot(
     data: &TimeSeriesData,
     width: Option<usize>,
 ) -> Result<(), String> {
-    let arr = data_array(data);
+    let arr = data.array();
     let decoded = csv_io::array_to_f64_lossy(arr);
     let per_step = arr.element_shape().iter().product::<usize>().max(1);
     // A forecast has no single time axis, so its whole flattened array is drawn
@@ -1023,7 +1023,7 @@ pub fn forecast_csv_rows(
     meta: &TimeSeriesMetadata,
     data: &TimeSeriesData,
 ) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
-    let arr = data_array(data);
+    let arr = data.array();
     let decoded = csv_io::array_to_strings(arr);
     let grid = ForecastGrid::of(data)?;
     let resolution = grid.resolution;
@@ -1096,17 +1096,6 @@ pub fn forecast_csv_rows(
         }
     }
     Ok((headers, rows))
-}
-
-fn data_array(d: &TimeSeriesData) -> &TypedArray {
-    match d {
-        TimeSeriesData::SingleTimeSeries(s) => &s.data,
-        TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
-        TimeSeriesData::PersistentTimeSeries(s) => &s.data,
-        TimeSeriesData::Deterministic(d) => &d.data,
-        TimeSeriesData::Probabilistic(p) => &p.data,
-        TimeSeriesData::Scenarios(s) => &s.data,
-    }
 }
 
 fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String, Value>) {

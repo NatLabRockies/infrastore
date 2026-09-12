@@ -6,7 +6,7 @@
 //! tests therefore *pin* the behavior the shipping code has today, with a
 //! comment saying so; they are tripwires against silent drift, not a
 //! specification anyone designed. Where the pinned behavior looks wrong it is
-//! marked `// FINDING:` and recorded in `TEST_COVERAGE_PLAN.md` §9.
+//! marked `// FINDING:`.
 //!
 //! Value round trips run through `common::for_each_backend` so the in-memory
 //! and persisted-HDF5 paths are held to the same answer.

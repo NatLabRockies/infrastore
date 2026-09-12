@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, FixedOffset, Utc};
 use infrastore_core::{FeatureValue, Features, TimeReference, TimeSeriesMetadata};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 /// How many leading hex characters of a content hash the table views show.
 ///
@@ -50,21 +50,7 @@ pub fn feature_value_str(v: &FeatureValue) -> String {
 
 /// A feature map as a JSON object with values kept in their own types.
 pub fn features_json(features: &Features) -> Value {
-    let mut obj = Map::new();
-    for (k, v) in features {
-        obj.insert(k.clone(), feature_value_json(v));
-    }
-    Value::Object(obj)
-}
-
-/// A feature value as a JSON scalar of its own type (not a string).
-pub fn feature_value_json(v: &FeatureValue) -> Value {
-    match v {
-        FeatureValue::Int(i) => json!(i),
-        FeatureValue::Float(f) => json!(f),
-        FeatureValue::Bool(b) => json!(b),
-        FeatureValue::Str(s) => json!(s),
-    }
+    Value::Object(infrastore_core::features_to_plain(features))
 }
 
 /// Flatten a JSON value for a two-column table/CSV cell: strings unquoted,

@@ -152,9 +152,6 @@ fn map_err(e: TimeSeriesError) -> Status {
         TimeSeriesError::IntegrityError(m) => Status::data_loss(m),
         TimeSeriesError::ReadOnlyStore => Status::failed_precondition("store is read-only"),
         TimeSeriesError::ConnectionError(m) => Status::unavailable(m),
-        TimeSeriesError::IncompatibleForecast => {
-            Status::failed_precondition("incompatible forecast")
-        }
         e @ TimeSeriesError::IncompatibleFormat { .. } => {
             Status::failed_precondition(e.to_string())
         }
