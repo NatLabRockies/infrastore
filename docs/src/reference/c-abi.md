@@ -541,7 +541,10 @@ compose. The filter carries no spelling flag because it selects rather than read
 on is an empty result, not an error.
 
 `time_series_type` is the reader's own argument rather than the filter's — a reader is built for one
-type — and picks the three shapes a reader can take. For `SingleTimeSeries` (`0`), the filter's
+type, so a record that also sets `has_time_series_type` must name the same type or the build is
+`INFRASTORE_ERR_INVALID_PARAMETER` — and picks the three shapes a reader can take. The rest of the
+record is `infrastore_store_list_metadata`'s in full; a static series stores no `interval`, so a
+filter that sets one matches nothing on a static reader. For `SingleTimeSeries` (`0`), the filter's
 `resolution` must be a non-empty ISO-8601 period — one resolution per reader — and all matched
 series must share one grid (`initial_timestamp` + `length`). For `NonSequentialTimeSeries` (`1`),
 `resolution` must be **null** (an irregular series has none) and all matched series must instead
@@ -863,7 +866,8 @@ typedef struct InfraStoreFilter {
   const char *interval;         /* ISO-8601; matches forecasts only — static rows carry none */
   const char *features_json;    /* JSON object; int, float, bool or string values */
   bool features_exact;          /* compare `features_json` as the row's whole feature set
-                                   (content hash) rather than a subset it must contain */
+                                   (content hash) rather than a subset it must contain;
+                                   with `features_json` NULL, only feature-less rows match */
   const char *component_field;  /* exact, case-sensitive; a row declaring none matches no value */
   bool has_zoneless;         bool zoneless;            /* which timestamp-spelling group */
   bool has_initial_timestamp; int64_t initial_timestamp_ms;

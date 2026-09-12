@@ -982,6 +982,16 @@ end
     one_of_two = Dict("scenario" => "high")
     # Subset (the default): a row carrying at least the requested pairs matches.
     @test has_any_time_series(store; owner_id=1, features=one_of_two)
+    # The flag is one filter keyword like the rest, so every filter-taking
+    # function takes it: a listing narrows the same way the probe does.
+    @test isempty(
+        list_metadata(store; owner_id=1, features=one_of_two, features_exact=true)
+    )
+    @test length(list_metadata(store; owner_id=1, features=both, features_exact=true)) == 1
+    @test remove_by_filter!(store; features=one_of_two, features_exact=true) == 0
+    # A filter keyword is typed where a wrong value would otherwise be folded
+    # onto the wrong coherence group.
+    @test_throws TypeError list_metadata(store; zoneless=1)
     # Whole set: the same query must not match a row carrying a further feature.
     @test !has_any_time_series(
         store; owner_id=1, features=one_of_two, features_exact=true

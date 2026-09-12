@@ -131,7 +131,7 @@ end
     has_time_series(T, store, owner_id, owner_category, name; resolution, interval, features=nothing) -> Bool
 
 True iff a time series of type `T` with the given attributes exists. `T` is any
-stored time series type; the type-less form is the `SingleTimeSeries` shorthand.
+stored time series type; the type-less form matches a series of any type.
 `owner_category` is the owner's `OwnerCategory` (`Component` or
 `SupplementalAttribute`).
 """

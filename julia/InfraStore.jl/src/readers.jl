@@ -136,8 +136,9 @@ end
     build_static_reader(store; resolution=nothing, window_start=nothing,
                         window_length=nothing, time_series_type=SingleTimeSeries,
                         owner_id=nothing, owner_category=nothing, name=nothing,
-                        name_glob=nothing, features=nothing, component_field=nothing,
-                        zoneless=nothing, initial_timestamp=nothing, length=nothing)
+                        name_glob=nothing, features=nothing, features_exact=false,
+                        component_field=nothing, zoneless=nothing,
+                        initial_timestamp=nothing, length=nothing)
 
 Build a [`StaticReader`] over the static series matching the filter.
 
@@ -195,6 +196,7 @@ function build_static_reader(
     name::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
@@ -224,7 +226,7 @@ function build_static_reader(
     # naming the series that disagree.
     code = _with_filter(;
         owner_id, owner_category, name, name_glob, resolution, features,
-        component_field, zoneless, initial_timestamp, length,
+        features_exact, component_field, zoneless, initial_timestamp, length,
     ) do filter
         @ccall libinfrastore.infrastore_store_build_static_reader(
             store::Ptr{Cvoid},
@@ -511,7 +513,8 @@ end
 """
     build_forecast_reader(store, time_series_type; resolution, owner_id=nothing,
                           owner_category=nothing, name=nothing, name_glob=nothing,
-                          features=nothing, component_field=nothing, zoneless=nothing)
+                          features=nothing, features_exact=false, component_field=nothing,
+                          zoneless=nothing, initial_timestamp=nothing, length=nothing)
 
 Build a [`ForecastReader`] over forecasts of `time_series_type` (a Julia type:
 `Deterministic`, `Probabilistic`, `Scenarios`, or `DeterministicSingleTimeSeries`).
@@ -532,6 +535,7 @@ function build_forecast_reader(
     name::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
@@ -545,7 +549,7 @@ function build_forecast_reader(
     # naming the series that disagree.
     code = _with_filter(;
         owner_id, owner_category, name, name_glob, resolution, features,
-        component_field, zoneless, initial_timestamp, length,
+        features_exact, component_field, zoneless, initial_timestamp, length,
     ) do filter
         @ccall libinfrastore.infrastore_store_build_forecast_reader(
             store::Ptr{Cvoid},

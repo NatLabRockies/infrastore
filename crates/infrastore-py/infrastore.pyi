@@ -733,6 +733,7 @@ class Store:
         initial_timestamp: datetime | None = None,
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
     ) -> int: ...
     def clear_time_series(
         self,
@@ -793,6 +794,7 @@ class Store:
         initial_timestamp: datetime | None = None,
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
     ) -> StaticReader: ...
     def static_read(self, reader: StaticReader, when: datetime) -> None: ...
     def build_forecast_reader(
@@ -810,6 +812,7 @@ class Store:
         initial_timestamp: datetime | None = None,
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
     ) -> ForecastReader: ...
     def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
 
@@ -835,6 +838,7 @@ class Store:
         initial_timestamp: datetime | None = None,
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
     ) -> list[dict[str, Any]]: ...
     def list_names(
         self,
@@ -852,6 +856,7 @@ class Store:
         initial_timestamp: datetime | None = None,
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
     ) -> list[str]: ...
     def list_owner_types(
         self,
@@ -869,6 +874,7 @@ class Store:
         initial_timestamp: datetime | None = None,
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
     ) -> list[str]: ...
     def has_any_time_series(
         self,
@@ -886,6 +892,7 @@ class Store:
         initial_timestamp: datetime | None = None,
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
     ) -> bool: ...
     def is_empty(self) -> bool: ...
     def get_resolutions(
@@ -1078,6 +1085,7 @@ class Store:
         initial_timestamp: datetime | None = None,
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
     ) -> str: ...
     def import_time_series_associations_openapi(self, json: str) -> int: ...
     def export_supplemental_attribute_associations_openapi(self) -> str: ...

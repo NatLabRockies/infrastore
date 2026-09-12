@@ -345,14 +345,8 @@ pub(crate) fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize
 /// off a dataset name or a hash row, so it is an integrity failure rather than
 /// a bad argument.
 pub(crate) fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
-    if s.len() != 64 {
-        return Err(TimeSeriesError::IntegrityError(format!(
-            "hash hex string should be 64 chars, got {}",
-            s.len()
-        )));
-    }
     crate::hash::hash_from_hex(s)
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad hex in {s}")))
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("expected 64 hex chars, got {s:?}")))
 }
 
 #[cfg(test)]

@@ -260,7 +260,7 @@ function _with_filter(
     features_exact::Bool=false,
     component_field=nothing,
     name_glob=nothing,
-    zoneless=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
     length=nothing,
 )
@@ -349,7 +349,8 @@ is the one part of a row that costs a read per row, so a listing omits it and
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and
   never match an interval filter).
-- `features` — match rows whose features include all the given entries (subset).
+- `features` — match rows whose features include all the given entries (subset);
+  `features_exact=true` matches them as the row's whole feature set instead.
 - `component_field` — exact, case-sensitive match on the owning component's
   field (e.g. `"max_active_power"`). A row that declares none matches no value,
   so this cannot select the rows that left it unset.
@@ -432,6 +433,7 @@ function remove_by_filter!(
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
@@ -441,7 +443,8 @@ function remove_by_filter!(
     out_removed = Ref{UInt64}(0)
     code = _with_filter(;
         owner_id, owner_category, time_series_type, name, resolution, interval,
-        features, component_field, name_glob, zoneless, initial_timestamp, length,
+        features, features_exact, component_field, name_glob, zoneless,
+        initial_timestamp, length,
     ) do filter
         @ccall libinfrastore.infrastore_store_remove_by_filter(
             store::Ptr{Cvoid},
@@ -535,7 +538,7 @@ function has_any_time_series(
     features_exact::Bool=false,
     component_field=nothing,
     name_glob=nothing,
-    zoneless=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
     length=nothing,
 )

@@ -20,6 +20,10 @@ publish = false
 [lib]
 name = "infrastore_py"
 crate-type = ["cdylib"]
+# No Rust unit tests: the crate is tested through `pytest` against the built
+# wheel. A test binary would also fail to load — `multiple-pymethods` registers
+# each class's method tables at load time, which needs an interpreter's symbols.
+test = false
 
 # Statically link HDF5 so a built wheel needs no system libraries; see
 # `infrastore-core`'s manifest for the full tradeoff.
@@ -30,6 +34,6 @@ vendored = ["infrastore-core/vendored"]
 [dependencies]
 chrono = { workspace = true }
 numpy = { workspace = true }
-pyo3 = { workspace = true, features = ["extension-module", "abi3-py311", "chrono"] }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py311", "chrono", "multiple-pymethods"] }
 infrastore-core = { workspace = true }
 tracing-subscriber = { workspace = true }

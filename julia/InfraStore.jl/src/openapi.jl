@@ -33,13 +33,14 @@ function export_time_series_associations_openapi(
     resolution=nothing,
     interval=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field=nothing,
     initial_timestamp=nothing,
     length=nothing,
 )
     return _with_filter(;
         owner_id, owner_category, time_series_type, name, resolution, interval,
-        features, component_field, initial_timestamp, length,
+        features, features_exact, component_field, initial_timestamp, length,
     ) do filter
         return _owned_str(
             (out_json, out_len) ->

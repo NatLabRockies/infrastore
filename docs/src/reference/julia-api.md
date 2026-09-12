@@ -1062,7 +1062,7 @@ close!(store) -> Nothing
 ```julia
 list_metadata(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
               name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
-              features=nothing, component_field=nothing,
+              features=nothing, features_exact=false, component_field=nothing,
               zoneless=nothing) -> Vector{TimeSeriesMetadata}
 ```
 

@@ -309,6 +309,7 @@ def list_metadata(
     resolution: timedelta | str | None = None,
     interval: timedelta | str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
+    features_exact: bool = False,          # `features` as the whole set, not a subset
 ) -> list[dict]: ...
 # `component_field` selects every series that varies that field on its owner. A
 # series that declares none matches no value, so it cannot select those rows.
@@ -1049,6 +1050,7 @@ def build_static_reader(
     initial_timestamp: datetime | None = None,        # select one grid, dropping
     length: int | None = None,                        # the series not on it
     features: dict[str, int | float | bool | str] | None = None,
+    features_exact: bool = False,          # `features` as the whole set, not a subset
 ) -> StaticReader: ...
 def static_read(self, reader: StaticReader, when: datetime) -> None: ...
 
@@ -1064,6 +1066,7 @@ def build_forecast_reader(
     name_glob: str | None = None,
     component_field: str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
+    features_exact: bool = False,          # `features` as the whole set, not a subset
 ) -> ForecastReader: ...
 def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
 ```
@@ -1480,7 +1483,7 @@ directly.
 def export_time_series_associations_openapi(
     self, *, owner_id=None, owner_category=None, owner_type=None,
     time_series_type=None, name=None, name_glob=None, component_field=None,
-    resolution=None, interval=None, features=None,
+    resolution=None, interval=None, features=None, features_exact=False,
 ) -> str: ...
 def import_time_series_associations_openapi(self, json: str) -> int: ...
 def export_supplemental_attribute_associations_openapi(self) -> str: ...

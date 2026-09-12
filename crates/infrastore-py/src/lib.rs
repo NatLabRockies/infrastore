@@ -430,20 +430,25 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
 
 // ---- Enums ----------------------------------------------------------------
 
-/// A series type's `#[pymethods]` block, with the descriptors every one of the
-/// six types carries prepended.
+/// The descriptors every one of the six series types carries, as a
+/// `#[pymethods]` block of their own.
 ///
-/// Those eight getters read the same fields off `self.inner` whatever the type
-/// is, so they were six identical copies before this. They arrive through the
-/// macro's own expansion rather than a `macro_rules!` call written inside the
-/// block, because `#[pymethods]` parses the impl it is handed and rejects an
-/// unexpanded macro item — so the attribute has to sit inside the expansion
-/// rather than outside it. Method order in a `#[pymethods]` impl carries no
-/// meaning, so prepending them is free.
+/// These getters read the same fields off `self.inner` whatever the type is, so
+/// they were six identical copies before this. They live in a second
+/// `#[pymethods]` impl (PyO3's `multiple-pymethods` feature) beside each type's
+/// hand-written one rather than wrapping it, so the hand-written block stays a
+/// plain impl that `rustfmt` formats — a macro invocation's body is out of its
+/// reach.
 macro_rules! series_pymethods {
-    ($ty:ident { $($rest:tt)* }) => {
+    ($ty:ident) => {
         #[pymethods]
         impl $ty {
+            /// The values, as a numpy array.
+            #[getter]
+            fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                numpy_from_typed(py, &self.inner.data)
+            }
+
             /// The series' name. Fixed once written — there is no rename.
             #[getter]
             fn name(&self) -> String {
@@ -498,8 +503,6 @@ macro_rules! series_pymethods {
                     .as_ref()
                     .map(core_lib::TimeReference::as_storage_string)
             }
-
-            $($rest)*
         }
     };
 }
@@ -1417,283 +1420,281 @@ pub struct PyDeterministic {
     inner: core_lib::Deterministic,
 }
 
-series_pymethods!(PyDeterministic {
-        /// Build a `Deterministic` forecast. `data` is a numpy array of shape
-        /// `[H, count, *E]`. `name` is required.
-        ///
-        /// The keyword-only arguments are the descriptive attributes documented on
-        /// `SingleTimeSeries`; they travel with the forecast into the store and
-        /// come back on a read.
-        #[new]
-        #[pyo3(signature = (
+series_pymethods!(PyDeterministic);
+
+#[pymethods]
+impl PyDeterministic {
+    /// Build a `Deterministic` forecast. `data` is a numpy array of shape
+    /// `[H, count, *E]`. `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the forecast into the store and
+    /// come back on a read.
+    #[new]
+    #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, data, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn new(
-            py: Python<'_>,
-            initial_timestamp: PyInstant,
-            resolution: Bound<'_, PyAny>,
-            horizon: Bound<'_, PyAny>,
-            interval: Bound<'_, PyAny>,
-            count: usize,
-            data: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let resolution = pyany_to_period(&resolution)?;
-            let horizon = pyany_to_period(&horizon)?;
-            let interval = pyany_to_period(&interval)?;
-            let typed = typed_array_from_numpy(data)?;
-            let mut inner = core_lib::Deterministic::new(
-                initial_timestamp.instant,
-                resolution,
-                horizon,
-                interval,
-                count,
-                typed,
-                name,
-            )
-            .map_err(InvalidParameterError::new_err)?;
-            // The spelling is inferred from the timestamp the caller handed us
-            // rather than asked for separately: the intent is in the object, and it
-            // is erased the moment the instant reaches the core. `time_reference=`
-            // is the override for a caller who means a different one.
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let typed = typed_array_from_numpy(data)?;
+        let mut inner = core_lib::Deterministic::new(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            typed,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        // The spelling is inferred from the timestamp the caller handed us
+        // rather than asked for separately: the intent is in the object, and it
+        // is erased the moment the instant reaches the core. `time_reference=`
+        // is the override for a caller who means a different one.
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Build from per-timestep logical values, encoding them into the array the
-        /// store holds and declaring the element type they imply. See
-        /// `SingleTimeSeries.from_values` for the value shapes and the rules.
-        ///
-        /// `values` is one entry per timestep in row-major order over the leading
-        /// axes, so entry `i * count + j` is window `j`'s step `i`. Those axes are
-        /// `[H, count]`, with `H` derived from `horizon`/`resolution` — the
-        /// arithmetic `encode_element_values` otherwise leaves to the caller.
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build from per-timestep logical values, encoding them into the array the
+    /// store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    ///
+    /// `values` is one entry per timestep in row-major order over the leading
+    /// axes, so entry `i * count + j` is window `j`'s step `i`. Those axes are
+    /// `[H, count]`, with `H` derived from `horizon`/`resolution` — the
+    /// arithmetic `encode_element_values` otherwise leaves to the caller.
+    #[classmethod]
+    #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_values(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            initial_timestamp: PyInstant,
-            resolution: Bound<'_, PyAny>,
-            horizon: Bound<'_, PyAny>,
-            interval: Bound<'_, PyAny>,
-            count: usize,
-            values: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let resolution = pyany_to_period(&resolution)?;
-            let horizon = pyany_to_period(&horizon)?;
-            let interval = pyany_to_period(&interval)?;
-            let decoded = from_values_payload(values, element_type.as_deref())?;
-            let mut inner = core_lib::Deterministic::from_values(
-                initial_timestamp.instant,
-                resolution,
-                horizon,
-                interval,
-                count,
-                &decoded,
-                name,
-            )
-            .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::Deterministic::from_values(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Decode this series' array into the per-timestep values its element type
-        /// describes — the read-side counterpart of `from_values`, and the reason a
-        /// caller never has to know the stored row layouts.
-        ///
-        /// Same shapes as `decode_element_values`, which this is: the element type
-        /// and the number of leading axes both come from the series, so there is
-        /// nothing left to pass and nothing to get wrong.
-        ///
-        /// `None` for a scalar element type and for any array whose physical dtype
-        /// is not `float64`: there the stored elements already are the values, and
-        /// `.data` is the answer.
-        fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-            decoded_or_none(py, &self.inner.data, self.inner.element_type, 2)
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 2)
+    }
+
+    /// The first window's timestamp, spelled the way it was written.
+    #[getter]
+    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        spell_instant(
+            py,
+            self.inner.initial_timestamp,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    #[getter]
+    fn resolution(&self) -> String {
+        self.inner.resolution.to_iso8601()
+    }
+
+    #[getter]
+    fn horizon(&self) -> String {
+        self.inner.horizon.to_iso8601()
+    }
+
+    #[getter]
+    fn interval(&self) -> String {
+        self.inner.interval.to_iso8601()
+    }
+
+    #[getter]
+    fn count(&self) -> usize {
+        self.inner.count
+    }
+
+    /// Value equality: all fields including the data array (bitwise).
+    /// The forecast as `{issue_time: pyarrow.Table}`, one entry per window.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// The key is the window's issue time — `initial_timestamp + k · interval`,
+    /// spelled the way the series was written. Each value is a two-column
+    /// `timestamp`/`value` table over that window's horizon, shaped exactly like
+    /// a `SingleTimeSeries.to_arrow()`: `horizon / resolution` rows stepping by
+    /// `resolution` from the issue time.
+    ///
+    /// **The dict is in window order**, which Python's insertion-ordered `dict`
+    /// makes an ordering you can rely on: `next(iter(windows))` is the earliest
+    /// issue time and iteration is chronological. It is not a sorted *container*
+    /// — there is no O(log n) range lookup — so `bisect` over `list(windows)` is
+    /// the way to select a span of issue times.
+    ///
+    /// ```python
+    /// windows = forecast.to_arrow_windows()
+    /// windows[datetime(2024, 1, 2, tzinfo=timezone.utc)]   # that day's forecast
+    /// for issue_time, table in windows.items(): ...        # chronological
+    /// ```
+    ///
+    /// Note that the two grids differ and both are needed to place a value:
+    /// windows step by `interval`, the rows inside one step by `resolution`.
+    /// They coincide only for a forecast whose windows abut, which is not the
+    /// common case — a day-ahead forecast reissued hourly overlaps 23 of every
+    /// 24 rows, so the tables deliberately repeat those values rather than
+    /// pretending one timeline covers them.
+    ///
+    /// Each table carries the forecast's descriptive attributes as schema
+    /// metadata, plus its own `issue_time`, so a window written to Parquet on
+    /// its own still knows which one it is.
+    ///
+    /// This materializes every window. The stored array is `[H, count, *E]` —
+    /// window index innermost — so it is transposed once here; for a
+    /// per-timestamp sweep the cheap path is `Store.build_forecast_reader`,
+    /// which reads on the axis the data is already laid out along.
+    fn to_arrow_windows<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let pa = pyarrow(py)?;
+        let inner = &self.inner;
+        let reference = inner.time_reference.as_ref();
+        // `[H, count, *E]` -> `[count, H, *E]`, once and contiguous, so each
+        // window below is a view rather than its own gather.
+        let np = py.import("numpy")?;
+        let stored = numpy_from_typed(py, &inner.data)?;
+        let by_window = np.call_method1(
+            "ascontiguousarray",
+            (stored.call_method1("swapaxes", (0, 1))?,),
+        )?;
+        // The element shape is what follows `[H, count]`; `TypedArray`'s own
+        // `element_shape` drops one axis, which is the static layout's rule.
+        let element_shape: Vec<usize> = inner.data.shape.get(2..).unwrap_or(&[]).to_vec();
+
+        let windows = PyDict::new(py);
+        for k in 0..inner.count {
+            let stamps = inner.window_timestamps(k).map_err(map_err)?;
+            let start = inner.window_start(k).map_err(map_err)?;
+            let mut metadata = arrow_metadata!(inner, "Deterministic");
+            // The macro takes `TypedArray::element_shape`, which strips one
+            // axis -- right for a static series, one axis short for a forecast,
+            // whose stored shape is `[H, count, *E]`. A window's element shape
+            // is what follows both.
+            metadata.insert("element_shape".to_string(), json_int_list(&element_shape));
+            metadata.insert("resolution".to_string(), inner.resolution.to_iso8601());
+            metadata.insert("horizon".to_string(), inner.horizon.to_iso8601());
+            metadata.insert("interval".to_string(), inner.interval.to_iso8601());
+            metadata.insert("count".to_string(), inner.count.to_string());
+            metadata.insert(
+                "issue_time".to_string(),
+                render_catalog_timestamp(start, reference),
+            );
+            let column = arrow_column(&pa, &by_window.get_item(k)?, &element_shape)?;
+            let table = arrow_table_from_column(&pa, &stamps, reference, column, metadata)?;
+            windows.set_item(spell_instant(py, start, reference)?, table)?;
         }
+        Ok(windows)
+    }
 
-        /// The first window's timestamp, spelled the way it was written.
-        #[getter]
-        fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            spell_instant(
-                py,
-                self.inner.initial_timestamp,
-                self.inner.time_reference.as_ref(),
-            )
-        }
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
 
-        #[getter]
-        fn resolution(&self) -> String {
-            self.inner.resolution.to_iso8601()
-        }
+    /// Number of forecast windows (`count`).
+    fn __len__(&self) -> usize {
+        self.inner.count
+    }
 
-        #[getter]
-        fn horizon(&self) -> String {
-            self.inner.horizon.to_iso8601()
-        }
-
-        #[getter]
-        fn interval(&self) -> String {
-            self.inner.interval.to_iso8601()
-        }
-
-        #[getter]
-        fn count(&self) -> usize {
-            self.inner.count
-        }
-
-        #[getter]
-        fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            numpy_from_typed(py, &self.inner.data)
-        }
-
-        /// Value equality: all fields including the data array (bitwise).
-        /// The forecast as `{issue_time: pyarrow.Table}`, one entry per window.
-        ///
-        /// Requires pyarrow, which is not installed with infrastore — use
-        /// `pip install 'infrastore[arrow]'`.
-        ///
-        /// The key is the window's issue time — `initial_timestamp + k · interval`,
-        /// spelled the way the series was written. Each value is a two-column
-        /// `timestamp`/`value` table over that window's horizon, shaped exactly like
-        /// a `SingleTimeSeries.to_arrow()`: `horizon / resolution` rows stepping by
-        /// `resolution` from the issue time.
-        ///
-        /// **The dict is in window order**, which Python's insertion-ordered `dict`
-        /// makes an ordering you can rely on: `next(iter(windows))` is the earliest
-        /// issue time and iteration is chronological. It is not a sorted *container*
-        /// — there is no O(log n) range lookup — so `bisect` over `list(windows)` is
-        /// the way to select a span of issue times.
-        ///
-        /// ```python
-        /// windows = forecast.to_arrow_windows()
-        /// windows[datetime(2024, 1, 2, tzinfo=timezone.utc)]   # that day's forecast
-        /// for issue_time, table in windows.items(): ...        # chronological
-        /// ```
-        ///
-        /// Note that the two grids differ and both are needed to place a value:
-        /// windows step by `interval`, the rows inside one step by `resolution`.
-        /// They coincide only for a forecast whose windows abut, which is not the
-        /// common case — a day-ahead forecast reissued hourly overlaps 23 of every
-        /// 24 rows, so the tables deliberately repeat those values rather than
-        /// pretending one timeline covers them.
-        ///
-        /// Each table carries the forecast's descriptive attributes as schema
-        /// metadata, plus its own `issue_time`, so a window written to Parquet on
-        /// its own still knows which one it is.
-        ///
-        /// This materializes every window. The stored array is `[H, count, *E]` —
-        /// window index innermost — so it is transposed once here; for a
-        /// per-timestamp sweep the cheap path is `Store.build_forecast_reader`,
-        /// which reads on the axis the data is already laid out along.
-        fn to_arrow_windows<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-            let pa = pyarrow(py)?;
-            let inner = &self.inner;
-            let reference = inner.time_reference.as_ref();
-            // `[H, count, *E]` -> `[count, H, *E]`, once and contiguous, so each
-            // window below is a view rather than its own gather.
-            let np = py.import("numpy")?;
-            let stored = numpy_from_typed(py, &inner.data)?;
-            let by_window = np.call_method1(
-                "ascontiguousarray",
-                (stored.call_method1("swapaxes", (0, 1))?,),
-            )?;
-            // The element shape is what follows `[H, count]`; `TypedArray`'s own
-            // `element_shape` drops one axis, which is the static layout's rule.
-            let element_shape: Vec<usize> = inner.data.shape.get(2..).unwrap_or(&[]).to_vec();
-
-            let windows = PyDict::new(py);
-            for k in 0..inner.count {
-                let stamps = inner.window_timestamps(k).map_err(map_err)?;
-                let start = inner.window_start(k).map_err(map_err)?;
-                let mut metadata = arrow_metadata!(inner, "Deterministic");
-                // The macro takes `TypedArray::element_shape`, which strips one
-                // axis -- right for a static series, one axis short for a forecast,
-                // whose stored shape is `[H, count, *E]`. A window's element shape
-                // is what follows both.
-                metadata.insert("element_shape".to_string(), json_int_list(&element_shape));
-                metadata.insert("resolution".to_string(), inner.resolution.to_iso8601());
-                metadata.insert("horizon".to_string(), inner.horizon.to_iso8601());
-                metadata.insert("interval".to_string(), inner.interval.to_iso8601());
-                metadata.insert("count".to_string(), inner.count.to_string());
-                metadata.insert(
-                    "issue_time".to_string(),
-                    render_catalog_timestamp(start, reference),
-                );
-                let column = arrow_column(&pa, &by_window.get_item(k)?, &element_shape)?;
-                let table = arrow_table_from_column(&pa, &stamps, reference, column, metadata)?;
-                windows.set_item(spell_instant(py, start, reference)?, table)?;
-            }
-            Ok(windows)
-        }
-
-        fn __eq__(&self, other: &Self) -> bool {
-            self.inner == other.inner
-        }
-
-        /// Number of forecast windows (`count`).
-        fn __len__(&self) -> usize {
-            self.inner.count
-        }
-
-        fn __repr__(&self) -> String {
-            format!(
-                "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, shape={:?}, time_reference={})",
-                self.inner.name,
-                self.inner.initial_timestamp,
-                self.inner.count,
-                self.inner.horizon.to_iso8601(),
-                self.inner.interval.to_iso8601(),
-                self.inner.resolution.to_iso8601(),
-                self.inner.data.shape,
-                reference_label(self.inner.time_reference.as_ref()),
-            )
-        }
-});
+    fn __repr__(&self) -> String {
+        format!(
+            "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.initial_timestamp,
+            self.inner.count,
+            self.inner.horizon.to_iso8601(),
+            self.inner.interval.to_iso8601(),
+            self.inner.resolution.to_iso8601(),
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
+        )
+    }
+}
 
 // ---- Probabilistic --------------------------------------------------------
 
@@ -1703,215 +1704,213 @@ pub struct PyProbabilistic {
     inner: core_lib::Probabilistic,
 }
 
-series_pymethods!(PyProbabilistic {
-        /// Build a `Probabilistic` forecast. `data` is a numpy array of shape
-        /// `[num_percentiles, H, count, *E]`. `name` is required.
-        ///
-        /// The keyword-only arguments are the descriptive attributes documented on
-        /// `SingleTimeSeries`; they travel with the forecast into the store and
-        /// come back on a read.
-        #[new]
-        #[pyo3(signature = (
+series_pymethods!(PyProbabilistic);
+
+#[pymethods]
+impl PyProbabilistic {
+    /// Build a `Probabilistic` forecast. `data` is a numpy array of shape
+    /// `[num_percentiles, H, count, *E]`. `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the forecast into the store and
+    /// come back on a read.
+    #[new]
+    #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, percentiles, data, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn new(
-            py: Python<'_>,
-            initial_timestamp: PyInstant,
-            resolution: Bound<'_, PyAny>,
-            horizon: Bound<'_, PyAny>,
-            interval: Bound<'_, PyAny>,
-            count: usize,
-            percentiles: Vec<f64>,
-            data: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let resolution = pyany_to_period(&resolution)?;
-            let horizon = pyany_to_period(&horizon)?;
-            let interval = pyany_to_period(&interval)?;
-            let typed = typed_array_from_numpy(data)?;
-            let mut inner = core_lib::Probabilistic::new(
-                initial_timestamp.instant,
-                resolution,
-                horizon,
-                interval,
-                count,
-                percentiles,
-                typed,
-                name,
-            )
-            .map_err(InvalidParameterError::new_err)?;
-            // The spelling is inferred from the timestamp the caller handed us
-            // rather than asked for separately: the intent is in the object, and it
-            // is erased the moment the instant reaches the core. `time_reference=`
-            // is the override for a caller who means a different one.
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        percentiles: Vec<f64>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let typed = typed_array_from_numpy(data)?;
+        let mut inner = core_lib::Probabilistic::new(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            percentiles,
+            typed,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        // The spelling is inferred from the timestamp the caller handed us
+        // rather than asked for separately: the intent is in the object, and it
+        // is erased the moment the instant reaches the core. `time_reference=`
+        // is the override for a caller who means a different one.
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Build from per-timestep logical values, encoding them into the array the
-        /// store holds and declaring the element type they imply. See
-        /// `SingleTimeSeries.from_values` for the value shapes and the rules.
-        ///
-        /// `values` is one entry per timestep in row-major order over the leading
-        /// axes, so entry `(p * H + i) * count + j` is percentile `p`'s window `j`,
-        /// step `i`. Those axes are `[len(percentiles), H, count]`, with `H` derived
-        /// from `horizon`/`resolution` — the arithmetic `encode_element_values`
-        /// otherwise leaves to the caller.
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build from per-timestep logical values, encoding them into the array the
+    /// store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    ///
+    /// `values` is one entry per timestep in row-major order over the leading
+    /// axes, so entry `(p * H + i) * count + j` is percentile `p`'s window `j`,
+    /// step `i`. Those axes are `[len(percentiles), H, count]`, with `H` derived
+    /// from `horizon`/`resolution` — the arithmetic `encode_element_values`
+    /// otherwise leaves to the caller.
+    #[classmethod]
+    #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, percentiles, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_values(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            initial_timestamp: PyInstant,
-            resolution: Bound<'_, PyAny>,
-            horizon: Bound<'_, PyAny>,
-            interval: Bound<'_, PyAny>,
-            count: usize,
-            percentiles: Vec<f64>,
-            values: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let resolution = pyany_to_period(&resolution)?;
-            let horizon = pyany_to_period(&horizon)?;
-            let interval = pyany_to_period(&interval)?;
-            let decoded = from_values_payload(values, element_type.as_deref())?;
-            let mut inner = core_lib::Probabilistic::from_values(
-                initial_timestamp.instant,
-                resolution,
-                horizon,
-                interval,
-                count,
-                percentiles,
-                &decoded,
-                name,
-            )
-            .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        percentiles: Vec<f64>,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::Probabilistic::from_values(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            percentiles,
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Decode this series' array into the per-timestep values its element type
-        /// describes — the read-side counterpart of `from_values`, and the reason a
-        /// caller never has to know the stored row layouts.
-        ///
-        /// Same shapes as `decode_element_values`, which this is: the element type
-        /// and the number of leading axes both come from the series, so there is
-        /// nothing left to pass and nothing to get wrong.
-        ///
-        /// `None` for a scalar element type and for any array whose physical dtype
-        /// is not `float64`: there the stored elements already are the values, and
-        /// `.data` is the answer.
-        fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-            decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
-        }
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
+    }
 
-        /// The first window's timestamp, spelled the way it was written.
-        #[getter]
-        fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            spell_instant(
-                py,
-                self.inner.initial_timestamp,
-                self.inner.time_reference.as_ref(),
-            )
-        }
+    /// The first window's timestamp, spelled the way it was written.
+    #[getter]
+    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        spell_instant(
+            py,
+            self.inner.initial_timestamp,
+            self.inner.time_reference.as_ref(),
+        )
+    }
 
-        #[getter]
-        fn resolution(&self) -> String {
-            self.inner.resolution.to_iso8601()
-        }
+    #[getter]
+    fn resolution(&self) -> String {
+        self.inner.resolution.to_iso8601()
+    }
 
-        #[getter]
-        fn horizon(&self) -> String {
-            self.inner.horizon.to_iso8601()
-        }
+    #[getter]
+    fn horizon(&self) -> String {
+        self.inner.horizon.to_iso8601()
+    }
 
-        #[getter]
-        fn interval(&self) -> String {
-            self.inner.interval.to_iso8601()
-        }
+    #[getter]
+    fn interval(&self) -> String {
+        self.inner.interval.to_iso8601()
+    }
 
-        #[getter]
-        fn count(&self) -> usize {
-            self.inner.count
-        }
+    #[getter]
+    fn count(&self) -> usize {
+        self.inner.count
+    }
 
-        #[getter]
-        fn percentiles(&self) -> Vec<f64> {
-            self.inner.percentiles.clone()
-        }
+    #[getter]
+    fn percentiles(&self) -> Vec<f64> {
+        self.inner.percentiles.clone()
+    }
 
-        #[getter]
-        fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            numpy_from_typed(py, &self.inner.data)
-        }
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
 
-        /// Value equality: all fields including the data array (bitwise).
-        fn __eq__(&self, other: &Self) -> bool {
-            self.inner == other.inner
-        }
+    /// Number of forecast windows (`count`).
+    fn __len__(&self) -> usize {
+        self.inner.count
+    }
 
-        /// Number of forecast windows (`count`).
-        fn __len__(&self) -> usize {
-            self.inner.count
-        }
-
-        fn __repr__(&self) -> String {
-            format!(
-                "Probabilistic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, percentiles={:?}, shape={:?}, time_reference={})",
-                self.inner.name,
-                self.inner.initial_timestamp,
-                self.inner.count,
-                self.inner.horizon.to_iso8601(),
-                self.inner.interval.to_iso8601(),
-                self.inner.resolution.to_iso8601(),
-                self.inner.percentiles,
-                self.inner.data.shape,
-                reference_label(self.inner.time_reference.as_ref()),
-            )
-        }
-});
+    fn __repr__(&self) -> String {
+        format!(
+            "Probabilistic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, percentiles={:?}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.initial_timestamp,
+            self.inner.count,
+            self.inner.horizon.to_iso8601(),
+            self.inner.interval.to_iso8601(),
+            self.inner.resolution.to_iso8601(),
+            self.inner.percentiles,
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
+        )
+    }
+}
 
 // ---- Scenarios ------------------------------------------------------------
 
@@ -1921,221 +1920,219 @@ pub struct PyScenarios {
     inner: core_lib::Scenarios,
 }
 
-series_pymethods!(PyScenarios {
-        /// Build a `Scenarios` forecast. `data` is a numpy array of shape
-        /// `[scenario_count, H, count, *E]`; `scenario_count` is taken from the
-        /// leading axis. `name` is required.
-        ///
-        /// The keyword-only arguments are the descriptive attributes documented on
-        /// `SingleTimeSeries`; they travel with the forecast into the store and
-        /// come back on a read.
-        #[new]
-        #[pyo3(signature = (
+series_pymethods!(PyScenarios);
+
+#[pymethods]
+impl PyScenarios {
+    /// Build a `Scenarios` forecast. `data` is a numpy array of shape
+    /// `[scenario_count, H, count, *E]`; `scenario_count` is taken from the
+    /// leading axis. `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the forecast into the store and
+    /// come back on a read.
+    #[new]
+    #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, data, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn new(
-            py: Python<'_>,
-            initial_timestamp: PyInstant,
-            resolution: Bound<'_, PyAny>,
-            horizon: Bound<'_, PyAny>,
-            interval: Bound<'_, PyAny>,
-            count: usize,
-            data: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let resolution = pyany_to_period(&resolution)?;
-            let horizon = pyany_to_period(&horizon)?;
-            let interval = pyany_to_period(&interval)?;
-            let typed = typed_array_from_numpy(data)?;
-            let scenario_count = *typed.shape.first().ok_or_else(|| {
-                InvalidParameterError::new_err("Scenarios: data must have at least one axis")
-            })?;
-            let mut inner = core_lib::Scenarios::new(
-                initial_timestamp.instant,
-                resolution,
-                horizon,
-                interval,
-                count,
-                scenario_count,
-                typed,
-                name,
-            )
-            .map_err(InvalidParameterError::new_err)?;
-            // The spelling is inferred from the timestamp the caller handed us
-            // rather than asked for separately: the intent is in the object, and it
-            // is erased the moment the instant reaches the core. `time_reference=`
-            // is the override for a caller who means a different one.
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let typed = typed_array_from_numpy(data)?;
+        let scenario_count = *typed.shape.first().ok_or_else(|| {
+            InvalidParameterError::new_err("Scenarios: data must have at least one axis")
+        })?;
+        let mut inner = core_lib::Scenarios::new(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            scenario_count,
+            typed,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        // The spelling is inferred from the timestamp the caller handed us
+        // rather than asked for separately: the intent is in the object, and it
+        // is erased the moment the instant reaches the core. `time_reference=`
+        // is the override for a caller who means a different one.
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Build from per-timestep logical values, encoding them into the array the
-        /// store holds and declaring the element type they imply. See
-        /// `SingleTimeSeries.from_values` for the value shapes and the rules.
-        ///
-        /// `values` is one entry per timestep in row-major order over the leading
-        /// axes, so entry `(s * H + i) * count + j` is scenario `s`'s window `j`,
-        /// step `i`. Those axes are `[scenario_count, H, count]`, with `H` derived
-        /// from `horizon`/`resolution` — the arithmetic `encode_element_values`
-        /// otherwise leaves to the caller.
-        ///
-        /// `scenario_count` is explicit here, where the constructor reads it off the
-        /// array's first axis: there is no array yet to read it from.
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build from per-timestep logical values, encoding them into the array the
+    /// store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    ///
+    /// `values` is one entry per timestep in row-major order over the leading
+    /// axes, so entry `(s * H + i) * count + j` is scenario `s`'s window `j`,
+    /// step `i`. Those axes are `[scenario_count, H, count]`, with `H` derived
+    /// from `horizon`/`resolution` — the arithmetic `encode_element_values`
+    /// otherwise leaves to the caller.
+    ///
+    /// `scenario_count` is explicit here, where the constructor reads it off the
+    /// array's first axis: there is no array yet to read it from.
+    #[classmethod]
+    #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, scenario_count, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_values(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            initial_timestamp: PyInstant,
-            resolution: Bound<'_, PyAny>,
-            horizon: Bound<'_, PyAny>,
-            interval: Bound<'_, PyAny>,
-            count: usize,
-            scenario_count: usize,
-            values: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let resolution = pyany_to_period(&resolution)?;
-            let horizon = pyany_to_period(&horizon)?;
-            let interval = pyany_to_period(&interval)?;
-            let decoded = from_values_payload(values, element_type.as_deref())?;
-            let mut inner = core_lib::Scenarios::from_values(
-                initial_timestamp.instant,
-                resolution,
-                horizon,
-                interval,
-                count,
-                scenario_count,
-                &decoded,
-                name,
-            )
-            .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
+        count: usize,
+        scenario_count: usize,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::Scenarios::from_values(
+            initial_timestamp.instant,
+            resolution,
+            horizon,
+            interval,
+            count,
+            scenario_count,
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Decode this series' array into the per-timestep values its element type
-        /// describes — the read-side counterpart of `from_values`, and the reason a
-        /// caller never has to know the stored row layouts.
-        ///
-        /// Same shapes as `decode_element_values`, which this is: the element type
-        /// and the number of leading axes both come from the series, so there is
-        /// nothing left to pass and nothing to get wrong.
-        ///
-        /// `None` for a scalar element type and for any array whose physical dtype
-        /// is not `float64`: there the stored elements already are the values, and
-        /// `.data` is the answer.
-        fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-            decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
-        }
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
+    }
 
-        /// The first window's timestamp, spelled the way it was written.
-        #[getter]
-        fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            spell_instant(
-                py,
-                self.inner.initial_timestamp,
-                self.inner.time_reference.as_ref(),
-            )
-        }
+    /// The first window's timestamp, spelled the way it was written.
+    #[getter]
+    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        spell_instant(
+            py,
+            self.inner.initial_timestamp,
+            self.inner.time_reference.as_ref(),
+        )
+    }
 
-        #[getter]
-        fn resolution(&self) -> String {
-            self.inner.resolution.to_iso8601()
-        }
+    #[getter]
+    fn resolution(&self) -> String {
+        self.inner.resolution.to_iso8601()
+    }
 
-        #[getter]
-        fn horizon(&self) -> String {
-            self.inner.horizon.to_iso8601()
-        }
+    #[getter]
+    fn horizon(&self) -> String {
+        self.inner.horizon.to_iso8601()
+    }
 
-        #[getter]
-        fn interval(&self) -> String {
-            self.inner.interval.to_iso8601()
-        }
+    #[getter]
+    fn interval(&self) -> String {
+        self.inner.interval.to_iso8601()
+    }
 
-        #[getter]
-        fn count(&self) -> usize {
-            self.inner.count
-        }
+    #[getter]
+    fn count(&self) -> usize {
+        self.inner.count
+    }
 
-        #[getter]
-        fn scenario_count(&self) -> usize {
-            self.inner.scenario_count
-        }
+    #[getter]
+    fn scenario_count(&self) -> usize {
+        self.inner.scenario_count
+    }
 
-        #[getter]
-        fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            numpy_from_typed(py, &self.inner.data)
-        }
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
 
-        /// Value equality: all fields including the data array (bitwise).
-        fn __eq__(&self, other: &Self) -> bool {
-            self.inner == other.inner
-        }
+    /// Number of forecast windows (`count`).
+    fn __len__(&self) -> usize {
+        self.inner.count
+    }
 
-        /// Number of forecast windows (`count`).
-        fn __len__(&self) -> usize {
-            self.inner.count
-        }
-
-        fn __repr__(&self) -> String {
-            format!(
-                "Scenarios(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, scenario_count={}, shape={:?}, time_reference={})",
-                self.inner.name,
-                self.inner.initial_timestamp,
-                self.inner.count,
-                self.inner.horizon.to_iso8601(),
-                self.inner.interval.to_iso8601(),
-                self.inner.resolution.to_iso8601(),
-                self.inner.scenario_count,
-                self.inner.data.shape,
-                reference_label(self.inner.time_reference.as_ref()),
-            )
-        }
-});
+    fn __repr__(&self) -> String {
+        format!(
+            "Scenarios(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, scenario_count={}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.initial_timestamp,
+            self.inner.count,
+            self.inner.horizon.to_iso8601(),
+            self.inner.interval.to_iso8601(),
+            self.inner.resolution.to_iso8601(),
+            self.inner.scenario_count,
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
+        )
+    }
+}
 
 // ---- SingleTimeSeries -----------------------------------------------------
 
@@ -2145,461 +2142,459 @@ pub struct PySingleTimeSeries {
     inner: core_lib::SingleTimeSeries,
 }
 
-series_pymethods!(PySingleTimeSeries {
-        /// `name` is required.
-        ///
-        /// The keyword-only arguments are the series' descriptive attributes. They
-        /// describe the values without addressing them, so none is part of a
-        /// series' identity: two series differing only in these are a duplicate,
-        /// and none can be filtered on except `component_field`. Each is stored on
-        /// the association and handed back on a read.
-        ///
-        /// `units` labels the values (`"MW"`). `quantity_kind` names what kind of
-        /// physical quantity they measure (`"ActivePower"`) — free-form, with QUDT
-        /// `QuantityKind` local names the recommended vocabulary; it separates
-        /// active from reactive power, which dimensional analysis cannot.
-        /// `unit_system` is `"natural_units"` or `"component_base"`; omitting it
-        /// leaves the basis unspecified, which is not the same as declaring natural
-        /// units. `component_field` names the field on the owning component whose
-        /// value these values are the time-varying form of
-        /// (`"max_active_power"`) — free-form and never interpreted by the store.
-        /// `application_data` is an opaque, package-owned payload (typically JSON)
-        /// stored verbatim; end users are not expected to set it. `element_type`
-        /// declares what the array's elements mean in the store's own vocabulary
-        /// (`"tuple(3,f64)"`, `"piecewise_linear"`, …); omit it for plain numbers,
-        /// where it defaults to the array's own dtype spelling.
-        ///
-        /// `time_reference` overrides the timestamp spelling, which is otherwise
-        /// inferred from `initial_timestamp` (naive is zoneless; a `ZoneInfo` with
-        /// a `key` names its zone). It takes `"utc"`, `"zoneless"`, a fixed offset
-        /// (`"-07:00"`), or an IANA zone name.
-        #[new]
-        #[pyo3(signature = (
+series_pymethods!(PySingleTimeSeries);
+
+#[pymethods]
+impl PySingleTimeSeries {
+    /// `name` is required.
+    ///
+    /// The keyword-only arguments are the series' descriptive attributes. They
+    /// describe the values without addressing them, so none is part of a
+    /// series' identity: two series differing only in these are a duplicate,
+    /// and none can be filtered on except `component_field`. Each is stored on
+    /// the association and handed back on a read.
+    ///
+    /// `units` labels the values (`"MW"`). `quantity_kind` names what kind of
+    /// physical quantity they measure (`"ActivePower"`) — free-form, with QUDT
+    /// `QuantityKind` local names the recommended vocabulary; it separates
+    /// active from reactive power, which dimensional analysis cannot.
+    /// `unit_system` is `"natural_units"` or `"component_base"`; omitting it
+    /// leaves the basis unspecified, which is not the same as declaring natural
+    /// units. `component_field` names the field on the owning component whose
+    /// value these values are the time-varying form of
+    /// (`"max_active_power"`) — free-form and never interpreted by the store.
+    /// `application_data` is an opaque, package-owned payload (typically JSON)
+    /// stored verbatim; end users are not expected to set it. `element_type`
+    /// declares what the array's elements mean in the store's own vocabulary
+    /// (`"tuple(3,f64)"`, `"piecewise_linear"`, …); omit it for plain numbers,
+    /// where it defaults to the array's own dtype spelling.
+    ///
+    /// `time_reference` overrides the timestamp spelling, which is otherwise
+    /// inferred from `initial_timestamp` (naive is zoneless; a `ZoneInfo` with
+    /// a `key` names its zone). It takes `"utc"`, `"zoneless"`, a fixed offset
+    /// (`"-07:00"`), or an IANA zone name.
+    #[new]
+    #[pyo3(signature = (
             initial_timestamp, resolution, data, name, *, application_data=None,
             element_type=None, units=None, quantity_kind=None, unit_system=None,
             component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn new(
-            py: Python<'_>,
-            initial_timestamp: PyInstant,
-            resolution: Bound<'_, PyAny>,
-            data: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let resolution = pyany_to_period(&resolution)?;
-            let typed = typed_array_from_numpy(data)?;
-            let mut inner =
-                core_lib::SingleTimeSeries::new(initial_timestamp.instant, resolution, typed, name);
-            // See the forecast constructors: the spelling rides in on the timestamp.
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let typed = typed_array_from_numpy(data)?;
+        let mut inner =
+            core_lib::SingleTimeSeries::new(initial_timestamp.instant, resolution, typed, name);
+        // See the forecast constructors: the spelling rides in on the timestamp.
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Build from the timeline you actually hold, inferring `resolution` and
-        /// **proving** the instants lie on it.
-        ///
-        /// The constructor takes `initial_timestamp` + `resolution` and the store
-        /// cannot check the claim — the vector it describes is never supplied. This
-        /// takes the vector: it either fits a period exactly, or raises
-        /// `InvalidParameterError` naming the entry that broke the pattern and
-        /// pointing at `NonSequentialTimeSeries`.
-        ///
-        /// **This is how a local-clock timeline reaches the store.** The store has
-        /// no time-zone database and never runs local → instant; you materialize the
-        /// grid with `zoneinfo` — where the policy for a nonexistent or ambiguous
-        /// wall clock belongs — and hand over the instants. An hourly local grid in
-        /// a DST zone *is* a uniform instant grid, so it compacts here; a daily or
-        /// monthly one is not, and is refused so you store it explicitly.
-        ///
-        /// The timestamp spelling is inferred from the vector exactly as the
-        /// constructor infers it from `initial_timestamp`, and the vector must agree
-        /// on one spelling.
-        ///
-        /// Step on **UTC**, then convert back: adding a `timedelta` to an aware
-        /// `datetime` is wall-clock arithmetic, so stepping in local time skips the
-        /// repeated hour at a fall-back transition and leaves a two-hour gap in the
-        /// instants — which this refuses, correctly, as not a grid.
-        ///
-        /// ```python
-        /// denver = ZoneInfo("America/Denver")
-        /// start = datetime(2024, 11, 3, tzinfo=denver).astimezone(timezone.utc)
-        /// hours = [(start + timedelta(hours=k)).astimezone(denver) for k in range(6)]
-        /// # 00:00 MDT, 01:00 MDT, 01:00 MST, 02:00 MST, ... -- the repeated hour is
-        /// # two distinct instants an hour apart, which is why this is a grid.
-        /// SingleTimeSeries.from_timestamps(hours, values, "load")   # -> resolution "PT1H"
-        ///
-        /// days = [datetime(2024, 11, d, tzinfo=denver) for d in range(1, 6)]
-        /// SingleTimeSeries.from_timestamps(days, values, "peak")    # InvalidParameterError
-        /// ```
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build from the timeline you actually hold, inferring `resolution` and
+    /// **proving** the instants lie on it.
+    ///
+    /// The constructor takes `initial_timestamp` + `resolution` and the store
+    /// cannot check the claim — the vector it describes is never supplied. This
+    /// takes the vector: it either fits a period exactly, or raises
+    /// `InvalidParameterError` naming the entry that broke the pattern and
+    /// pointing at `NonSequentialTimeSeries`.
+    ///
+    /// **This is how a local-clock timeline reaches the store.** The store has
+    /// no time-zone database and never runs local → instant; you materialize the
+    /// grid with `zoneinfo` — where the policy for a nonexistent or ambiguous
+    /// wall clock belongs — and hand over the instants. An hourly local grid in
+    /// a DST zone *is* a uniform instant grid, so it compacts here; a daily or
+    /// monthly one is not, and is refused so you store it explicitly.
+    ///
+    /// The timestamp spelling is inferred from the vector exactly as the
+    /// constructor infers it from `initial_timestamp`, and the vector must agree
+    /// on one spelling.
+    ///
+    /// Step on **UTC**, then convert back: adding a `timedelta` to an aware
+    /// `datetime` is wall-clock arithmetic, so stepping in local time skips the
+    /// repeated hour at a fall-back transition and leaves a two-hour gap in the
+    /// instants — which this refuses, correctly, as not a grid.
+    ///
+    /// ```python
+    /// denver = ZoneInfo("America/Denver")
+    /// start = datetime(2024, 11, 3, tzinfo=denver).astimezone(timezone.utc)
+    /// hours = [(start + timedelta(hours=k)).astimezone(denver) for k in range(6)]
+    /// # 00:00 MDT, 01:00 MDT, 01:00 MST, 02:00 MST, ... -- the repeated hour is
+    /// # two distinct instants an hour apart, which is why this is a grid.
+    /// SingleTimeSeries.from_timestamps(hours, values, "load")   # -> resolution "PT1H"
+    ///
+    /// days = [datetime(2024, 11, d, tzinfo=denver) for d in range(1, 6)]
+    /// SingleTimeSeries.from_timestamps(days, values, "peak")    # InvalidParameterError
+    /// ```
+    #[classmethod]
+    #[pyo3(signature = (
             timestamps, data, name, *, application_data=None, element_type=None, units=None,
             quantity_kind=None, unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_timestamps(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            timestamps: Vec<PyInstant>,
-            data: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            // One vector, one spelling -- the same rule the irregular constructors
-            // apply, and for the same reason: a series records one reference.
-            let inferred = vector_reference(&timestamps)?;
-            let instants: Vec<DateTime<Utc>> = timestamps.iter().map(|t| t.instant).collect();
-            let typed = typed_array_from_numpy(data)?;
-            let mut inner = core_lib::SingleTimeSeries::from_timestamps(&instants, typed, name)
-                .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, inferred)?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn from_timestamps(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        // One vector, one spelling -- the same rule the irregular constructors
+        // apply, and for the same reason: a series records one reference.
+        let inferred = vector_reference(&timestamps)?;
+        let instants: Vec<DateTime<Utc>> = timestamps.iter().map(|t| t.instant).collect();
+        let typed = typed_array_from_numpy(data)?;
+        let mut inner = core_lib::SingleTimeSeries::from_timestamps(&instants, typed, name)
+            .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, inferred)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Build from per-timestep logical values, encoding them into the array the
-        /// store holds and declaring the element type they imply.
-        ///
-        /// The pairing is the point. An `element_type` and the array it describes
-        /// are two independent things a caller can get out of step; the store
-        /// rejects the mismatch, but only after the fact. Deriving both from one
-        /// set of values means there is none to reject — and for a forecast it also
-        /// derives the leading dimensions, which `encode_element_values` otherwise
-        /// asks the caller to compute.
-        ///
-        /// `values` is one entry per timestep, in the shapes `decoded_values`
-        /// returns, and the entry's own shape is what names the element type:
-        ///
-        /// ```python
-        /// SingleTimeSeries.from_values(
-        ///     start, timedelta(hours=1),
-        ///     [[{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}], [{"x": 0.0, "y": 2.0}]],
-        ///     "variable_cost",
-        /// )                                            # -> element_type "piecewise_linear"
-        /// ```
-        ///
-        /// | `values` entry                                | element type          |
-        /// | --------------------------------------------- | --------------------- |
-        /// | `{"proportional": _, "constant": _}`          | `linear_function`     |
-        /// | `{"quadratic": _, "proportional": _, ...}`    | `quadratic_function`  |
-        /// | `list[{"x": _, "y": _}]`                      | `piecewise_linear`    |
-        /// | `{"x": list, "y": list}`                      | `piecewise_step`      |
-        /// | `list[float]` of length N                     | `tuple(N,f64)`        |
-        ///
-        /// A series of plain numbers has no encoding to do: pass the numpy array to
-        /// the constructor as `data=`.
-        ///
-        /// `element_type=` is accepted as an assertion, not an override — it raises
-        /// `InvalidParameterError` if it disagrees with the values. Where the values
-        /// name nothing it is the only thing to go on: an empty `values`, or rows
-        /// that are all empty and read equally as a curve with no points or a tuple
-        /// with no fields. The remaining keyword arguments are the descriptive
-        /// attributes documented on the constructor.
-        ///
-        /// Raises `InvalidParameterError` if the values cannot be encoded: tuple
-        /// rows of differing arity, a step function whose `x` and `y` lengths
-        /// disagree, or (for a forecast) a count that does not fill the windows.
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build from per-timestep logical values, encoding them into the array the
+    /// store holds and declaring the element type they imply.
+    ///
+    /// The pairing is the point. An `element_type` and the array it describes
+    /// are two independent things a caller can get out of step; the store
+    /// rejects the mismatch, but only after the fact. Deriving both from one
+    /// set of values means there is none to reject — and for a forecast it also
+    /// derives the leading dimensions, which `encode_element_values` otherwise
+    /// asks the caller to compute.
+    ///
+    /// `values` is one entry per timestep, in the shapes `decoded_values`
+    /// returns, and the entry's own shape is what names the element type:
+    ///
+    /// ```python
+    /// SingleTimeSeries.from_values(
+    ///     start, timedelta(hours=1),
+    ///     [[{"x": 0.0, "y": 1.0}, {"x": 1.0, "y": 3.0}], [{"x": 0.0, "y": 2.0}]],
+    ///     "variable_cost",
+    /// )                                            # -> element_type "piecewise_linear"
+    /// ```
+    ///
+    /// | `values` entry                                | element type          |
+    /// | --------------------------------------------- | --------------------- |
+    /// | `{"proportional": _, "constant": _}`          | `linear_function`     |
+    /// | `{"quadratic": _, "proportional": _, ...}`    | `quadratic_function`  |
+    /// | `list[{"x": _, "y": _}]`                      | `piecewise_linear`    |
+    /// | `{"x": list, "y": list}`                      | `piecewise_step`      |
+    /// | `list[float]` of length N                     | `tuple(N,f64)`        |
+    ///
+    /// A series of plain numbers has no encoding to do: pass the numpy array to
+    /// the constructor as `data=`.
+    ///
+    /// `element_type=` is accepted as an assertion, not an override — it raises
+    /// `InvalidParameterError` if it disagrees with the values. Where the values
+    /// name nothing it is the only thing to go on: an empty `values`, or rows
+    /// that are all empty and read equally as a curve with no points or a tuple
+    /// with no fields. The remaining keyword arguments are the descriptive
+    /// attributes documented on the constructor.
+    ///
+    /// Raises `InvalidParameterError` if the values cannot be encoded: tuple
+    /// rows of differing arity, a step function whose `x` and `y` lengths
+    /// disagree, or (for a forecast) a count that does not fill the windows.
+    #[classmethod]
+    #[pyo3(signature = (
             initial_timestamp, resolution, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_values(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            initial_timestamp: PyInstant,
-            resolution: Bound<'_, PyAny>,
-            values: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let resolution = pyany_to_period(&resolution)?;
-            let decoded = from_values_payload(values, element_type.as_deref())?;
-            let mut inner = core_lib::SingleTimeSeries::from_values(
-                initial_timestamp.instant,
-                resolution,
-                &decoded,
-                name,
-            )
-            .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        initial_timestamp: PyInstant,
+        resolution: Bound<'_, PyAny>,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let resolution = pyany_to_period(&resolution)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::SingleTimeSeries::from_values(
+            initial_timestamp.instant,
+            resolution,
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Decode this series' array into the per-timestep values its element type
-        /// describes — the read-side counterpart of `from_values`, and the reason a
-        /// caller never has to know the stored row layouts.
-        ///
-        /// Same shapes as `decode_element_values`, which this is: the element type
-        /// and the number of leading axes both come from the series, so there is
-        /// nothing left to pass and nothing to get wrong.
-        ///
-        /// `None` for a scalar element type and for any array whose physical dtype
-        /// is not `float64`: there the stored elements already are the values, and
-        /// `.data` is the answer.
-        fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-            decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
-        }
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
+    }
 
-        /// The grid's first timestamp, spelled the way it was written.
-        #[getter]
-        fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            spell_instant(
-                py,
-                self.inner.initial_timestamp,
-                self.inner.time_reference.as_ref(),
-            )
-        }
+    /// The grid's first timestamp, spelled the way it was written.
+    #[getter]
+    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        spell_instant(
+            py,
+            self.inner.initial_timestamp,
+            self.inner.time_reference.as_ref(),
+        )
+    }
 
-        #[getter]
-        fn length(&self) -> usize {
-            self.inner.length
-        }
+    #[getter]
+    fn length(&self) -> usize {
+        self.inner.length
+    }
 
-        #[getter]
-        fn resolution(&self) -> String {
-            self.inner.resolution.to_iso8601()
-        }
+    #[getter]
+    fn resolution(&self) -> String {
+        self.inner.resolution.to_iso8601()
+    }
 
-        #[getter]
-        fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            numpy_from_typed(py, &self.inner.data)
-        }
+    /// The whole grid materialized, `initial_timestamp` first, spelled the way
+    /// it was written — the regular counterpart of the explicit vector
+    /// `NonSequentialTimeSeries` and `PersistentTimeSeries` carry.
+    ///
+    /// This is the only correct way to rebuild the timeline. A `P1M` resolution
+    /// steps on the calendar, so multiplying a fixed span by the index gets a
+    /// monthly series wrong.
+    #[getter]
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let grid: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
+        spell_instants(py, &grid, self.inner.time_reference.as_ref())
+    }
 
-        /// The whole grid materialized, `initial_timestamp` first, spelled the way
-        /// it was written — the regular counterpart of the explicit vector
-        /// `NonSequentialTimeSeries` and `PersistentTimeSeries` carry.
-        ///
-        /// This is the only correct way to rebuild the timeline. A `P1M` resolution
-        /// steps on the calendar, so multiplying a fixed span by the index gets a
-        /// monthly series wrong.
-        #[getter]
-        fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-            let grid: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
-            spell_instants(py, &grid, self.inner.time_reference.as_ref())
-        }
-
-        /// Build a `SingleTimeSeries` from a `pyarrow.Table` — the inverse of
-        /// `to_arrow()`, and a reader of foreign tables too.
-        ///
-        /// Requires pyarrow, which is not installed with infrastore — use
-        /// `pip install 'infrastore[arrow]'`.
-        ///
-        /// The table needs a `timestamp` column and a `value` column. Everything
-        /// else is read from `table.schema.metadata` when it is there, and inferred
-        /// when it is not:
-        ///
-        /// | Missing | Read as |
-        /// | --- | --- |
-        /// | `resolution` | Inferred from the timestamps, which must walk a grid. |
-        /// | `element_type` | The leaf Arrow type. A `fixed_size_list<T>[N]` becomes dtype `T` with element shape `[N]` — *dense*, not `tuple(N,T)`, because the bytes cannot say and dense assumes less. |
-        /// | `time_reference` | The timestamp column's zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock. |
-        /// | `name` | Nothing — a name is part of a series' identity, so pass `name=`. |
-        ///
-        /// Every keyword overrides the metadata, except `element_type`, which is an
-        /// **assertion**: it states the reading the bytes cannot, and a value that
-        /// contradicts the table's own is an error rather than a silent
-        /// replacement.
-        ///
-        /// Refused rather than coerced: nulls in either column; a microsecond or
-        /// nanosecond timestamp that is not a whole millisecond (the store's own
-        /// precision, and rounding one would move it); rows that leave a declared
-        /// grid; and `struct`/`list` value columns, which are the decoded form
-        /// `to_arrow()` does not produce.
-        ///
-        /// ```python
-        /// series = SingleTimeSeries.from_arrow(series.to_arrow())
-        /// import pyarrow.parquet as pq
-        /// SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))
-        /// ```
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build a `SingleTimeSeries` from a `pyarrow.Table` — the inverse of
+    /// `to_arrow()`, and a reader of foreign tables too.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// The table needs a `timestamp` column and a `value` column. Everything
+    /// else is read from `table.schema.metadata` when it is there, and inferred
+    /// when it is not:
+    ///
+    /// | Missing | Read as |
+    /// | --- | --- |
+    /// | `resolution` | Inferred from the timestamps, which must walk a grid. |
+    /// | `element_type` | The leaf Arrow type. A `fixed_size_list<T>[N]` becomes dtype `T` with element shape `[N]` — *dense*, not `tuple(N,T)`, because the bytes cannot say and dense assumes less. |
+    /// | `time_reference` | The timestamp column's zone; a column with no zone reads as `zoneless`, since a naive timestamp is a wall clock. |
+    /// | `name` | Nothing — a name is part of a series' identity, so pass `name=`. |
+    ///
+    /// Every keyword overrides the metadata, except `element_type`, which is an
+    /// **assertion**: it states the reading the bytes cannot, and a value that
+    /// contradicts the table's own is an error rather than a silent
+    /// replacement.
+    ///
+    /// Refused rather than coerced: nulls in either column; a microsecond or
+    /// nanosecond timestamp that is not a whole millisecond (the store's own
+    /// precision, and rounding one would move it); rows that leave a declared
+    /// grid; and `struct`/`list` value columns, which are the decoded form
+    /// `to_arrow()` does not produce.
+    ///
+    /// ```python
+    /// series = SingleTimeSeries.from_arrow(series.to_arrow())
+    /// import pyarrow.parquet as pq
+    /// SingleTimeSeries.from_arrow(pq.read_table("load.parquet"))
+    /// ```
+    #[classmethod]
+    #[pyo3(signature = (
             table, *, name=None, resolution=None, application_data=None, element_type=None,
             units=None, quantity_kind=None, unit_system=None, component_field=None,
             time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_arrow(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            table: &Bound<'_, PyAny>,
-            name: Option<String>,
-            resolution: Option<Bound<'_, PyAny>>,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let parts = arrow_parts(py, table)?;
-            let name = arrow_name(&parts, name)?;
-            let instants = arrow_instant_vec(&parts.millis)?;
-            let typed = typed_array_from_numpy(&parts.values)?;
-            // The keyword, then the table's, then whatever the timestamps imply.
-            let resolution = match resolution {
-                Some(r) => Some(pyany_to_period(&r)?),
-                None => parts
-                    .metadata
-                    .get("resolution")
-                    .map(|iso| {
-                        core_lib::Period::from_iso8601(iso)
-                            .map_err(|e| InvalidParameterError::new_err(e.to_string()))
-                    })
-                    .transpose()?,
-            };
-            let mut inner = match resolution {
-                None => core_lib::SingleTimeSeries::from_timestamps(&instants, typed, name)
-                    .map_err(InvalidParameterError::new_err)?,
-                Some(resolution) => {
-                    let Some(&first) = instants.first() else {
-                        return Err(InvalidParameterError::new_err(
-                            "a SingleTimeSeries is anchored at its first timestamp, and this table \
+    #[allow(clippy::too_many_arguments)]
+    fn from_arrow(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        table: &Bound<'_, PyAny>,
+        name: Option<String>,
+        resolution: Option<Bound<'_, PyAny>>,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let parts = arrow_parts(py, table)?;
+        let name = arrow_name(&parts, name)?;
+        let instants = arrow_instant_vec(&parts.millis)?;
+        let typed = typed_array_from_numpy(&parts.values)?;
+        // The keyword, then the table's, then whatever the timestamps imply.
+        let resolution = match resolution {
+            Some(r) => Some(pyany_to_period(&r)?),
+            None => parts
+                .metadata
+                .get("resolution")
+                .map(|iso| {
+                    core_lib::Period::from_iso8601(iso)
+                        .map_err(|e| InvalidParameterError::new_err(e.to_string()))
+                })
+                .transpose()?,
+        };
+        let mut inner = match resolution {
+            None => core_lib::SingleTimeSeries::from_timestamps(&instants, typed, name)
+                .map_err(InvalidParameterError::new_err)?,
+            Some(resolution) => {
+                let Some(&first) = instants.first() else {
+                    return Err(InvalidParameterError::new_err(
+                        "a SingleTimeSeries is anchored at its first timestamp, and this table \
                              has no rows; give the anchor another way, or read it as a \
                              NonSequentialTimeSeries"
-                                .to_string(),
-                        ));
-                    };
-                    let series = core_lib::SingleTimeSeries::new(first, resolution, typed, name);
-                    // Checked against the grid the resolution *generates*, not
-                    // against successive differences: `Period::Months` clamps to
-                    // month end, so those are not the same test.
-                    let grid: Vec<DateTime<Utc>> = series.timestamps().collect();
-                    if grid != instants {
-                        return Err(InvalidParameterError::new_err(format!(
-                            "the timestamps do not sit on a {} grid anchored at {first}",
-                            resolution.to_iso8601()
-                        )));
-                    }
-                    series
+                            .to_string(),
+                    ));
+                };
+                let series = core_lib::SingleTimeSeries::new(first, resolution, typed, name);
+                // Checked against the grid the resolution *generates*, not
+                // against successive differences: `Period::Months` clamps to
+                // month end, so those are not the same test.
+                let grid: Vec<DateTime<Utc>> = series.timestamps().collect();
+                if grid != instants {
+                    return Err(InvalidParameterError::new_err(format!(
+                        "the timestamps do not sit on a {} grid anchored at {first}",
+                        resolution.to_iso8601()
+                    )));
                 }
-            };
-            let descriptors = arrow_descriptor_args(
-                &parts,
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            )?
-            .resolve(py, inner.element_type, None)?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
-        }
+                series
+            }
+        };
+        let descriptors = arrow_descriptor_args(
+            &parts,
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        )?
+        .resolve(py, inner.element_type, None)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
-        ///
-        /// Requires pyarrow, which is not installed with infrastore — use
-        /// `pip install 'infrastore[arrow]'`.
-        ///
-        /// The timestamp column materializes the grid (calendar-aware for a monthly
-        /// resolution) and is typed `timestamp[ms, tz=…]` in the series' own
-        /// spelling: UTC, a fixed offset, an IANA zone, or no zone at all for a
-        /// zoneless series. The value column is the array — a primitive type for a
-        /// scalar series, nested `fixed_size_list` for a multidimensional
-        /// per-timestep value. Composite element types stay in their stored
-        /// packing; `element_type` in the schema metadata names what they are, and
-        /// `decode_element_values` unpacks them.
-        ///
-        /// The series' descriptive attributes (`name`, `units`, `quantity_kind`,
-        /// `unit_system`, `component_field`, `element_type`, `time_reference`,
-        /// `resolution`, `application_data`) ride in `table.schema.metadata`, so the
-        /// table is not lossy against the object and survives a Parquet round trip.
-        ///
-        /// ```python
-        /// table = series.to_arrow()
-        /// table.to_pandas()          # if pandas is installed
-        /// polars.from_arrow(table)   # if polars is
-        /// ```
-        fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            let grid: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
-            let mut metadata = arrow_metadata!(self.inner, "SingleTimeSeries");
-            metadata.insert("resolution".to_string(), self.inner.resolution.to_iso8601());
-            arrow_table(
-                py,
-                &grid,
-                self.inner.time_reference.as_ref(),
-                &self.inner.data,
-                metadata,
-            )
-        }
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// The timestamp column materializes the grid (calendar-aware for a monthly
+    /// resolution) and is typed `timestamp[ms, tz=…]` in the series' own
+    /// spelling: UTC, a fixed offset, an IANA zone, or no zone at all for a
+    /// zoneless series. The value column is the array — a primitive type for a
+    /// scalar series, nested `fixed_size_list` for a multidimensional
+    /// per-timestep value. Composite element types stay in their stored
+    /// packing; `element_type` in the schema metadata names what they are, and
+    /// `decode_element_values` unpacks them.
+    ///
+    /// The series' descriptive attributes (`name`, `units`, `quantity_kind`,
+    /// `unit_system`, `component_field`, `element_type`, `time_reference`,
+    /// `resolution`, `application_data`) ride in `table.schema.metadata`, so the
+    /// table is not lossy against the object and survives a Parquet round trip.
+    ///
+    /// ```python
+    /// table = series.to_arrow()
+    /// table.to_pandas()          # if pandas is installed
+    /// polars.from_arrow(table)   # if polars is
+    /// ```
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let grid: Vec<DateTime<Utc>> = self.inner.timestamps().collect();
+        let mut metadata = arrow_metadata!(self.inner, "SingleTimeSeries");
+        metadata.insert("resolution".to_string(), self.inner.resolution.to_iso8601());
+        arrow_table(
+            py,
+            &grid,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            metadata,
+        )
+    }
 
-        /// Value equality: all fields including the data array (bitwise).
-        fn __eq__(&self, other: &Self) -> bool {
-            self.inner == other.inner
-        }
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
 
-        /// Number of time steps (`length`).
-        fn __len__(&self) -> usize {
-            self.inner.length
-        }
+    /// Number of time steps (`length`).
+    fn __len__(&self) -> usize {
+        self.inner.length
+    }
 
-        fn __repr__(&self) -> String {
-            format!(
-                "SingleTimeSeries(name={:?}, initial_timestamp={}, length={}, resolution={}, shape={:?}, time_reference={})",
-                self.inner.name,
-                self.inner.initial_timestamp,
-                self.inner.length,
-                self.inner.resolution.to_iso8601(),
-                self.inner.data.shape,
-                reference_label(self.inner.time_reference.as_ref()),
-            )
-        }
-});
+    fn __repr__(&self) -> String {
+        format!(
+            "SingleTimeSeries(name={:?}, initial_timestamp={}, length={}, resolution={}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.initial_timestamp,
+            self.inner.length,
+            self.inner.resolution.to_iso8601(),
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
+        )
+    }
+}
 
 // ---- NonSequentialTimeSeries ----------------------------------------------
 
@@ -2613,217 +2608,215 @@ pub struct PyNonSequentialTimeSeries {
     inner: core_lib::NonSequentialTimeSeries,
 }
 
-series_pymethods!(PyNonSequentialTimeSeries {
-        /// `name` is required.
-        ///
-        /// The keyword-only arguments are the descriptive attributes documented on
-        /// `SingleTimeSeries`; they travel with the series into the store and come
-        /// back on a read.
-        #[new]
-        #[pyo3(signature = (
+series_pymethods!(PyNonSequentialTimeSeries);
+
+#[pymethods]
+impl PyNonSequentialTimeSeries {
+    /// `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the series into the store and come
+    /// back on a read.
+    #[new]
+    #[pyo3(signature = (
             timestamps, data, name, *, application_data=None, element_type=None, units=None,
             quantity_kind=None, unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn new(
-            py: Python<'_>,
-            timestamps: Vec<PyInstant>,
-            data: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let typed = typed_array_from_numpy(data)?;
-            // One series records one spelling, so the vector has to agree on one.
-            let reference = vector_reference(&timestamps)?;
-            let mut inner =
-                core_lib::NonSequentialTimeSeries::new(instants_to_utc(&timestamps), typed, name)
-                    .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, reference)?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let typed = typed_array_from_numpy(data)?;
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let mut inner =
+            core_lib::NonSequentialTimeSeries::new(instants_to_utc(&timestamps), typed, name)
+                .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, reference)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Build from per-timestamp logical values, encoding them into the array
-        /// the store holds and declaring the element type they imply. See
-        /// `SingleTimeSeries.from_values` for the value shapes and the rules.
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build from per-timestamp logical values, encoding them into the array
+    /// the store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    #[classmethod]
+    #[pyo3(signature = (
             timestamps, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_values(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            timestamps: Vec<PyInstant>,
-            values: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            // One series records one spelling, so the vector has to agree on one.
-            let reference = vector_reference(&timestamps)?;
-            let decoded = from_values_payload(values, element_type.as_deref())?;
-            let mut inner = core_lib::NonSequentialTimeSeries::from_values(
-                instants_to_utc(&timestamps),
-                &decoded,
-                name,
-            )
-            .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, reference)?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::NonSequentialTimeSeries::from_values(
+            instants_to_utc(&timestamps),
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, reference)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Decode this series' array into the per-timestep values its element type
-        /// describes — the read-side counterpart of `from_values`, and the reason a
-        /// caller never has to know the stored row layouts.
-        ///
-        /// Same shapes as `decode_element_values`, which this is: the element type
-        /// and the number of leading axes both come from the series, so there is
-        /// nothing left to pass and nothing to get wrong.
-        ///
-        /// `None` for a scalar element type and for any array whose physical dtype
-        /// is not `float64`: there the stored elements already are the values, and
-        /// `.data` is the answer.
-        fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-            decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
-        }
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
+    }
 
-        /// The explicit timestamp vector, spelled the way it was written.
-        #[getter]
-        fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-            spell_instants(
-                py,
-                &self.inner.timestamps,
-                self.inner.time_reference.as_ref(),
-            )
-        }
+    /// The explicit timestamp vector, spelled the way it was written.
+    #[getter]
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        spell_instants(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+        )
+    }
 
-        #[getter]
-        fn length(&self) -> usize {
-            self.inner.length
-        }
+    #[getter]
+    fn length(&self) -> usize {
+        self.inner.length
+    }
 
-        #[getter]
-        fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            numpy_from_typed(py, &self.inner.data)
-        }
-
-        /// Build a `NonSequentialTimeSeries` from a `pyarrow.Table` — the inverse of
-        /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules; the
-        /// only difference is that the timestamps are taken as they are and need not
-        /// walk a grid.
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build a `NonSequentialTimeSeries` from a `pyarrow.Table` — the inverse of
+    /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules; the
+    /// only difference is that the timestamps are taken as they are and need not
+    /// walk a grid.
+    #[classmethod]
+    #[pyo3(signature = (
             table, *, name=None, application_data=None, element_type=None, units=None,
             quantity_kind=None, unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_arrow(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            table: &Bound<'_, PyAny>,
-            name: Option<String>,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let parts = arrow_parts(py, table)?;
-            let name = arrow_name(&parts, name)?;
-            let instants = arrow_instant_vec(&parts.millis)?;
-            let typed = typed_array_from_numpy(&parts.values)?;
-            let mut inner = core_lib::NonSequentialTimeSeries::new(instants, typed, name)
-                .map_err(InvalidParameterError::new_err)?;
-            let descriptors = arrow_descriptor_args(
-                &parts,
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            )?
-            .resolve(py, inner.element_type, None)?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
-        }
+    #[allow(clippy::too_many_arguments)]
+    fn from_arrow(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        table: &Bound<'_, PyAny>,
+        name: Option<String>,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let parts = arrow_parts(py, table)?;
+        let name = arrow_name(&parts, name)?;
+        let instants = arrow_instant_vec(&parts.millis)?;
+        let typed = typed_array_from_numpy(&parts.values)?;
+        let mut inner = core_lib::NonSequentialTimeSeries::new(instants, typed, name)
+            .map_err(InvalidParameterError::new_err)?;
+        let descriptors = arrow_descriptor_args(
+            &parts,
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        )?
+        .resolve(py, inner.element_type, None)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
-        ///
-        /// Requires pyarrow, which is not installed with infrastore — use
-        /// `pip install 'infrastore[arrow]'`. Identical in shape to
-        /// `SingleTimeSeries.to_arrow`, except that the timestamp column is the
-        /// stored vector rather than a computed grid, and the metadata carries no
-        /// `resolution` because an irregular timeline has no constant step.
-        ///
-        /// The rows are the timestamps and nothing else: an irregular series has no
-        /// value *between* two of them, so nothing is filled in.
-        fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            arrow_table(
-                py,
-                &self.inner.timestamps,
-                self.inner.time_reference.as_ref(),
-                &self.inner.data,
-                arrow_metadata!(self.inner, "NonSequentialTimeSeries"),
-            )
-        }
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`. Identical in shape to
+    /// `SingleTimeSeries.to_arrow`, except that the timestamp column is the
+    /// stored vector rather than a computed grid, and the metadata carries no
+    /// `resolution` because an irregular timeline has no constant step.
+    ///
+    /// The rows are the timestamps and nothing else: an irregular series has no
+    /// value *between* two of them, so nothing is filled in.
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        arrow_table(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            arrow_metadata!(self.inner, "NonSequentialTimeSeries"),
+        )
+    }
 
-        /// Value equality: all fields including the data array (bitwise).
-        fn __eq__(&self, other: &Self) -> bool {
-            self.inner == other.inner
-        }
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
 
-        /// Number of time steps (`length`).
-        fn __len__(&self) -> usize {
-            self.inner.length
-        }
+    /// Number of time steps (`length`).
+    fn __len__(&self) -> usize {
+        self.inner.length
+    }
 
-        fn __repr__(&self) -> String {
-            format!(
-                "NonSequentialTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
-                self.inner.name,
-                self.inner.length,
-                self.inner.data.shape,
-                reference_label(self.inner.time_reference.as_ref()),
-            )
-        }
-});
+    fn __repr__(&self) -> String {
+        format!(
+            "NonSequentialTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.length,
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
+        )
+    }
+}
 
 // ---- PersistentTimeSeries -------------------------------------------------
 
@@ -2844,279 +2837,277 @@ pub struct PyPersistentTimeSeries {
     inner: core_lib::PersistentTimeSeries,
 }
 
-series_pymethods!(PyPersistentTimeSeries {
-        /// `name` is required.
-        ///
-        /// The keyword-only arguments are the descriptive attributes documented on
-        /// `SingleTimeSeries`; they travel with the series into the store and come
-        /// back on a read. A step function's scalar-collapse policy belongs in
-        /// `application_data` — the store has no column for it.
-        #[new]
-        #[pyo3(signature = (
+series_pymethods!(PyPersistentTimeSeries);
+
+#[pymethods]
+impl PyPersistentTimeSeries {
+    /// `name` is required.
+    ///
+    /// The keyword-only arguments are the descriptive attributes documented on
+    /// `SingleTimeSeries`; they travel with the series into the store and come
+    /// back on a read. A step function's scalar-collapse policy belongs in
+    /// `application_data` — the store has no column for it.
+    #[new]
+    #[pyo3(signature = (
             timestamps, data, name, *, application_data=None, element_type=None, units=None,
             quantity_kind=None, unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn new(
-            py: Python<'_>,
-            timestamps: Vec<PyInstant>,
-            data: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let typed = typed_array_from_numpy(data)?;
-            // One series records one spelling, so the vector has to agree on one.
-            let reference = vector_reference(&timestamps)?;
-            let mut inner =
-                core_lib::PersistentTimeSeries::new(instants_to_utc(&timestamps), typed, name)
-                    .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, reference)?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        data: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let typed = typed_array_from_numpy(data)?;
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let mut inner =
+            core_lib::PersistentTimeSeries::new(instants_to_utc(&timestamps), typed, name)
+                .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
         }
+        .resolve(py, inner.element_type, reference)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// Build from per-breakpoint logical values, encoding them into the array
-        /// the store holds and declaring the element type they imply. See
-        /// `SingleTimeSeries.from_values` for the value shapes and the rules.
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build from per-breakpoint logical values, encoding them into the array
+    /// the store holds and declaring the element type they imply. See
+    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    #[classmethod]
+    #[pyo3(signature = (
             timestamps, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
             unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_values(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            timestamps: Vec<PyInstant>,
-            values: &Bound<'_, PyAny>,
-            name: String,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            // One series records one spelling, so the vector has to agree on one.
-            let reference = vector_reference(&timestamps)?;
-            let decoded = from_values_payload(values, element_type.as_deref())?;
-            let mut inner = core_lib::PersistentTimeSeries::from_values(
-                instants_to_utc(&timestamps),
-                &decoded,
-                name,
-            )
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        timestamps: Vec<PyInstant>,
+        values: &Bound<'_, PyAny>,
+        name: String,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        // One series records one spelling, so the vector has to agree on one.
+        let reference = vector_reference(&timestamps)?;
+        let decoded = from_values_payload(values, element_type.as_deref())?;
+        let mut inner = core_lib::PersistentTimeSeries::from_values(
+            instants_to_utc(&timestamps),
+            &decoded,
+            name,
+        )
+        .map_err(InvalidParameterError::new_err)?;
+        let descriptors = DescriptorArgs {
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        }
+        .resolve(py, inner.element_type, reference)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
+
+    /// Decode this series' array into the per-timestep values its element type
+    /// describes — the read-side counterpart of `from_values`, and the reason a
+    /// caller never has to know the stored row layouts.
+    ///
+    /// Same shapes as `decode_element_values`, which this is: the element type
+    /// and the number of leading axes both come from the series, so there is
+    /// nothing left to pass and nothing to get wrong.
+    ///
+    /// `None` for a scalar element type and for any array whose physical dtype
+    /// is not `float64`: there the stored elements already are the values, and
+    /// `.data` is the answer.
+    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
+    }
+
+    /// The breakpoint vector, spelled the way it was written.
+    #[getter]
+    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        spell_instants(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+        )
+    }
+
+    #[getter]
+    fn length(&self) -> usize {
+        self.inner.length
+    }
+
+    /// The value in force at `at`.
+    ///
+    /// A step function is defined at *every* instant from its first breakpoint
+    /// onward, so this is the series' value at `at` in the ordinary sense, not an
+    /// approximation of one: between breakpoints the previous value is carried
+    /// forward, and past the last breakpoint the last value holds indefinitely.
+    /// The single error is an `at` strictly *before* the first breakpoint, where
+    /// no value was ever declared — `InvalidParameterError`, never a clamp.
+    ///
+    /// Returns exactly what indexing `data` returns: a numpy scalar of the
+    /// series' own dtype for a scalar series, or the per-step subarray for a
+    /// series with a shaped element. `at` must be spelled the way the series'
+    /// breakpoints are (both aware or both naive).
+    fn value_at<'py>(&self, py: Python<'py>, at: PyInstant) -> PyResult<Bound<'py, PyAny>> {
+        check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
+        let row = self
+            .inner
+            .row_at(at.instant)
             .map_err(InvalidParameterError::new_err)?;
-            let descriptors = DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            }
-            .resolve(py, inner.element_type, reference)?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
+        let array = numpy_from_typed(py, &row)?;
+        if row.shape.is_empty() {
+            // A scalar step is a 0-d array; `arr[()]` is numpy's own spelling
+            // for the scalar inside one, and keeps the dtype that `.item()`
+            // would discard.
+            array.get_item(PyTuple::empty(py))
+        } else {
+            Ok(array)
         }
+    }
 
-        /// Decode this series' array into the per-timestep values its element type
-        /// describes — the read-side counterpart of `from_values`, and the reason a
-        /// caller never has to know the stored row layouts.
-        ///
-        /// Same shapes as `decode_element_values`, which this is: the element type
-        /// and the number of leading axes both come from the series, so there is
-        /// nothing left to pass and nothing to get wrong.
-        ///
-        /// `None` for a scalar element type and for any array whose physical dtype
-        /// is not `float64`: there the stored elements already are the values, and
-        /// `.data` is the answer.
-        fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-            decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
-        }
+    /// The 0-based index into `timestamps` and `data` of the breakpoint
+    /// governing `at` — the greatest breakpoint `<= at`.
+    ///
+    /// `value_at` is the usual way to ask; this is for a caller that wants the
+    /// row itself (to look up a parallel array, say). Errors like `value_at`.
+    fn index_at(&self, at: PyInstant) -> PyResult<usize> {
+        check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
+        self.inner
+            .index_at(at.instant)
+            .map_err(InvalidParameterError::new_err)
+    }
 
-        /// The breakpoint vector, spelled the way it was written.
-        #[getter]
-        fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-            spell_instants(
-                py,
-                &self.inner.timestamps,
-                self.inner.time_reference.as_ref(),
-            )
-        }
+    /// The breakpoint governing `at` — the instant from which the value at `at`
+    /// has been in force, spelled the way the series' breakpoints are.
+    ///
+    /// Equal to `at` exactly when `at` is itself a breakpoint. Errors like
+    /// `value_at`.
+    fn breakpoint_at<'py>(&self, py: Python<'py>, at: PyInstant) -> PyResult<Bound<'py, PyAny>> {
+        let index = self.index_at(at)?;
+        spell_instant(
+            py,
+            self.inner.timestamps[index],
+            self.inner.time_reference.as_ref(),
+        )
+    }
 
-        #[getter]
-        fn length(&self) -> usize {
-            self.inner.length
-        }
-
-        #[getter]
-        fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            numpy_from_typed(py, &self.inner.data)
-        }
-
-        /// The value in force at `at`.
-        ///
-        /// A step function is defined at *every* instant from its first breakpoint
-        /// onward, so this is the series' value at `at` in the ordinary sense, not an
-        /// approximation of one: between breakpoints the previous value is carried
-        /// forward, and past the last breakpoint the last value holds indefinitely.
-        /// The single error is an `at` strictly *before* the first breakpoint, where
-        /// no value was ever declared — `InvalidParameterError`, never a clamp.
-        ///
-        /// Returns exactly what indexing `data` returns: a numpy scalar of the
-        /// series' own dtype for a scalar series, or the per-step subarray for a
-        /// series with a shaped element. `at` must be spelled the way the series'
-        /// breakpoints are (both aware or both naive).
-        fn value_at<'py>(&self, py: Python<'py>, at: PyInstant) -> PyResult<Bound<'py, PyAny>> {
-            check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
-            let row = self
-                .inner
-                .row_at(at.instant)
-                .map_err(InvalidParameterError::new_err)?;
-            let array = numpy_from_typed(py, &row)?;
-            if row.shape.is_empty() {
-                // A scalar step is a 0-d array; `arr[()]` is numpy's own spelling
-                // for the scalar inside one, and keeps the dtype that `.item()`
-                // would discard.
-                array.get_item(PyTuple::empty(py))
-            } else {
-                Ok(array)
-            }
-        }
-
-        /// The 0-based index into `timestamps` and `data` of the breakpoint
-        /// governing `at` — the greatest breakpoint `<= at`.
-        ///
-        /// `value_at` is the usual way to ask; this is for a caller that wants the
-        /// row itself (to look up a parallel array, say). Errors like `value_at`.
-        fn index_at(&self, at: PyInstant) -> PyResult<usize> {
-            check_point_spelling(&at, self.inner.time_reference.as_ref(), "this series")?;
-            self.inner
-                .index_at(at.instant)
-                .map_err(InvalidParameterError::new_err)
-        }
-
-        /// The breakpoint governing `at` — the instant from which the value at `at`
-        /// has been in force, spelled the way the series' breakpoints are.
-        ///
-        /// Equal to `at` exactly when `at` is itself a breakpoint. Errors like
-        /// `value_at`.
-        fn breakpoint_at<'py>(&self, py: Python<'py>, at: PyInstant) -> PyResult<Bound<'py, PyAny>> {
-            let index = self.index_at(at)?;
-            spell_instant(
-                py,
-                self.inner.timestamps[index],
-                self.inner.time_reference.as_ref(),
-            )
-        }
-
-        /// Build a `PersistentTimeSeries` from a `pyarrow.Table` — the inverse of
-        /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules.
-        ///
-        /// The rows are **breakpoints**, not instants: a step function is stored
-        /// sparsely and the table is that sparse form. This class has to be named,
-        /// because a `PersistentTimeSeries` table is shaped exactly like a
-        /// `NonSequentialTimeSeries` one — the two differ only in what the values
-        /// mean between the rows.
-        #[classmethod]
-        #[pyo3(signature = (
+    /// Build a `PersistentTimeSeries` from a `pyarrow.Table` — the inverse of
+    /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules.
+    ///
+    /// The rows are **breakpoints**, not instants: a step function is stored
+    /// sparsely and the table is that sparse form. This class has to be named,
+    /// because a `PersistentTimeSeries` table is shaped exactly like a
+    /// `NonSequentialTimeSeries` one — the two differ only in what the values
+    /// mean between the rows.
+    #[classmethod]
+    #[pyo3(signature = (
             table, *, name=None, application_data=None, element_type=None, units=None,
             quantity_kind=None, unit_system=None, component_field=None, time_reference=None
         ))]
-        #[allow(clippy::too_many_arguments)]
-        fn from_arrow(
-            _cls: &Bound<'_, pyo3::types::PyType>,
-            py: Python<'_>,
-            table: &Bound<'_, PyAny>,
-            name: Option<String>,
-            application_data: Option<String>,
-            element_type: Option<String>,
-            units: Option<String>,
-            quantity_kind: Option<String>,
-            unit_system: Option<String>,
-            component_field: Option<String>,
-            time_reference: Option<String>,
-        ) -> PyResult<Self> {
-            let parts = arrow_parts(py, table)?;
-            let name = arrow_name(&parts, name)?;
-            let instants = arrow_instant_vec(&parts.millis)?;
-            let typed = typed_array_from_numpy(&parts.values)?;
-            let mut inner = core_lib::PersistentTimeSeries::new(instants, typed, name)
-                .map_err(InvalidParameterError::new_err)?;
-            let descriptors = arrow_descriptor_args(
-                &parts,
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            )?
-            .resolve(py, inner.element_type, None)?;
-            apply_descriptors!(inner, descriptors);
-            Ok(Self { inner })
-        }
+    #[allow(clippy::too_many_arguments)]
+    fn from_arrow(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        py: Python<'_>,
+        table: &Bound<'_, PyAny>,
+        name: Option<String>,
+        application_data: Option<String>,
+        element_type: Option<String>,
+        units: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
+        time_reference: Option<String>,
+    ) -> PyResult<Self> {
+        let parts = arrow_parts(py, table)?;
+        let name = arrow_name(&parts, name)?;
+        let instants = arrow_instant_vec(&parts.millis)?;
+        let typed = typed_array_from_numpy(&parts.values)?;
+        let mut inner = core_lib::PersistentTimeSeries::new(instants, typed, name)
+            .map_err(InvalidParameterError::new_err)?;
+        let descriptors = arrow_descriptor_args(
+            &parts,
+            application_data,
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            component_field,
+            time_reference,
+        )?
+        .resolve(py, inner.element_type, None)?;
+        apply_descriptors!(inner, descriptors);
+        Ok(Self { inner })
+    }
 
-        /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
-        ///
-        /// Requires pyarrow, which is not installed with infrastore — use
-        /// `pip install 'infrastore[arrow]'`.
-        ///
-        /// **One row per breakpoint, not per instant.** A step function is stored
-        /// sparsely and the table is that sparse form: the value at a row stays in
-        /// force until the next row, and past the last one forever. Resampling it
-        /// onto a dense grid is the caller's to do, and needs a grid the series
-        /// itself does not carry — there is no value before the first breakpoint, so
-        /// a grid starting earlier has no answer to give.
-        fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            arrow_table(
-                py,
-                &self.inner.timestamps,
-                self.inner.time_reference.as_ref(),
-                &self.inner.data,
-                arrow_metadata!(self.inner, "PersistentTimeSeries"),
-            )
-        }
+    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+    ///
+    /// Requires pyarrow, which is not installed with infrastore — use
+    /// `pip install 'infrastore[arrow]'`.
+    ///
+    /// **One row per breakpoint, not per instant.** A step function is stored
+    /// sparsely and the table is that sparse form: the value at a row stays in
+    /// force until the next row, and past the last one forever. Resampling it
+    /// onto a dense grid is the caller's to do, and needs a grid the series
+    /// itself does not carry — there is no value before the first breakpoint, so
+    /// a grid starting earlier has no answer to give.
+    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        arrow_table(
+            py,
+            &self.inner.timestamps,
+            self.inner.time_reference.as_ref(),
+            &self.inner.data,
+            arrow_metadata!(self.inner, "PersistentTimeSeries"),
+        )
+    }
 
-        /// Value equality: all fields including the data array (bitwise).
-        fn __eq__(&self, other: &Self) -> bool {
-            self.inner == other.inner
-        }
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
 
-        /// Number of breakpoints (`length`).
-        fn __len__(&self) -> usize {
-            self.inner.length
-        }
+    /// Number of breakpoints (`length`).
+    fn __len__(&self) -> usize {
+        self.inner.length
+    }
 
-        fn __repr__(&self) -> String {
-            format!(
-                "PersistentTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
-                self.inner.name,
-                self.inner.length,
-                self.inner.data.shape,
-                reference_label(self.inner.time_reference.as_ref()),
-            )
-        }
-});
+    fn __repr__(&self) -> String {
+        format!(
+            "PersistentTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
+            self.inner.name,
+            self.inner.length,
+            self.inner.data.shape,
+            reference_label(self.inner.time_reference.as_ref()),
+        )
+    }
+}
 
 // ---- Associations ---------------------------------------------------------
 
@@ -4224,7 +4215,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_metadata<'py>(
@@ -4243,6 +4235,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let filter = build_list_filter(
             owner_id,
@@ -4258,6 +4251,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         let metas = self.store()?.list_metadata(filter).map_err(map_err)?;
         let mut out = Vec::with_capacity(metas.len());
@@ -4275,7 +4269,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn has_any_time_series(
@@ -4293,6 +4288,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<bool> {
         let filter = build_list_filter(
             owner_id,
@@ -4308,6 +4304,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store()?.has_any_time_series(filter).map_err(map_err)
     }
@@ -4561,7 +4558,7 @@ impl PyStore {
     /// )
     /// reader.grid()["length"]
     /// ```
-    #[pyo3(signature = (resolution=None, *, window_start=None, window_length=None, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None))]
+    #[pyo3(signature = (resolution=None, *, window_start=None, window_length=None, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None, features_exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
         &self,
@@ -4579,6 +4576,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<PyStaticReader> {
         let filter = build_list_filter(
             owner_id,
@@ -4594,6 +4592,7 @@ impl PyStore {
             length,
             None,
             features,
+            features_exact,
         )?;
         let window = core_lib::ReadWindow {
             start: window_start.as_ref().map(|s| s.instant),
@@ -4625,7 +4624,7 @@ impl PyStore {
     /// the filter. A `resolution` is required; a `Deterministic` reader also
     /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
     /// Drive it with `forecast_read`.
-    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None))]
+    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None, features_exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
         &self,
@@ -4641,6 +4640,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<PyForecastReader> {
         let filter = build_list_filter(
             owner_id,
@@ -4656,6 +4656,7 @@ impl PyStore {
             length,
             None,
             features,
+            features_exact,
         )?;
         let reader = self
             .store()?
@@ -4904,7 +4905,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_names(
@@ -4922,6 +4924,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<Vec<String>> {
         let filter = build_list_filter(
             owner_id,
@@ -4937,6 +4940,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store()?.list_names(filter).map_err(map_err)
     }
@@ -4945,7 +4949,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_owner_types(
@@ -4963,6 +4968,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<Vec<String>> {
         let filter = build_list_filter(
             owner_id,
@@ -4978,6 +4984,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store()?.list_owner_types(filter).map_err(map_err)
     }
@@ -4987,7 +4994,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn remove_by_filter(
@@ -5005,6 +5013,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<usize> {
         let filter = build_list_filter(
             owner_id,
@@ -5020,6 +5029,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store_mut()?.remove_by_filter(filter).map_err(map_err)
     }
@@ -5701,7 +5711,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn export_time_series_associations_openapi(
@@ -5719,6 +5730,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<String> {
         let filter = build_list_filter(
             owner_id,
@@ -5734,6 +5746,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store()?
             .export_time_series_associations_openapi(&filter)
@@ -5934,6 +5947,7 @@ fn build_list_filter(
     length: Option<usize>,
     interval: Option<Bound<'_, PyAny>>,
     features: Option<&Bound<'_, PyDict>>,
+    features_exact: bool,
 ) -> PyResult<core_lib::ListFilter> {
     let mut filter = core_lib::ListFilter::new();
     if let Some(id) = owner_id {
@@ -5976,7 +5990,11 @@ fn build_list_filter(
     if let Some(i) = interval {
         filter = filter.interval(pyany_to_period(&i)?);
     }
-    if let Some(f) = features {
+    if features_exact {
+        // The row's whole feature set, by content hash -- so `features=None`
+        // here selects the rows that carry no features at all.
+        filter = filter.exact_features(features_from_dict(features)?);
+    } else if let Some(f) = features {
         filter = filter.features(features_from_dict(Some(f))?);
     }
     Ok(filter)
