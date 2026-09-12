@@ -21,7 +21,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, Deterministic, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
-    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesId, TypedArray, create_store, open_store,
+    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesId, TypedArray,
 };
 
 fn t0() -> DateTime<Utc> {
@@ -61,7 +61,7 @@ fn sub_second_resolutions_round_trip() {
         ("1s", Duration::seconds(1)),
         ("100ms", Duration::milliseconds(100)),
     ] {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         let key = add(&mut store, 1, sts_at("load", t0(), resolution));
         let period = Period::fixed(resolution);
         assert_eq!(
@@ -160,7 +160,7 @@ fn a_resolution_the_store_cannot_represent_is_refused_on_write() {
     // reader whose timeline runs backwards and whose every `index_at` then
     // rejects its own timestamps. None of the three is usable, so the line is
     // drawn at the write.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for bad in [
         Duration::microseconds(1),
         Duration::nanoseconds(999_999),
@@ -217,13 +217,13 @@ fn millisecond_precision_timestamps_round_trip_and_finer_ones_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let key = add(&mut store, 1, sts_at("load", precise, Duration::hours(1)));
         store.flush().unwrap();
         key
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let meta = store.get_metadata_by_id(key).unwrap().unwrap();
     assert_eq!(
         meta.initial_timestamp,
@@ -241,7 +241,7 @@ fn millisecond_precision_timestamps_round_trip_and_finer_ones_are_refused() {
     );
 
     // Anything finer is refused on write, at every magnitude below a millisecond.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for (label, offset) in [
         ("1ns", Duration::nanoseconds(1)),
         ("123456789ns", Duration::nanoseconds(123_456_789)),
@@ -281,7 +281,7 @@ fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
     // `(boundary, boundary + 1ms)` would pass the alignment check and then be
     // excluded by the window filter's exact `>=` — silently returning the *next*
     // window.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     // --- static: an off-grid start is floored onto the grid, as documented ---
     let static_key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
@@ -347,7 +347,7 @@ fn a_forecast_on_a_millisecond_offset_grid_reads_at_its_own_boundaries() {
     // must work and a bound rounded away from it must not. A finer phase is
     // refused on write (below), so this is as fine as a grid gets.
     let initial = t0() + Duration::milliseconds(500);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let det = Deterministic::new(
         initial,
         Duration::hours(1),
@@ -449,7 +449,7 @@ fn a_forecast_the_store_cannot_read_back_is_refused_on_write() {
     let mut miscounted = base.clone();
     miscounted.count = 7;
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for (label, bad) in [
         ("non-integral horizon", ragged),
         ("zero resolution", zero_res),
@@ -487,7 +487,7 @@ fn pre_1970_initial_timestamps_round_trip() {
     ];
 
     let keys: Vec<TimeSeriesId> = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let keys = cases
             .iter()
             .enumerate()
@@ -503,7 +503,7 @@ fn pre_1970_initial_timestamps_round_trip() {
         keys
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     for (key, expected) in keys.iter().zip(&cases) {
         assert!(expected.timestamp() < 0, "{expected} should be pre-1970");
         let got = store
@@ -540,7 +540,7 @@ fn a_series_spanning_the_epoch_boundary_reads_correctly() {
     // treat the sign change as a boundary.
     let initial = Utc.with_ymd_and_hms(1969, 12, 31, 22, 0, 0).unwrap();
     let values: Vec<f64> = (0..6).map(|i| i as f64).collect();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = add(
         &mut store,
         1,
@@ -580,7 +580,7 @@ fn a_century_spanning_non_sequential_series_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let series = NonSequentialTimeSeries::new(
             timestamps.clone(),
             TypedArray::from_f64(vec![timestamps.len()], &values),
@@ -596,7 +596,7 @@ fn a_century_spanning_non_sequential_series_round_trips() {
         key
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let got = store
         .read_by_id(key, infrastore_core::ReadWindow::full())
         .unwrap();
@@ -644,7 +644,7 @@ fn non_sequential_timestamps_keep_sub_second_precision() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let series = NonSequentialTimeSeries::new(
             timestamps.clone(),
             TypedArray::from_f64(vec![4], &values),
@@ -660,7 +660,7 @@ fn non_sequential_timestamps_keep_sub_second_precision() {
         key
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let got = store
         .read_by_id(key, infrastore_core::ReadWindow::full())
         .unwrap();
@@ -696,7 +696,7 @@ fn sub_millisecond_non_sequential_timestamps_are_refused() {
             "precise",
         )
         .unwrap();
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         let err = store
             .add(AddRequest::new(
                 1,
@@ -737,7 +737,7 @@ fn leap_second_instants_are_refused() {
         "outage",
     )
     .unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let err = store
         .add(AddRequest::new(
             1,
@@ -814,7 +814,7 @@ fn store_is_send_but_not_sync() {
 /// of the `Send` bound above.
 #[test]
 fn a_store_can_be_moved_to_another_thread() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
 
     let handle = std::thread::spawn(move || {
@@ -838,7 +838,7 @@ fn a_second_handle_on_one_path_is_refused_whatever_its_mode() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
         store.flush().unwrap();
         key
@@ -847,16 +847,16 @@ fn a_second_handle_on_one_path_is_refused_whatever_its_mode() {
         matches!(r, Err(infrastore_core::TimeSeriesError::StoreInUse { .. }))
     };
 
-    let first = open_store(path.as_path(), true).unwrap();
-    assert!(in_use(open_store(path.as_path(), true)));
+    let first = Store::open(path.as_path(), true).unwrap();
+    assert!(in_use(Store::open(path.as_path(), true)));
     drop(first);
 
-    let writable = open_store(path.as_path(), false).unwrap();
-    assert!(in_use(open_store(path.as_path(), true)));
+    let writable = Store::open(path.as_path(), false).unwrap();
+    assert!(in_use(Store::open(path.as_path(), true)));
     drop(writable);
 
     // Once the other handle is gone, a read-only open works.
-    let reader = open_store(path.as_path(), true).unwrap();
+    let reader = Store::open(path.as_path(), true).unwrap();
     let got = reader
         .read_by_id(key, infrastore_core::ReadWindow::full())
         .unwrap();
@@ -877,7 +877,7 @@ fn a_reader_built_before_a_removal_of_a_shared_array_reads_stale_values() {
     // and the stale reader's read therefore SUCCEEDS — returning the column set
     // and values it snapshotted at build time, including the column whose
     // association no longer exists.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let a = add(&mut store, 1, sts_at("a", t0(), Duration::hours(1)));
     add(&mut store, 2, sts_at("b", t0(), Duration::hours(1)));
     assert_eq!(
@@ -933,7 +933,7 @@ fn a_reader_built_before_a_removal_of_an_unshared_array_errors() {
     // reusable, so a silent success here could hand back another series' data.
     // Both bindings behave the same way — see `test_parity.py`'s
     // `test_a_reader_built_before_a_removal_errors_on_the_next_read`.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let a = add(&mut store, 1, sts_at("a", t0(), Duration::hours(1)));
     add(
         &mut store,
@@ -985,7 +985,7 @@ fn a_reader_built_before_a_removal_of_an_unshared_array_errors() {
 fn a_reader_built_before_an_add_does_not_see_the_new_series() {
     // The complement: additions are invisible to an existing reader too, so a
     // caller stepping a timeline gets a stable column set for the whole sweep.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(&mut store, 1, sts_at("a", t0(), Duration::hours(1)));
 
     let mut reader = store

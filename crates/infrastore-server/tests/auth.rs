@@ -4,7 +4,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray, create_store,
+    Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray,
 };
 use infrastore_proto::pb::{
     self, GetCountsReq, GetResolutionsReq, ListMetadataReq, ReadByIdReq, VerifyIntegrityReq,
@@ -18,7 +18,7 @@ use tonic::service::InterceptorLayer;
 use tonic::transport::Channel;
 
 fn make_store() -> Store {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);

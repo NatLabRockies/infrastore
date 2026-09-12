@@ -9,8 +9,8 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, Deterministic, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
-    SingleTimeSeries, TimeRange, TimeReference, TimeSeriesData, TimeSeriesError, TimeSeriesType,
-    TypedArray, create_store, open_store,
+    SingleTimeSeries, Store, TimeRange, TimeReference, TimeSeriesData, TimeSeriesError,
+    TimeSeriesType, TypedArray,
 };
 
 mod common;
@@ -63,7 +63,7 @@ fn every_spelling_round_trips_through_the_catalog() {
     let path = dir.path().join("store.h5");
     let mut hashes = Vec::new();
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         for (i, reference) in references.iter().enumerate() {
             let key = add(
                 &mut store,
@@ -76,7 +76,7 @@ fn every_spelling_round_trips_through_the_catalog() {
         }
         store.flush().unwrap();
     }
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     for (i, reference) in references.iter().enumerate() {
         // Ids are stable across a reopen, and they were minted in owner order.
         let key = store
@@ -123,7 +123,7 @@ fn every_spelling_round_trips_through_the_catalog() {
 /// duplicate — the rule `units` already states, with no new mechanism.
 #[test]
 fn two_series_differing_only_in_their_reference_are_a_duplicate() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(
         &mut store,
         1,
@@ -146,7 +146,7 @@ fn two_series_differing_only_in_their_reference_are_a_duplicate() {
 /// has no binding to catch a hand-built reference — is covered too.
 #[test]
 fn a_malformed_zone_name_is_refused_at_the_door() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for bad in ["utc", "zoneless", "-07:00", "", "America/Den ver"] {
         let err = store
             .add(AddRequest::new(
@@ -182,7 +182,7 @@ fn a_malformed_zone_name_is_refused_at_the_door() {
 /// category error rather than a rounding one.
 #[test]
 fn a_query_bound_must_match_the_series_spelling() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let zoned = add(
         &mut store,
         1,
@@ -244,7 +244,7 @@ fn a_query_bound_must_match_the_series_spelling() {
 /// groups — and the refusal names them.
 #[test]
 fn a_selection_cannot_span_both_coherence_groups() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let zoned = add(
         &mut store,
         1,
@@ -314,7 +314,7 @@ fn a_selection_cannot_span_both_coherence_groups() {
 /// nothing, and here they are a coherence group rather than an oversight.
 #[test]
 fn the_zoneless_filter_puts_unset_rows_with_the_zoned_ones() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for (owner, reference) in [
         (1, Some(TimeReference::Utc)),
         (2, Some(TimeReference::Zone("America/Denver".into()))),
@@ -349,7 +349,7 @@ fn the_zoneless_filter_puts_unset_rows_with_the_zoned_ones() {
 /// reported as the spelling that is true of all of them.
 #[test]
 fn a_reader_over_mixed_zoned_spellings_reports_the_shared_truth() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for (owner, reference) in [
         (1, TimeReference::Utc),
         (2, TimeReference::Zone("America/Denver".into())),
@@ -368,7 +368,7 @@ fn a_reader_over_mixed_zoned_spellings_reports_the_shared_truth() {
     assert_eq!(reader.time_reference(), Some(&TimeReference::Utc));
 
     // A cohort that agrees exactly reports what it agrees on.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for owner in 1..=2 {
         add(
             &mut store,
@@ -397,7 +397,7 @@ fn a_reader_over_mixed_zoned_spellings_reports_the_shared_truth() {
 /// `a_calendar_scale_period_on_a_named_zone_is_refused`.
 #[test]
 fn a_calendar_period_on_an_offset_series_still_steps_on_the_utc_calendar() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let months = Period::months(1);
     let series = SingleTimeSeries::new(
         t0(),
@@ -430,7 +430,7 @@ fn a_calendar_period_on_an_offset_series_still_steps_on_the_utc_calendar() {
 /// `TimeSeriesData`, so every variant gets it for free.
 #[test]
 fn every_series_type_carries_its_reference() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let stamps = vec![t0(), t0() + Duration::hours(3), t0() + Duration::hours(7)];
     let irregular = NonSequentialTimeSeries::new(
         stamps.clone(),
@@ -514,7 +514,7 @@ fn every_series_type_carries_its_reference() {
 /// looking in the wrong place for a filter they did not write.
 #[test]
 fn the_cohort_refusal_names_the_reader_that_was_asked_for() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     let det = |name: &str, reference: TimeReference| {
         TimeSeriesData::Deterministic(
@@ -552,7 +552,7 @@ fn the_cohort_refusal_names_the_reader_that_was_asked_for() {
     );
 
     // The static path still names itself.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(
         &mut store,
         1,
@@ -598,7 +598,7 @@ fn a_calendar_scale_period_on_a_named_zone_is_refused() {
         Period::Fixed(Duration::hours(1)),
         Period::Fixed(Duration::hours(6)),
     ] {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         store
             .add(AddRequest::new(
                 1,
@@ -616,7 +616,7 @@ fn a_calendar_scale_period_on_a_named_zone_is_refused() {
         Period::Months(1),
         Period::Months(12),
     ] {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         let err = store
             .add(AddRequest::new(
                 1,
@@ -642,7 +642,7 @@ fn a_calendar_scale_period_on_a_named_zone_is_refused() {
         TimeReference::Zoneless,
         TimeReference::FixedOffset(-420),
     ] {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         store
             .add(AddRequest::new(
                 1,
@@ -660,7 +660,7 @@ fn a_calendar_scale_period_on_a_named_zone_is_refused() {
 /// forecast is `horizon = P1D`, which must stay legal in any zone.
 #[test]
 fn a_forecast_on_a_named_zone_is_refused_for_a_calendar_scale_period() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let forecast = Deterministic::new(
         t0(),
         Period::Fixed(Duration::hours(12)),
@@ -706,7 +706,7 @@ fn from_timestamps_compacts_an_hourly_local_grid_and_refuses_a_daily_one() {
     // And a series built this way is storable even where asserting the period
     // would have been refused -- because the instants are now proven, not
     // claimed.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let proven = SingleTimeSeries::from_timestamps(&hourly, values, "load")
         .unwrap()
         .with_time_reference(TimeReference::Zone("America/Denver".to_string()));
@@ -724,7 +724,7 @@ fn from_timestamps_compacts_an_hourly_local_grid_and_refuses_a_daily_one() {
 /// stay storable: a horizon is divided, never stepped.
 #[test]
 fn a_calendar_scale_horizon_is_exempt_from_the_refusal() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let day_ahead = Deterministic::new(
         t0(),
         Period::Fixed(Duration::hours(1)),  // resolution: sub-daily

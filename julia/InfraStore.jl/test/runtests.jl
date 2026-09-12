@@ -963,6 +963,61 @@ end
     @test has_any_time_series(store; owner_id=1, name="load")
 end
 
+@testset "features_exact separates whole-set matching from subset matching" begin
+    # The two rules differ only on a *proper subset* of a row's features: a
+    # wrong feature value fails under both, so a test that only changes a value
+    # passes even if the exact flag is dropped. The "load" row below carries two
+    # features and the query names one of them, which is the single case that
+    # tells the two apart -- and the case the key-identity probes rely on, since
+    # a partial feature set must not resolve to a row carrying more.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    vals = Float64[1, 2, 3, 4]
+    both = Dict("scenario" => "high", "model" => "m1")
+    add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), vals, "load"); features=both,
+    )
+
+    one_of_two = Dict("scenario" => "high")
+    # Subset (the default): a row carrying at least the requested pairs matches.
+    @test has_any_time_series(store; owner_id=1, features=one_of_two)
+    # The flag is one filter keyword like the rest, so every filter-taking
+    # function takes it: a listing narrows the same way the probe does.
+    @test isempty(
+        list_metadata(store; owner_id=1, features=one_of_two, features_exact=true)
+    )
+    @test length(list_metadata(store; owner_id=1, features=both, features_exact=true)) == 1
+    @test remove_by_filter!(store; features=one_of_two, features_exact=true) == 0
+    # A filter keyword is typed where a wrong value would otherwise be folded
+    # onto the wrong coherence group.
+    @test_throws TypeError list_metadata(store; zoneless=1)
+    # Whole set: the same query must not match a row carrying a further feature.
+    @test !has_any_time_series(
+        store; owner_id=1, features=one_of_two, features_exact=true
+    )
+    @test has_any_time_series(store; owner_id=1, features=both, features_exact=true)
+
+    # has_time_series is the key-identity probe, so it is the exact rule --
+    # this is what folding it onto has_any_time_series had to preserve.
+    @test !has_time_series(
+        store, 1, Component, "load"; resolution=Hour(1), features=one_of_two
+    )
+    @test has_time_series(
+        store, 1, Component, "load"; resolution=Hour(1), features=both
+    )
+
+    # The typed form carries the same rule.
+    @test !has_time_series(
+        SingleTimeSeries, store, 1, Component, "load";
+        resolution=Hour(1), features=one_of_two,
+    )
+    @test has_time_series(
+        SingleTimeSeries, store, 1, Component, "load";
+        resolution=Hour(1), features=both,
+    )
+end
+
 @testset "list_array_groups annotates rows with the content hash" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)

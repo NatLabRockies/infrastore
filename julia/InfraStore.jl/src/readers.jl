@@ -136,8 +136,9 @@ end
     build_static_reader(store; resolution=nothing, window_start=nothing,
                         window_length=nothing, time_series_type=SingleTimeSeries,
                         owner_id=nothing, owner_category=nothing, name=nothing,
-                        name_glob=nothing, features=nothing, component_field=nothing,
-                        zoneless=nothing, initial_timestamp=nothing, length=nothing)
+                        name_glob=nothing, features=nothing, features_exact=false,
+                        component_field=nothing, zoneless=nothing,
+                        initial_timestamp=nothing, length=nothing)
 
 Build a [`StaticReader`] over the static series matching the filter.
 
@@ -195,6 +196,7 @@ function build_static_reader(
     name::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
@@ -210,56 +212,34 @@ function build_static_reader(
                 "NonSequentialTimeSeries / PersistentTimeSeries); got $time_series_type",
             ),
         )
-    has_owner = owner_id !== nothing
-    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
-    has_category = owner_category !== nothing
-    category_arg = has_category ? _category_int(owner_category) : Int32(0)
-    name_arg = name === nothing ? C_NULL : String(name)
-    name_glob_arg = name_glob === nothing ? C_NULL : String(name_glob)
-    resolution_iso = resolution === nothing ? C_NULL : _period_to_iso(resolution)
-    features_arg =
-        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
-    component_field_arg = component_field === nothing ? C_NULL : String(component_field)
-    # A reader materializes one timestamp axis, so it needs one spelling for it.
-    # `-1` leaves the choice to the caller's other filters; the core refuses a
-    # cohort that spans both coherence groups either way, naming the series that
-    # disagree.
-    zoneless_arg = zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0)
     # The anchor is a query bound like any other: the wire form is Unix
     # milliseconds either way, and the spelling flag is the only thing that tells
-    # a wall clock from an instant.
+    # a wall clock from an instant. It is not part of the filter -- a window says
+    # what to read, the filter says which series to read it from.
     has_anchor = window_start !== nothing
     anchor_ms = has_anchor ? _to_unix_ms(window_start) : Int64(0)
     anchor_zoneless = has_anchor && is_zoneless(_time_reference_of(window_start))
-    # The grid *filter*: matched on the instant a row stores, so it carries no
-    # spelling flag of its own.
-    has_initial = initial_timestamp !== nothing
-    initial_arg = has_initial ? _to_unix_ms(initial_timestamp) : Int64(0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall libinfrastore.infrastore_store_build_static_reader(
-        store::Ptr{Cvoid},
-        _type_code(static_type)::Int32,
-        has_owner::Bool,
-        owner_arg::Int64,
-        has_category::Bool,
-        category_arg::Int32,
-        name_arg::Cstring,
-        name_glob_arg::Cstring,
-        resolution_iso::Cstring,
-        features_arg::Cstring,
-        component_field_arg::Cstring,
-        zoneless_arg::Int32,
-        has_initial::Bool,
-        initial_arg::Int64,
-        (length !== nothing)::Bool,
-        UInt64(length === nothing ? 0 : length)::UInt64,
-        has_anchor::Bool,
-        anchor_ms::Int64,
-        anchor_zoneless::Bool,
-        (window_length !== nothing)::Bool,
-        UInt64(window_length === nothing ? 0 : window_length)::UInt64,
-        out::Ref{Ptr{Cvoid}},
-    )::Int32
+    # A reader materializes one timestamp axis, so it needs one spelling for it.
+    # Leaving `zoneless` unset leaves the choice to the caller's other filters;
+    # the core refuses a cohort that spans both coherence groups either way,
+    # naming the series that disagree.
+    code = _with_filter(;
+        owner_id, owner_category, name, name_glob, resolution, features,
+        features_exact, component_field, zoneless, initial_timestamp, length,
+    ) do filter
+        @ccall libinfrastore.infrastore_store_build_static_reader(
+            store::Ptr{Cvoid},
+            _type_code(static_type)::Int32,
+            filter::Ref{FilterRecord},
+            has_anchor::Bool,
+            anchor_ms::Int64,
+            anchor_zoneless::Bool,
+            (window_length !== nothing)::Bool,
+            UInt64(window_length === nothing ? 0 : window_length)::UInt64,
+            out::Ref{Ptr{Cvoid}},
+        )::Int32
+    end
     _check(code)
     # Wrap the raw handle in the finalized reader immediately, so a throw in
     # any of the layout queries below cannot leak it.
@@ -533,7 +513,8 @@ end
 """
     build_forecast_reader(store, time_series_type; resolution, owner_id=nothing,
                           owner_category=nothing, name=nothing, name_glob=nothing,
-                          features=nothing, component_field=nothing, zoneless=nothing)
+                          features=nothing, features_exact=false, component_field=nothing,
+                          zoneless=nothing, initial_timestamp=nothing, length=nothing)
 
 Build a [`ForecastReader`] over forecasts of `time_series_type` (a Julia type:
 `Deterministic`, `Probabilistic`, `Scenarios`, or `DeterministicSingleTimeSeries`).
@@ -554,49 +535,29 @@ function build_forecast_reader(
     name::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
     length::Union{Nothing, Integer}=nothing,
 )
     type_code = _int_for_type(time_series_type)
-    has_owner = owner_id !== nothing
-    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
-    has_category = owner_category !== nothing
-    category_arg = has_category ? _category_int(owner_category) : Int32(0)
-    name_arg = name === nothing ? C_NULL : String(name)
-    name_glob_arg = name_glob === nothing ? C_NULL : String(name_glob)
-    resolution_iso = _period_to_iso(resolution)
-    features_arg =
-        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
-    component_field_arg = component_field === nothing ? C_NULL : String(component_field)
-    # A reader materializes one timestamp axis, so it needs one spelling for it.
-    # `-1` leaves the choice to the caller's other filters; the core refuses a
-    # cohort that spans both coherence groups either way, naming the series that
-    # disagree.
-    zoneless_arg = zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0)
-    has_initial = initial_timestamp !== nothing
-    initial_arg = has_initial ? _to_unix_ms(initial_timestamp) : Int64(0)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = @ccall libinfrastore.infrastore_store_build_forecast_reader(
-        store::Ptr{Cvoid},
-        has_owner::Bool,
-        owner_arg::Int64,
-        has_category::Bool,
-        category_arg::Int32,
-        Int32(type_code)::Int32,
-        name_arg::Cstring,
-        name_glob_arg::Cstring,
-        resolution_iso::Cstring,
-        features_arg::Cstring,
-        component_field_arg::Cstring,
-        zoneless_arg::Int32,
-        has_initial::Bool,
-        initial_arg::Int64,
-        (length !== nothing)::Bool,
-        UInt64(length === nothing ? 0 : length)::UInt64,
-        out::Ref{Ptr{Cvoid}},
-    )::Int32
+    # A reader materializes one timestamp axis, so it needs one spelling for it.
+    # Leaving `zoneless` unset leaves the choice to the caller's other filters;
+    # the core refuses a cohort that spans both coherence groups either way,
+    # naming the series that disagree.
+    code = _with_filter(;
+        owner_id, owner_category, name, name_glob, resolution, features,
+        features_exact, component_field, zoneless, initial_timestamp, length,
+    ) do filter
+        @ccall libinfrastore.infrastore_store_build_forecast_reader(
+            store::Ptr{Cvoid},
+            Int32(type_code)::Int32,
+            filter::Ref{FilterRecord},
+            out::Ref{Ptr{Cvoid}},
+        )::Int32
+    end
     _check(code)
     # Wrap the raw handle in the finalized reader immediately, so a throw in
     # any of the layout queries below cannot leak it.

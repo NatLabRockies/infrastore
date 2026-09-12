@@ -4046,7 +4046,7 @@ fn seed_curves(store: &Path) {
     // SPAWN_GATE. A sibling test's fork inside this window would inherit the
     // store's lock and keep it after this function returns.
     let _gate = SPAWN_GATE.write().unwrap_or_else(|e| e.into_inner());
-    let mut s = infrastore_core::create_store(Some(store), false).unwrap();
+    let mut s = infrastore_core::Store::create(Some(store), false).unwrap();
     let mut add = |data| {
         s.add_time_series(
             42,

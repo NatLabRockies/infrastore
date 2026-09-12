@@ -6,8 +6,8 @@
 //! otherwise empty store.
 
 use infrastore_core::{
-    ParentChildAssociation, ParentChildFilter, SupplementalAttributeAssociation,
-    SupplementalAttributeFilter, TimeSeriesError, create_store, open_store,
+    ParentChildAssociation, ParentChildFilter, Store, SupplementalAttributeAssociation,
+    SupplementalAttributeFilter, TimeSeriesError,
 };
 
 /// Generator `component_id` carrying `GeographicInfo` attribute `attribute_id`.
@@ -62,7 +62,7 @@ fn all_edges() -> ParentChildFilter {
 
 #[test]
 fn attach_list_remove_round_trip() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_association(attach(1, 100))
         .unwrap();
@@ -93,7 +93,7 @@ fn attach_list_remove_round_trip() {
 
 #[test]
 fn removing_nothing_is_not_an_error() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     assert_eq!(
         store
             .remove_supplemental_attribute_associations(
@@ -114,7 +114,7 @@ fn removing_nothing_is_not_an_error() {
 fn associations_are_independent_of_time_series() {
     // Neither catalog requires a time series to exist, and clearing the series
     // must not disturb either one.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_association(attach(1, 100))
         .unwrap();
@@ -135,7 +135,7 @@ fn associations_are_independent_of_time_series() {
 #[test]
 fn the_two_catalogs_do_not_interfere() {
     // Same integer ids in both tables: clearing one leaves the other intact.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_association(attach(1, 100))
         .unwrap();
@@ -154,7 +154,7 @@ fn the_two_catalogs_do_not_interfere() {
 
 #[test]
 fn duplicate_attachment_is_rejected_regardless_of_type_names() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_association(attach(1, 100))
         .unwrap();
@@ -175,7 +175,7 @@ fn duplicate_attachment_is_rejected_regardless_of_type_names() {
 
 #[test]
 fn one_attribute_may_be_attached_to_many_components() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![
             attach(1, 100),
@@ -201,7 +201,7 @@ fn one_attribute_may_be_attached_to_many_components() {
 
 #[test]
 fn attachment_filters_narrow_by_id_and_type() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![
             typed_attach(1, "Generator", 100, "GeographicInfo"),
@@ -252,7 +252,7 @@ fn attachment_filters_narrow_by_id_and_type() {
 fn empty_type_list_matches_nothing() {
     // An empty allow-list is a deliberate "none of these", not "no filter" —
     // and SQLite cannot express it as `IN ()`.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_association(attach(1, 100))
         .unwrap();
@@ -279,7 +279,7 @@ fn empty_type_list_matches_nothing() {
 
 #[test]
 fn has_attachment_covers_every_dispatch_form() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_association(attach(1, 100))
         .unwrap();
@@ -313,7 +313,7 @@ fn has_attachment_covers_every_dispatch_form() {
 
 #[test]
 fn attachment_ids_and_counts_on_both_sides() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![
             typed_attach(1, "Generator", 100, "GeographicInfo"),
@@ -350,7 +350,7 @@ fn attachment_ids_and_counts_on_both_sides() {
 
 #[test]
 fn attachment_counts_by_type_and_summary_group_correctly() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![
             typed_attach(1, "Generator", 100, "GeographicInfo"),
@@ -384,7 +384,7 @@ fn attachment_counts_by_type_and_summary_group_correctly() {
 
 #[test]
 fn replace_component_id_moves_every_attachment() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![attach(1, 100), attach(1, 101)])
         .unwrap();
@@ -405,7 +405,7 @@ fn replace_component_id_moves_every_attachment() {
 
 #[test]
 fn replace_component_id_reports_a_collision() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![attach(1, 100), attach(2, 100)])
         .unwrap();
@@ -427,7 +427,7 @@ fn replace_component_id_reports_a_collision() {
 
 #[test]
 fn attachment_bulk_export_import_round_trips() {
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     let records = vec![
         typed_attach(1, "Generator", 100, "GeographicInfo"),
         typed_attach(1, "Generator", 101, "Outage"),
@@ -445,7 +445,7 @@ fn attachment_bulk_export_import_round_trips() {
         .unwrap();
     assert_eq!(exported, records);
 
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     target
         .add_supplemental_attribute_associations(exported.clone())
         .unwrap();
@@ -459,7 +459,7 @@ fn attachment_bulk_export_import_round_trips() {
 
 #[test]
 fn attachment_bulk_add_is_all_or_nothing() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let err = store
         .add_supplemental_attribute_associations(vec![
             attach(1, 100),
@@ -480,7 +480,7 @@ fn attachment_bulk_add_is_all_or_nothing() {
 
 #[test]
 fn parent_child_round_trip() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store.add_parent_child_association(edge(1, 7)).unwrap();
     store.add_parent_child_association(edge(2, 7)).unwrap();
 
@@ -502,7 +502,7 @@ fn parent_child_round_trip() {
 
 #[test]
 fn parent_child_pair_is_unique_but_direction_matters() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store.add_parent_child_association(edge(1, 7)).unwrap();
 
     // Same ordered pair under different type names is still the same edge.
@@ -523,7 +523,7 @@ fn parent_child_pair_is_unique_but_direction_matters() {
 
 #[test]
 fn parents_and_children_are_listed_separately() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_parent_child_associations(vec![
             typed_edge(1, "Generator", 7, "Bus"),
@@ -559,7 +559,7 @@ fn parents_and_children_are_listed_separately() {
 
 #[test]
 fn replace_parent_child_component_id_rewrites_both_ends() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_parent_child_associations(vec![
             typed_edge(1, "Generator", 7, "Bus"),
@@ -581,7 +581,7 @@ fn replace_parent_child_component_id_rewrites_both_ends() {
 fn replace_parent_child_component_id_counts_a_self_edge_once() {
     // A row with the id on both ends is rewritten by a single statement, so it
     // contributes one to the count rather than one per column.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_parent_child_association(typed_edge(1, "Generator", 1, "Generator"))
         .unwrap();
@@ -594,7 +594,7 @@ fn replace_parent_child_component_id_counts_a_self_edge_once() {
 
 #[test]
 fn replace_parent_child_component_id_reports_a_collision() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_parent_child_associations(vec![edge(1, 7), edge(2, 7)])
         .unwrap();
@@ -609,7 +609,7 @@ fn replace_parent_child_component_id_reports_a_collision() {
 
 #[test]
 fn parent_child_bulk_add_is_all_or_nothing() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let err = store
         .add_parent_child_associations(vec![edge(1, 7), edge(2, 7), edge(1, 7)])
         .unwrap_err();
@@ -627,7 +627,7 @@ fn associations_survive_persist_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         store
             .add_supplemental_attribute_associations(vec![attach(1, 100), attach(2, 101)])
             .unwrap();
@@ -637,7 +637,7 @@ fn associations_survive_persist_and_reopen() {
         store.persist_to(path.as_path()).unwrap();
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     assert_eq!(
         store
             .list_supplemental_attribute_associations(&all_attachments())
@@ -655,7 +655,7 @@ fn read_only_store_rejects_association_writes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_supplemental_attribute_association(attach(1, 100))
             .unwrap();
@@ -663,7 +663,7 @@ fn read_only_store_rejects_association_writes() {
         store.flush().unwrap();
     }
 
-    let mut store = open_store(path.as_path(), true).unwrap();
+    let mut store = Store::open(path.as_path(), true).unwrap();
     assert!(matches!(
         store
             .add_supplemental_attribute_association(attach(2, 100))
@@ -719,7 +719,7 @@ fn read_only_open_of_a_pre_associations_store_reads_empty() {
     // to empty answers rather than erroring.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    drop(create_store(Some(path.as_path()), false).unwrap());
+    drop(Store::create(Some(path.as_path()), false).unwrap());
 
     let sqlite_path = {
         let mut p = path.clone().into_os_string();
@@ -736,7 +736,7 @@ fn read_only_open_of_a_pre_associations_store_reads_empty() {
     }
 
     {
-        let store = open_store(path.as_path(), true).unwrap();
+        let store = Store::open(path.as_path(), true).unwrap();
         let attachments = all_attachments();
         assert_eq!(
             store
@@ -791,7 +791,7 @@ fn read_only_open_of_a_pre_associations_store_reads_empty() {
     }
 
     // Opening the same store for writing restores both tables, and they work.
-    let mut store = open_store(path.as_path(), false).unwrap();
+    let mut store = Store::open(path.as_path(), false).unwrap();
     store
         .add_supplemental_attribute_association(attach(1, 100))
         .unwrap();
@@ -837,7 +837,7 @@ fn opening_for_writing_renames_the_legacy_time_series_indexes() {
     // behind would silently double the index maintenance on every insert.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    drop(create_store(Some(path.as_path()), false).unwrap());
+    drop(Store::create(Some(path.as_path()), false).unwrap());
 
     let sqlite_path = {
         let mut p = path.clone().into_os_string();
@@ -871,7 +871,7 @@ fn opening_for_writing_renames_the_legacy_time_series_indexes() {
         assert!(!names.iter().any(|n| n == "uq_ts_assoc"));
     }
 
-    drop(open_store(path.as_path(), false).unwrap());
+    drop(Store::open(path.as_path(), false).unwrap());
 
     let conn = rusqlite::Connection::open(&sqlite_path).unwrap();
     let names = index_names(&conn);
@@ -895,7 +895,7 @@ fn a_supplemental_self_pair_is_accepted() {
     // two opaque ids and a pair identity; it has no notion that a component and
     // an attribute come from different id spaces, so a self-pair is a legal row.
     // A consumer that shares one id space across both would silently create it.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_association(attach(5, 5))
         .unwrap();
@@ -931,7 +931,7 @@ fn a_parent_child_self_edge_is_accepted() {
     // PIN: a component may be its own parent. The identity is the ordered pair,
     // so `(5, 5)` is a legal — if physically meaningless — edge, and it appears
     // as both a child of and a parent of 5.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store.add_parent_child_association(edge(5, 5)).unwrap();
 
     assert_eq!(
@@ -957,7 +957,7 @@ fn replace_component_id_with_old_equal_to_new_is_a_self_move() {
     // PIN: `old == new` rewrites each matching row with the value it already
     // has. It must report the rows it touched (not zero) and must not trip the
     // collision check against itself.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![attach(1, 10), attach(1, 11), attach(2, 10)])
         .unwrap();
@@ -977,7 +977,7 @@ fn replace_component_id_with_old_equal_to_new_is_a_self_move() {
 
 #[test]
 fn replace_parent_child_component_id_with_old_equal_to_new_is_a_self_move() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // Component 1 appears as a parent once and as a child once, so a self-move
     // must find it on both sides without colliding.
     store
@@ -994,7 +994,7 @@ fn replace_parent_child_component_id_with_old_equal_to_new_is_a_self_move() {
 
 #[test]
 fn replace_component_id_for_an_unreferenced_id_is_zero() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![attach(1, 10), attach(2, 11)])
         .unwrap();
@@ -1022,7 +1022,7 @@ fn replace_component_id_for_an_unreferenced_id_is_zero() {
 
 #[test]
 fn replace_parent_child_component_id_for_an_unreferenced_id_is_zero() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_parent_child_associations(vec![edge(1, 20), edge(2, 21)])
         .unwrap();
@@ -1044,7 +1044,7 @@ fn a_type_list_filter_with_over_a_thousand_entries_still_works() {
     // ceiling that caps how many an expanded abstract type may contribute; a
     // caller expanding a wide hierarchy can plausibly reach four figures. Pin
     // that ~1,200 entries is under the limit and still selects correctly.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![
             typed_attach(1, "Generator", 10, "GeographicInfo"),
@@ -1135,7 +1135,7 @@ fn counts_and_summary_match_brute_force_on_a_fan_in_and_fan_out_graph() {
         rows.push(typed_attach(7_000, "Bus", a, "PerBusInfo"));
     }
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(rows.clone())
         .unwrap();
@@ -1236,7 +1236,7 @@ fn counts_and_summary_match_brute_force_on_a_fan_in_and_fan_out_graph() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("assoc.h5");
     store.persist_to(path.as_path()).unwrap();
-    let reopened = open_store(path.as_path(), true).unwrap();
+    let reopened = Store::open(path.as_path(), true).unwrap();
     assert_eq!(
         reopened
             .count_supplemental_attribute_associations(&all_attachments())
@@ -1263,7 +1263,7 @@ fn parent_child_counts_match_brute_force_on_a_fan_in_and_fan_out_graph() {
         rows.push(typed_edge(p, "Generator", 9_000, "Bus"));
     }
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store.add_parent_child_associations(rows.clone()).unwrap();
 
     assert_eq!(
@@ -1321,7 +1321,7 @@ fn parent_child_counts_match_brute_force_on_a_fan_in_and_fan_out_graph() {
 /// guessed at.
 #[test]
 fn reassigning_a_component_relabels_the_rows_it_moves() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![
             typed_attach(1, "ThermalStandard", 10, "GeographicInfo"),
@@ -1362,7 +1362,7 @@ fn reassigning_a_component_relabels_the_rows_it_moves() {
     assert_eq!(summary[0].component_type, "RenewableDispatch");
 
     // The directed-edge catalog follows the same rule, on whichever end moves.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_parent_child_associations(vec![
             typed_edge(1, "ThermalStandard", 100, "Bus"),

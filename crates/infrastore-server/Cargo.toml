@@ -24,7 +24,6 @@ vendored = ["infrastore-core/vendored", "infrastore-proto/vendored"]
 [dependencies]
 chrono = { workspace = true }
 clap = { workspace = true }
-prost = { workspace = true }
 serde = { workspace = true }
 infrastore-core = { workspace = true }
 infrastore-proto = { workspace = true }
@@ -42,4 +41,3 @@ tempfile = "3"
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-ndarray = { workspace = true }

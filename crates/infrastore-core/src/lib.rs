@@ -35,8 +35,8 @@ pub use error::{Result, TimeSeriesError};
 // content-address an array, `timestamps_hash` to content-address the time axis
 // an irregular series sits on -- the catalog's own key for it, and the only
 // thing that tells two irregular series with identical values on different axes
-// apart -- and `hash_hex` to render a 32-byte hash as hex.
-pub use hash::{array_hash, hash_hex, timestamps_hash};
+// apart -- and `hash_hex`/`hash_from_hex` to render a 32-byte hash as hex and back.
+pub use hash::{array_hash, hash_from_hex, hash_hex, timestamps_hash};
 pub use metadata::{
     ForecastSummaryRow, ParentChildAssociation, ParentChildFilter, StaticSummaryRow,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
@@ -65,88 +65,3 @@ pub use types::{
     },
 };
 pub use version::{Compat, DATA_FORMAT_VERSION, MIN_UPGRADABLE_VERSION, compatibility};
-
-/// Create a new store.
-///
-/// If `in_memory` is true, no filesystem I/O occurs and `path` is ignored.
-/// Otherwise an HDF5 array file is created at `path` and a catalog SQLite
-/// database at `<path>.sqlite`.
-pub fn create_store(path: Option<&std::path::Path>, in_memory: bool) -> Result<Store> {
-    Store::create(path, in_memory)
-}
-
-/// Create a new store with an explicit compression policy.
-///
-/// Behaves like [`create_store`] but applies `compression` to data variables
-/// (ignored for `in_memory` stores).
-pub fn create_store_with_compression(
-    path: Option<&std::path::Path>,
-    in_memory: bool,
-    compression: Compression,
-) -> Result<Store> {
-    Store::create_with_compression(path, in_memory, compression)
-}
-
-/// Create a new store with an explicit catalog placement.
-///
-/// Behaves like [`create_store_with_compression`] but decides whether the
-/// catalog lives in `<path>.sqlite` or in RAM. See [`CatalogMode`].
-pub fn create_store_with_catalog(
-    path: Option<&std::path::Path>,
-    in_memory: bool,
-    compression: Compression,
-    catalog: CatalogMode,
-) -> Result<Store> {
-    Store::create_with_catalog(path, in_memory, compression, catalog)
-}
-
-/// Create a store at `path`, discarding any artifact already there.
-///
-/// The destructive counterpart to [`create_store_with_catalog`], which refuses
-/// an existing artifact. See [`Store::create_replacing`].
-pub fn create_store_replacing(
-    path: &std::path::Path,
-    compression: Compression,
-    catalog: CatalogMode,
-) -> Result<Store> {
-    Store::create_replacing(path, compression, catalog)
-}
-
-/// Open an existing store from disk.
-pub fn open_store(path: &std::path::Path, read_only: bool) -> Result<Store> {
-    Store::open(path, read_only)
-}
-
-/// Copy the artifact at `src` to `dest` and open the copy read-write.
-///
-/// The safe way to load a store and then change it: the original is never
-/// opened for writing. See [`Store::open_copy`].
-pub fn open_store_copy(
-    src: &std::path::Path,
-    dest: &std::path::Path,
-    catalog: CatalogMode,
-) -> Result<Store> {
-    Store::open_copy(src, dest, catalog)
-}
-
-/// Open an existing store from disk with an explicit catalog placement.
-///
-/// See [`CatalogMode`]. With [`CatalogMode::InMemory`] the catalog file is read
-/// into RAM and subsequent mutations reach disk only through
-/// [`Store::persist_to`]; the HDF5 half is still opened in place.
-pub fn open_store_with_catalog(
-    path: &std::path::Path,
-    read_only: bool,
-    catalog: CatalogMode,
-) -> Result<Store> {
-    Store::open_with_catalog(path, read_only, catalog)
-}
-
-/// Open the array half of an artifact whose catalog is absent, minting an empty
-/// one, so a document's association rows can be replayed into it.
-///
-/// The way in to a store shipped as arrays plus JSON. See
-/// [`Store::open_without_catalog`].
-pub fn open_store_without_catalog(path: &std::path::Path, catalog: CatalogMode) -> Result<Store> {
-    Store::open_without_catalog(path, catalog)
-}

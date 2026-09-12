@@ -15,7 +15,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, ListFilter, OwnerCategory, Period, ReadWindow, SingleTimeSeries, Store,
-    TimeSeriesData, TypedArray, create_store,
+    TimeSeriesData, TypedArray,
 };
 
 fn t(hour: i64) -> DateTime<Utc> {
@@ -23,7 +23,7 @@ fn t(hour: i64) -> DateTime<Utc> {
 }
 
 fn store() -> Store {
-    create_store(None, true).unwrap()
+    Store::create(None, true).unwrap()
 }
 
 /// A `SingleTimeSeries` of `len` hourly values starting at hour `start`, whose

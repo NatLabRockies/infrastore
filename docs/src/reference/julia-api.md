@@ -854,7 +854,7 @@ build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
                     window_start=nothing, window_length=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, name_glob=nothing,
-                    features=Dict(), component_field=nothing,
+                    features=Dict(), features_exact=false, component_field=nothing,
                     initial_timestamp=nothing, length=nothing) -> StaticReader
 
 static_grid(reader)       -> StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
@@ -953,7 +953,7 @@ forecasts must share one window timeline (`initial_timestamp` + `interval` + `co
 ```julia
 build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
-                      name_glob=nothing, features=Dict(),
+                      name_glob=nothing, features=Dict(), features_exact=false,
                       component_field=nothing) -> ForecastReader
 
 forecast_timeline(reader)  -> ForecastTimeline
@@ -1062,7 +1062,7 @@ close!(store) -> Nothing
 ```julia
 list_metadata(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
               name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
-              features=nothing, component_field=nothing,
+              features=nothing, features_exact=false, component_field=nothing,
               zoneless=nothing) -> Vector{TimeSeriesMetadata}
 ```
 
@@ -1095,16 +1095,17 @@ conjunction; with none set the whole store is listed:
 ```julia
 has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
                     name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
-                    features=Dict(), component_field=nothing) -> Bool
+                    features=Dict(), features_exact=false, component_field=nothing) -> Bool
 ```
 
 `has_any_time_series` is the existence probe over the same filters: true iff `list_metadata` with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
-marshaling any rows, so it is safe for hot per-component loops. `features` is a **subset** match
-here, unlike the exact-key `has_time_series` forms, which compare the whole feature set by content
-hash. A `features` filter still stays on indexes: the requested set is probed as an exact set by
-hash first (one covering seek when the caller passes the complete feature set), with an indexed
-per-feature fallback for genuinely partial lists.
+marshaling any rows, so it is safe for hot per-component loops. `features` is a **subset** match by
+default, unlike the exact-key `has_time_series` forms, which compare the whole feature set by
+content hash — and which are this function with `features_exact=true`. A subset `features` filter
+still stays on indexes: the requested set is probed as an exact set by hash first (one covering seek
+when the caller passes the complete feature set), with an indexed per-feature fallback for genuinely
+partial lists.
 
 The two matching rules are the thing to keep straight when a parent package resolves user queries:
 the exact-identity `has_time_series` forms must be given the **complete** feature map or they miss,

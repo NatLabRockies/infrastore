@@ -322,26 +322,6 @@ unsafe fn cstr_to_optional_time_reference(
     }
 }
 
-/// Turn the FFI tri-state `zoneless` filter argument into
-/// [`core_lib::ListFilter::zoneless`]. Negative means *no filter*, which is the
-/// default a caller that does not care passes; 0 and 1 are the two coherence
-/// groups. A tri-state int rather than a `bool` + `has_` pair because the
-/// predicate itself is already a boolean, and two booleans at adjacent argument
-/// positions is exactly the swap this file avoids elsewhere.
-fn zoneless_filter(zoneless: i32) -> Result<Option<bool>, i32> {
-    match zoneless {
-        n if n < 0 => Ok(None),
-        0 => Ok(Some(false)),
-        1 => Ok(Some(true)),
-        other => {
-            set_error(format!(
-                "invalid zoneless filter {other}; expected -1 (no filter), 0, or 1"
-            ));
-            Err(INFRASTORE_ERR_INVALID_PARAMETER)
-        }
-    }
-}
-
 /// Parse a unit system from a C string. `null`/empty -> `None` (unspecified);
 /// an unrecognized spelling sets the error and returns
 /// `INFRASTORE_ERR_INVALID_PARAMETER` rather than degrading to `None`, so a
@@ -537,7 +517,7 @@ pub unsafe extern "C" fn infrastore_store_create(
             return code;
         }
     };
-    let store = match core_lib::create_store(path.as_deref(), in_memory) {
+    let store = match core_lib::Store::create(path.as_deref(), in_memory) {
         Ok(s) => s,
         Err(e) => return map_core_error(e),
     };
@@ -583,7 +563,7 @@ pub unsafe extern "C" fn infrastore_store_create_with_compression(
         Err(code) => return code,
     };
     let store =
-        match core_lib::create_store_with_compression(path.as_deref(), in_memory, compression) {
+        match core_lib::Store::create_with_compression(path.as_deref(), in_memory, compression) {
             Ok(s) => s,
             Err(e) => return map_core_error(e),
         };
@@ -615,7 +595,7 @@ pub unsafe extern "C" fn infrastore_store_open(
             return code;
         }
     };
-    let store = match core_lib::open_store(&path, read_only) {
+    let store = match core_lib::Store::open(&path, read_only) {
         Ok(s) => s,
         Err(e) => return map_core_error(e),
     };
@@ -706,12 +686,15 @@ pub unsafe extern "C" fn infrastore_store_create_with_catalog(
         Ok(c) => c,
         Err(code) => return code,
     };
-    let store =
-        match core_lib::create_store_with_catalog(path.as_deref(), in_memory, compression, catalog)
-        {
-            Ok(s) => s,
-            Err(e) => return map_core_error(e),
-        };
+    let store = match core_lib::Store::create_with_catalog(
+        path.as_deref(),
+        in_memory,
+        compression,
+        catalog,
+    ) {
+        Ok(s) => s,
+        Err(e) => return map_core_error(e),
+    };
     let handle = Box::new(InfraStoreHandle { inner: store });
     unsafe { *out = Box::into_raw(handle) };
     INFRASTORE_OK
@@ -762,7 +745,7 @@ pub unsafe extern "C" fn infrastore_store_create_replacing(
         Ok(c) => c,
         Err(code) => return code,
     };
-    let store = match core_lib::create_store_replacing(&path, compression, catalog) {
+    let store = match core_lib::Store::create_replacing(&path, compression, catalog) {
         Ok(s) => s,
         Err(e) => return map_core_error(e),
     };
@@ -814,7 +797,7 @@ pub unsafe extern "C" fn infrastore_store_open_copy(
         Ok(c) => c,
         Err(code) => return code,
     };
-    let store = match core_lib::open_store_copy(&src, &dest, catalog) {
+    let store = match core_lib::Store::open_copy(&src, &dest, catalog) {
         Ok(s) => s,
         Err(e) => return map_core_error(e),
     };
@@ -856,7 +839,7 @@ pub unsafe extern "C" fn infrastore_store_open_with_catalog(
         Ok(c) => c,
         Err(code) => return code,
     };
-    let store = match core_lib::open_store_with_catalog(&path, read_only, catalog) {
+    let store = match core_lib::Store::open_with_catalog(&path, read_only, catalog) {
         Ok(s) => s,
         Err(e) => return map_core_error(e),
     };
@@ -900,7 +883,7 @@ pub unsafe extern "C" fn infrastore_store_open_without_catalog(
         Ok(c) => c,
         Err(code) => return code,
     };
-    let store = match core_lib::open_store_without_catalog(&path, catalog) {
+    let store = match core_lib::Store::open_without_catalog(&path, catalog) {
         Ok(s) => s,
         Err(e) => return map_core_error(e),
     };
@@ -1000,9 +983,8 @@ unsafe fn build_typed_array(
     })
 }
 
-/// Parse the `infrastore_store_add_single` / `infrastore_batch_add_single` argument list into
-/// an [`core_lib::AddRequest`]. Shared so the one-shot and batch entry points
-/// stay behaviorally identical.
+/// Parse the `infrastore_batch_add_single` argument list into an
+/// [`core_lib::AddRequest`].
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_single_request(
     owner_id: i64,
@@ -1092,96 +1074,6 @@ unsafe fn build_single_request(
     })
 }
 
-/// Add a SingleTimeSeries to the store.
-///
-/// `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
-/// bool, or string. `application_data`, `units`, `quantity_kind`, `unit_system`,
-/// `time_reference`, and `component_field` are optional; `component_field` names the field on
-/// the owning component whose value these values are the time-varying form of, and
-/// `time_reference` records how the timestamps were spelled (`utc`, `zoneless`, a fixed
-/// offset such as `-07:00`, or an IANA zone name such as `America/Denver`).
-///
-/// `time_range_zoneless` on the read side carries the same distinction for query bounds: a
-/// bound has to be spelled the way the series is, and a mismatch is refused rather than
-/// coerced.
-///
-/// # Safety
-///
-/// Required string pointers must reference null-terminated UTF-8 strings; optional string
-/// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims` is nonzero;
-/// `data_ptr` must reference `data_byte_len` bytes. `out_key`, when non-null, must be valid
-/// for writing one pointer.
-/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
-/// id the row was filed under.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_add_single(
-    handle: *mut InfraStoreHandle,
-    owner_id: i64,
-    owner_type: *const c_char,
-    owner_category: i32,
-    name: *const c_char,
-    initial_ts_unix_ms: i64,
-    resolution: *const c_char,
-    element_type: *const c_char,
-    ndims: u64,
-    dims_ptr: *const u64,
-    data_ptr: *const u8,
-    data_byte_len: u64,
-    application_data: *const c_char,
-    features_json: *const c_char,
-    units: *const c_char,
-    quantity_kind: *const c_char,
-    unit_system: *const c_char,
-    time_reference: *const c_char,
-    component_field: *const c_char,
-    out_id: *mut i64,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let req = match unsafe {
-        build_single_request(
-            owner_id,
-            owner_type,
-            owner_category,
-            name,
-            initial_ts_unix_ms,
-            resolution,
-            element_type,
-            ndims,
-            dims_ptr,
-            data_ptr,
-            data_byte_len,
-            application_data,
-            features_json,
-            units,
-            quantity_kind,
-            unit_system,
-            time_reference,
-            component_field,
-        )
-    } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut added) => {
-            let id = added.remove(0);
-            if !out_id.is_null() {
-                unsafe { *out_id = id.get() };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
-}
-
 // ---- add_non_sequential / add_persistent ----------------------------------
 
 /// The descriptive attributes of a `NonSequentialTimeSeries`, gathered so the
@@ -1219,8 +1111,7 @@ fn descriptors_of_irregular_pts(s: &core_lib::PersistentTimeSeries) -> core_lib:
 /// same inputs — a strictly increasing `i64` unix-millisecond vector plus one
 /// value per entry — and differ only in what a read of the result *means*. So
 /// `kind` picks the core constructor and nothing else varies. Serves
-/// `infrastore_store_add_non_sequential` / `infrastore_batch_add_non_sequential`
-/// and their `_persistent` twins.
+/// `infrastore_batch_add_non_sequential` and its `_persistent` twin.
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_irregular_request(
     kind: core_lib::TimeSeriesType,
@@ -1312,176 +1203,6 @@ unsafe fn build_irregular_request(
         data,
         features,
     })
-}
-
-/// Add a NonSequentialTimeSeries to the store.
-///
-/// # Safety
-///
-/// Required string pointers must reference null-terminated UTF-8 strings; optional string
-/// pointers may be null. `timestamps_unix_ms` must reference `timestamps_len` elements,
-/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero; `data_ptr` must
-/// reference `data_byte_len` bytes. `out_key`, when non-null, must be valid for writing one
-/// pointer.
-/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
-/// id the row was filed under.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_add_non_sequential(
-    handle: *mut InfraStoreHandle,
-    owner_id: i64,
-    owner_type: *const c_char,
-    owner_category: i32,
-    name: *const c_char,
-    timestamps_unix_ms: *const i64,
-    timestamps_len: u64,
-    element_type: *const c_char,
-    ndims: u64,
-    dims_ptr: *const u64,
-    data_ptr: *const u8,
-    data_byte_len: u64,
-    application_data: *const c_char,
-    features_json: *const c_char,
-    units: *const c_char,
-    quantity_kind: *const c_char,
-    unit_system: *const c_char,
-    time_reference: *const c_char,
-    component_field: *const c_char,
-    out_id: *mut i64,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let request = match unsafe {
-        build_irregular_request(
-            core_lib::TimeSeriesType::NonSequentialTimeSeries,
-            owner_id,
-            owner_type,
-            owner_category,
-            name,
-            timestamps_unix_ms,
-            timestamps_len,
-            element_type,
-            ndims,
-            dims_ptr,
-            data_ptr,
-            data_byte_len,
-            application_data,
-            features_json,
-            units,
-            quantity_kind,
-            unit_system,
-            time_reference,
-            component_field,
-        )
-    } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    match store.inner.add_time_series_bulk(vec![request]) {
-        Ok(mut added) => {
-            let id = added.remove(0);
-            if !out_id.is_null() {
-                unsafe { *out_id = id.get() };
-            }
-            INFRASTORE_OK
-        }
-        Err(error) => map_core_error(error),
-    }
-}
-
-/// Add a `PersistentTimeSeries` to the store.
-///
-/// The arguments are exactly those of `infrastore_store_add_non_sequential`,
-/// because the two types carry the same payload: `timestamps_unix_ms` is a
-/// strictly increasing vector of breakpoints and the array holds one value per
-/// breakpoint. What differs is what a *read* of the result means — the value at
-/// breakpoint `i` stays in force until breakpoint `i + 1`, and past the last
-/// one forever, while a `NonSequentialTimeSeries` has no value between its
-/// timestamps at all. There is no value before the first breakpoint, and asking
-/// for one is an error rather than a clamp.
-///
-/// # Safety
-///
-/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
-/// pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
-/// `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr` must reference `ndims`
-/// elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
-/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog id the
-/// row was filed under.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_add_persistent(
-    handle: *mut InfraStoreHandle,
-    owner_id: i64,
-    owner_type: *const c_char,
-    owner_category: i32,
-    name: *const c_char,
-    timestamps_unix_ms: *const i64,
-    timestamps_len: u64,
-    element_type: *const c_char,
-    ndims: u64,
-    dims_ptr: *const u64,
-    data_ptr: *const u8,
-    data_byte_len: u64,
-    application_data: *const c_char,
-    features_json: *const c_char,
-    units: *const c_char,
-    quantity_kind: *const c_char,
-    unit_system: *const c_char,
-    time_reference: *const c_char,
-    component_field: *const c_char,
-    out_id: *mut i64,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let request = match unsafe {
-        build_irregular_request(
-            core_lib::TimeSeriesType::PersistentTimeSeries,
-            owner_id,
-            owner_type,
-            owner_category,
-            name,
-            timestamps_unix_ms,
-            timestamps_len,
-            element_type,
-            ndims,
-            dims_ptr,
-            data_ptr,
-            data_byte_len,
-            application_data,
-            features_json,
-            units,
-            quantity_kind,
-            unit_system,
-            time_reference,
-            component_field,
-        )
-    } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    match store.inner.add_time_series_bulk(vec![request]) {
-        Ok(mut added) => {
-            let id = added.remove(0);
-            if !out_id.is_null() {
-                unsafe { *out_id = id.get() };
-            }
-            INFRASTORE_OK
-        }
-        Err(error) => map_core_error(error),
-    }
 }
 
 // ---- get_single -----------------------------------------------------------
@@ -2551,46 +2272,9 @@ pub unsafe extern "C" fn infrastore_store_persist_catalog(handle: *mut InfraStor
 // build a `TimeSeriesKey` internally and route to the core store. v0 only
 // resolves SingleTimeSeries.
 
-/// The exact-identity `ListFilter` for a set of addressing attributes: the whole
-/// feature set, matched by hash rather than as a subset. What the `has_*` probes
-/// pose their question with — an existence check asks about one series, so a
-/// sibling carrying an extra feature must not answer for it.
-unsafe fn exact_identity_filter(
-    owner_id: i64,
-    owner_category: i32,
-    name: *const c_char,
-    resolution: *const c_char,
-    interval: Option<core_lib::Period>,
-    features_json: *const c_char,
-) -> Result<core_lib::ListFilter, i32> {
-    let name = unsafe { cstr_to_str(name) }.inspect_err(|_| {
-        set_error("name is invalid");
-    })?;
-    let owner_category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let features = unsafe { parse_features_json(features_json) }?;
-    let resolution = unsafe { cstr_to_optional_period(resolution)? };
-    Ok(core_lib::ListFilter {
-        owner_id: Some(owner_id),
-        owner_category: Some(owner_category),
-        name: Some(name.to_string()),
-        resolution,
-        interval,
-        features: Some(features),
-        features_exact: true,
-        ..Default::default()
-    })
-}
-
 /// Fetch the metadata row filed under `association_id`, as one JSON object.
 ///
-/// The read-direction counterpart of the id every `infrastore_store_add_*`
+/// The read-direction counterpart of the ids `infrastore_store_add_batch`
 /// hands back: a caller that recorded ids in its own model resolves them here
 /// without keeping an id-to-key map beside the store. The row shape is exactly
 /// `infrastore_store_get_metadata_by_id`'s, `id` included.
@@ -2680,137 +2364,27 @@ pub unsafe extern "C" fn infrastore_store_association_exists(
     }
 }
 
-/// True iff a SingleTimeSeries with the given attributes exists.
+/// True iff at least one association matches the filter — the one existence
+/// probe, over the full `infrastore_store_list_metadata` filter surface
+/// (all-optional, independent predicates). It answers "is there any series like
+/// this?" without hydrating or serializing a single row, so it is safe for hot
+/// per-component loops.
+///
+/// Set `features_exact` to compare `features_json` as the row's whole feature
+/// set: that is one content-hash comparison, where the default subset match
+/// adds an indexed probe per requested feature. Neither hydrates a row, but a
+/// hot loop testing a complete feature set wants the exact form.
 ///
 /// # Safety
 ///
-/// `features_json` may be null.
+/// `handle` must reference a live store. `filter` must be null or point to a
+/// valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+/// duration of the call.
+/// `out_present` must be valid for writing one `bool`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_has_by_attrs(
-    handle: *const InfraStoreHandle,
-    owner_id: i64,
-    owner_category: i32,
-    name: *const c_char,
-    resolution: *const c_char,
-    features_json: *const c_char,
-    out_present: *mut bool,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    if out_present.is_null() {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe {
-        exact_identity_filter(
-            owner_id,
-            owner_category,
-            name,
-            resolution,
-            None,
-            features_json,
-        )
-    } {
-        Ok(f) => f,
-        Err(code) => return code,
-    };
-    match store.inner.has_any_time_series(filter) {
-        Ok(b) => {
-            unsafe { *out_present = b };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
-}
-
-/// True iff `owner_id` has any time series, optionally filtered to a single
-/// time series type (`use_type` selects whether `ts_type` is applied). Answers
-/// the name-less `has_time_series(owner)` / `has_time_series(owner, T)` queries.
-///
-/// # Safety
-///
-/// `owner_id` is a plain integer and `owner_category` (`0` = Component, `1` =
-/// SupplementalAttribute) identifies the owner category; `out_present` valid for writing one
-/// bool.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_has_for_owner(
-    handle: *const InfraStoreHandle,
-    owner_id: i64,
-    owner_category: i32,
-    ts_type: i32,
-    use_type: bool,
-    out_present: *mut bool,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    if out_present.is_null() {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let mut filter = core_lib::ListFilter::new()
-        .owner_id(owner_id)
-        .owner_category(category);
-    if use_type {
-        let t = match resolve_requested_type_from_int(ts_type) {
-            Some(t) => t,
-            None => {
-                set_error(format!("invalid time_series_type {ts_type}"));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        };
-        filter = filter.time_series_type(t);
-    }
-    match store.inner.has_any_time_series(filter) {
-        Ok(present) => {
-            unsafe { *out_present = present };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
-}
-
-/// True iff at least one association matches the filter — the existence probe
-/// over the full `infrastore_store_list_metadata` filter surface (all-optional,
-/// independent predicates; `features_json` is a subset match). Unlike
-/// `infrastore_store_has_typed`, which matches one exact key identity (its
-/// feature set compared by content hash), this answers "is there any series
-/// like this?" without hydrating or serializing a single row, so it is safe
-/// for hot per-component loops. The one exception is a non-empty
-/// `features_json`: the subset match cannot be answered from an index and
-/// falls back to a full listing internally, so callers testing an exact
-/// feature set in a hot loop should prefer `infrastore_store_has_typed`.
-///
-/// # Safety
-///
-/// The scalar filter flags/values are plain scalars. `name`, `name_glob`, `resolution`,
-/// `interval`; `features_json` must each be null or a null-terminated UTF-8 string.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
     handle: *const InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
+    filter: *const InfraStoreFilter,
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
@@ -2818,27 +2392,7 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
     if out_present.is_null() {
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let filter = match unsafe {
-        build_list_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            has_time_series_type,
-            time_series_type,
-            name,
-            name_glob,
-            resolution,
-            interval,
-            features_json,
-            component_field,
-            zoneless,
-            has_initial_timestamp,
-            initial_timestamp_ms,
-            has_length,
-            length,
-        )
-    } {
+    let filter = match unsafe { build_filter(filter) } {
         Ok(f) => f,
         Err(c) => return c,
     };
@@ -3023,126 +2577,8 @@ unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) 
     }
 }
 
-/// `interval` may be null. It only ever needs to be supplied to disambiguate a name that
-/// carries several forecasts differing solely by interval (as
-/// `transform_single_time_series` with `delete_existing = false` produces); a null leaves
-/// the key's interval unset and matches on the other attributes alone.
-unsafe fn build_typed_key_from_attrs(
-    owner_id: i64,
-    owner_category: i32,
-    name: *const c_char,
-    ts_type: i32,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-) -> Result<core_lib::ListFilter, i32> {
-    let time_series_type = match time_series_type_from_int(ts_type) {
-        Some(t) => t,
-        None => {
-            set_error(format!("invalid time_series_type {ts_type}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let interval = unsafe { cstr_to_optional_period(interval)? };
-    let mut filter = unsafe {
-        exact_identity_filter(
-            owner_id,
-            owner_category,
-            name,
-            resolution,
-            interval,
-            features_json,
-        )
-    }?;
-    filter.time_series_type = Some(time_series_type);
-    Ok(filter)
-}
-
-/// Add a dense forecast. `data_ptr`/`data_byte_len` is the flattened storage
-/// array (Deterministic: `[H, count, *E]`; Scenarios: `[scenario_count, H,
-/// count, *E]`). `ts_type` must be 2=Deterministic or 5=Scenarios;
-/// `DeterministicSingleTimeSeries` is not directly addable and is derived from a
-/// stored `SingleTimeSeries` via `infrastore_store_transform_single_time_series`.
-///
-/// # Safety
-///
-/// Optional strings may be null. `data_ptr` must reference `data_len` elements and `out_key`
-/// must be valid for writing one pointer.
-/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
-/// id the row was filed under.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_add_forecast(
-    handle: *mut InfraStoreHandle,
-    owner_id: i64,
-    owner_type: *const c_char,
-    owner_category: i32,
-    name: *const c_char,
-    ts_type: i32,
-    initial_ts_unix_ms: i64,
-    resolution: *const c_char,
-    horizon: *const c_char,
-    interval: *const c_char,
-    count: u64,
-    element_type: *const c_char,
-    ndims: u64,
-    dims_ptr: *const u64,
-    data_ptr: *const u8,
-    data_byte_len: u64,
-    application_data: *const c_char,
-    features_json: *const c_char,
-    units: *const c_char,
-    quantity_kind: *const c_char,
-    unit_system: *const c_char,
-    time_reference: *const c_char,
-    component_field: *const c_char,
-    out_id: *mut i64,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let req = match unsafe {
-        build_forecast_request(
-            owner_id,
-            owner_type,
-            owner_category,
-            name,
-            ts_type,
-            initial_ts_unix_ms,
-            resolution,
-            horizon,
-            interval,
-            count,
-            element_type,
-            ndims,
-            dims_ptr,
-            data_ptr,
-            data_byte_len,
-            application_data,
-            features_json,
-            units,
-            quantity_kind,
-            unit_system,
-            time_reference,
-            component_field,
-        )
-    } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut added) => {
-            let id = added.remove(0);
-            if !out_id.is_null() {
-                unsafe { *out_id = id.get() };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
-}
-
-/// Parse the `infrastore_store_add_forecast` / `infrastore_batch_add_forecast` argument list
-/// (Deterministic / Scenarios) into an [`core_lib::AddRequest`].
+/// Parse the `infrastore_batch_add_forecast` argument list (Deterministic /
+/// Scenarios) into an [`core_lib::AddRequest`].
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_forecast_request(
     owner_id: i64,
@@ -3247,7 +2683,7 @@ unsafe fn build_forecast_request(
         }
         other => {
             set_error(format!(
-                "infrastore_store_add_forecast supports Deterministic and Scenarios; {other:?} \
+                "infrastore_batch_add_forecast supports Deterministic and Scenarios; {other:?} \
                  is not directly addable (DeterministicSingleTimeSeries is derived via \
                  infrastore_store_transform_single_time_series)"
             ));
@@ -3276,92 +2712,8 @@ unsafe fn build_forecast_request(
     })
 }
 
-/// Add a `Probabilistic` forecast. `data` is the flattened 3-D storage array
-/// `(percentile_count, horizon_count, count)` column-major; `percentiles` is the
-/// percentile vector.
-///
-/// # Safety
-///
-/// Optional strings may be null. `percentiles_ptr` and `data_ptr` must reference their
-/// respective element counts. `out_key`, when non-null, must be valid for writing one
-/// pointer.
-/// `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
-/// id the row was filed under.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_add_probabilistic(
-    handle: *mut InfraStoreHandle,
-    owner_id: i64,
-    owner_type: *const c_char,
-    owner_category: i32,
-    name: *const c_char,
-    initial_ts_unix_ms: i64,
-    resolution: *const c_char,
-    horizon: *const c_char,
-    interval: *const c_char,
-    count: u64,
-    percentiles_ptr: *const f64,
-    percentiles_len: u64,
-    element_type: *const c_char,
-    ndims: u64,
-    dims_ptr: *const u64,
-    data_ptr: *const u8,
-    data_byte_len: u64,
-    application_data: *const c_char,
-    features_json: *const c_char,
-    units: *const c_char,
-    quantity_kind: *const c_char,
-    unit_system: *const c_char,
-    time_reference: *const c_char,
-    component_field: *const c_char,
-    out_id: *mut i64,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let req = match unsafe {
-        build_probabilistic_request(
-            owner_id,
-            owner_type,
-            owner_category,
-            name,
-            initial_ts_unix_ms,
-            resolution,
-            horizon,
-            interval,
-            count,
-            percentiles_ptr,
-            percentiles_len,
-            element_type,
-            ndims,
-            dims_ptr,
-            data_ptr,
-            data_byte_len,
-            application_data,
-            features_json,
-            units,
-            quantity_kind,
-            unit_system,
-            time_reference,
-            component_field,
-        )
-    } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut added) => {
-            let id = added.remove(0);
-            if !out_id.is_null() {
-                unsafe { *out_id = id.get() };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
-}
-
-/// Parse the `infrastore_store_add_probabilistic` / `infrastore_batch_add_probabilistic`
-/// argument list into an [`core_lib::AddRequest`].
+/// Parse the `infrastore_batch_add_probabilistic` argument list into an
+/// [`core_lib::AddRequest`].
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_probabilistic_request(
     owner_id: i64,
@@ -3490,10 +2842,12 @@ pub unsafe extern "C" fn infrastore_batch_free(batch: *mut InfraStoreBatchHandle
     }
 }
 
-/// Append a SingleTimeSeries to a batch. Arguments match
-/// `infrastore_store_add_single` (minus the store handle and `out_key`); the data is
-/// copied into the batch, so the caller's buffers need only stay valid for
-/// this call.
+/// Append a SingleTimeSeries to a batch. The data is copied into the batch, so
+/// the caller's buffers need only stay valid for this call.
+///
+/// A batch is the only write path across this ABI: build one with
+/// `infrastore_batch_new`, append to it, then commit it with
+/// `infrastore_store_add_batch`, which hands back one id per item in order.
 ///
 /// # Safety
 ///
@@ -3561,8 +2915,8 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     }
 }
 
-/// Append a NonSequentialTimeSeries to a batch. Arguments match
-/// `infrastore_store_add_non_sequential` (minus the store handle and `out_key`).
+/// Append a NonSequentialTimeSeries to a batch. Commit it with
+/// `infrastore_store_add_batch`.
 ///
 /// # Safety
 ///
@@ -3632,8 +2986,8 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     }
 }
 
-/// Append a `PersistentTimeSeries` to a batch. Arguments match
-/// `infrastore_store_add_persistent` (minus the store handle and `out_id`).
+/// Append a `PersistentTimeSeries` to a batch. Commit it with
+/// `infrastore_store_add_batch`.
 ///
 /// # Safety
 ///
@@ -3705,8 +3059,7 @@ pub unsafe extern "C" fn infrastore_batch_add_persistent(
 }
 
 /// Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
-/// batch. Arguments match `infrastore_store_add_forecast` (minus the store handle and
-/// `out_key`).
+/// batch. Commit it with `infrastore_store_add_batch`.
 ///
 /// # Safety
 ///
@@ -3782,8 +3135,8 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     }
 }
 
-/// Append a `Probabilistic` forecast to a batch. Arguments match
-/// `infrastore_store_add_probabilistic` (minus the store handle and `out_key`).
+/// Append a `Probabilistic` forecast to a batch. Commit it with
+/// `infrastore_store_add_batch`.
 ///
 /// # Safety
 ///
@@ -3862,18 +3215,19 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     }
 }
 
-/// Submit every request in `batch` through one all-or-nothing bulk add. On
-/// success, writes an array of key handles (input order) to `out_keys` /
-/// `out_len`. The batch is drained by this call in all cases — on error
-/// nothing was committed and the batch is left empty; rebuild it before
-/// retrying.
+/// Submit every request in `batch` through one all-or-nothing bulk add — the
+/// ABI's one write path, so a single add is a one-item batch. On success,
+/// writes the new rows' catalog ids (input order) to `*out_ids` / `*out_len`.
+/// The batch is drained by this call in all cases — on error nothing was
+/// committed and the batch is left empty; rebuild it before retrying.
 ///
 /// # Safety
 ///
 /// `handle` must be a live read-write store handle and `batch` a live batch
-/// handle. `out_keys` and `out_len` must each be valid for writing one value.
-/// On success the caller owns the returned array and every key handle in it:
-/// release the id buffer with `infrastore_buffer_free_i64(*out_ids, *out_len)`.
+/// handle, neither used concurrently. `out_ids` and `out_len` must each be
+/// valid for writing one value. On success `*out_ids` is null when the batch
+/// was empty; otherwise the caller owns it and must release it exactly once
+/// with `infrastore_buffer_free_i64(*out_ids, *out_len)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_batch(
     handle: *mut InfraStoreHandle,
@@ -5126,16 +4480,6 @@ unsafe fn emit_forecast_data(
     }
 }
 
-/// Lowercase hex of a 32-byte content hash (64 chars).
-fn hash_to_hex(hash: &[u8; 32]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(64);
-    for b in hash {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
 /// Full-metadata JSON object for one association row: the identity/descriptive
 /// key fields plus the storage columns a key row omits (`data_hash` hex,
 /// `element_type`, `element_shape`, `percentiles`, `units`, `application_data`).
@@ -5168,7 +4512,10 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
         Value::from(m.time_series_type.as_str()),
     );
     o.insert("name".into(), Value::from(m.name.clone()));
-    o.insert("data_hash".into(), Value::from(hash_to_hex(&m.data_hash)));
+    o.insert(
+        "data_hash".into(),
+        Value::from(core_lib::hash_hex(&m.data_hash)),
+    );
     // Always present on a row read out of the catalog; `null` only if a caller
     // built the metadata itself without one.
     o.insert(
@@ -5217,11 +4564,7 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
                 .collect(),
         ),
     );
-    o.insert(
-        "features".into(),
-        serde_json::from_str(&features_to_json(&m.features))
-            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-    );
+    o.insert("features".into(), features_to_json(&m.features));
     o.insert(
         "units".into(),
         m.units.clone().map(Value::from).unwrap_or(Value::Null),
@@ -5354,31 +4697,16 @@ pub unsafe extern "C" fn infrastore_store_list_metadata_by_ids(
 ///
 /// # Safety
 ///
-/// The scalar filter flags/values are plain scalars. `name`, `name_glob`, `component_field`;
-/// `features_json` must each be null or a null-terminated UTF-8 string. `out_json` must be
-/// valid for writing one pointer and `out_len` for writing one `u64`; on success `*out_json`
-/// must be released exactly once with `infrastore_string_free`.
+/// `handle` must reference a live store. `filter` must be null or point to a
+/// valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+/// duration of the call.
+/// `out_json` must be valid for writing one pointer and `out_len` for writing
+/// one `u64`; on success `*out_json` must be released exactly once with
+/// `infrastore_string_free`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_list_metadata(
     handle: *const InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
+    filter: *const InfraStoreFilter,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5388,27 +4716,7 @@ pub unsafe extern "C" fn infrastore_store_list_metadata(
         set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let filter = match unsafe {
-        build_list_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            has_time_series_type,
-            time_series_type,
-            name,
-            name_glob,
-            resolution,
-            interval,
-            features_json,
-            component_field,
-            zoneless,
-            has_initial_timestamp,
-            initial_timestamp_ms,
-            has_length,
-            length,
-        )
-    } {
+    let filter = match unsafe { build_filter(filter) } {
         Ok(f) => f,
         Err(c) => return c,
     };
@@ -5428,26 +4736,9 @@ pub unsafe extern "C" fn infrastore_store_list_metadata(
 ///
 /// Identical to `infrastore_store_list_metadata`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_list_names(
     handle: *const InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
+    filter: *const InfraStoreFilter,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5457,27 +4748,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
         set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let filter = match unsafe {
-        build_list_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            has_time_series_type,
-            time_series_type,
-            name,
-            name_glob,
-            resolution,
-            interval,
-            features_json,
-            component_field,
-            zoneless,
-            has_initial_timestamp,
-            initial_timestamp_ms,
-            has_length,
-            length,
-        )
-    } {
+    let filter = match unsafe { build_filter(filter) } {
         Ok(f) => f,
         Err(c) => return c,
     };
@@ -5497,26 +4768,9 @@ pub unsafe extern "C" fn infrastore_store_list_names(
 ///
 /// Identical to `infrastore_store_list_metadata`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_list_owner_types(
     handle: *const InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
+    filter: *const InfraStoreFilter,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5526,27 +4780,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
         set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let filter = match unsafe {
-        build_list_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            has_time_series_type,
-            time_series_type,
-            name,
-            name_glob,
-            resolution,
-            interval,
-            features_json,
-            component_field,
-            zoneless,
-            has_initial_timestamp,
-            initial_timestamp_ms,
-            has_length,
-            length,
-        )
-    } {
+    let filter = match unsafe { build_filter(filter) } {
         Ok(f) => f,
         Err(c) => return c,
     };
@@ -5562,30 +4796,20 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
 /// transaction, writing the number removed into `*out_removed`. Filters match
 /// `infrastore_store_list_metadata`; an empty match removes nothing (`0`).
 ///
+/// **A null or all-zero filter matches everything and removes every series.**
+/// This is the only destructive export the empty filter reaches, so a caller
+/// that means to remove a subset must set at least one predicate.
+///
 /// # Safety
 ///
-/// The filter args match `infrastore_store_list_metadata`.
+/// `handle` must reference a live store opened for writing. `filter` must be
+/// null or point to a valid [`InfraStoreFilter`] whose borrowed strings stay
+/// readable for the duration of the call. `out_removed` must be valid for
+/// writing one `u64`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     handle: *mut InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
+    filter: *const InfraStoreFilter,
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
@@ -5594,27 +4818,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
         set_error("out_removed is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let filter = match unsafe {
-        build_list_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            has_time_series_type,
-            time_series_type,
-            name,
-            name_glob,
-            resolution,
-            interval,
-            features_json,
-            component_field,
-            zoneless,
-            has_initial_timestamp,
-            initial_timestamp_ms,
-            has_length,
-            length,
-        )
-    } {
+    let filter = match unsafe { build_filter(filter) } {
         Ok(f) => f,
         Err(c) => return c,
     };
@@ -5627,42 +4831,95 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     }
 }
 
-/// Build a [`core_lib::ListFilter`] from the optional scalar/string filter args
-/// shared by `infrastore_store_list_metadata` and `infrastore_store_list_array_groups`. On a bad
-/// argument it sets the thread-local error (where appropriate) and returns the
-/// error code to propagate.
+/// Every catalog filter the ABI accepts, as one record.
+///
+/// Passed by pointer to each filter-taking export in place of the seventeen
+/// positional arguments they used to carry. A null pointer, and equally an
+/// all-zero record, is the empty filter: it matches everything. So a C caller
+/// writes `InfraStoreFilter f = {0};` and sets only the fields it cares about.
+///
+/// Each optional scalar is a `has_*` flag beside its value, because 0 is a
+/// legitimate owner id, category, and length. Each optional string is null when
+/// unset. The struct borrows its strings: they must outlive the call, and
+/// nothing here is freed.
+///
+/// **The layout is part of the ABI.** This record buys one filter parser and no
+/// churn across the eight call sites when a predicate is added; it does *not*
+/// make the ABI forward-compatible. A caller compiled against an older header
+/// allocates the older `sizeof(InfraStoreFilter)`, so appending a field and
+/// reading it here would run off the end of that allocation. Appending is
+/// therefore a breaking change like any other, and callers are rebuilt against
+/// the regenerated header — which is how this ABI is consumed: `infrastore.h`
+/// is generated by the build and committed, and the Julia binding that mirrors
+/// this record as `FilterRecord` pins the release artifact it was tested
+/// against, with the release workflow rebuilding both from one tag. Between a
+/// merge and the next release a checkout of the Julia package does run against
+/// the previous artifact, so a layout change here is a release-blocking one.
+/// A size or version prefix would relax that, and is worth adding the day a
+/// caller ships separately from the library; there is no such caller today.
+#[repr(C)]
+pub struct InfraStoreFilter {
+    pub has_owner_id: bool,
+    pub owner_id: i64,
+    pub has_owner_category: bool,
+    /// 0 = Component, 1 = SupplementalAttribute.
+    pub owner_category: i32,
+    pub has_time_series_type: bool,
+    pub time_series_type: i32,
+    pub name: *const c_char,
+    /// SQLite `GLOB` pattern over the name.
+    pub name_glob: *const c_char,
+    /// ISO-8601 period.
+    pub resolution: *const c_char,
+    /// ISO-8601 period.
+    pub interval: *const c_char,
+    /// JSON object whose values are int, float, bool, or string.
+    pub features_json: *const c_char,
+    /// Match `features_json` as the row's whole feature set rather than as a
+    /// subset it must contain. With `features_json` null this matches only the
+    /// rows that carry no features at all — the key-identity probe's question,
+    /// and the one place a set flag beside a null field is not "unset".
+    pub features_exact: bool,
+    pub component_field: *const c_char,
+    pub has_zoneless: bool,
+    /// Which timestamp-spelling coherence group to match.
+    pub zoneless: bool,
+    pub has_initial_timestamp: bool,
+    pub initial_timestamp_ms: i64,
+    pub has_length: bool,
+    pub length: u64,
+}
+
+impl Default for InfraStoreFilter {
+    /// The empty filter: matches everything. `..Default::default()` is the Rust
+    /// spelling of C's `InfraStoreFilter f = {0};`.
+    fn default() -> Self {
+        // SAFETY: every field is a bool, an integer, or a raw pointer, for
+        // which all-zero bytes are `false`, `0`, and null.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+/// Turn an [`InfraStoreFilter`] into the core's [`core_lib::ListFilter`].
+///
+/// The one filter parser behind every filter-taking export, readers included:
+/// a filter spelled one way here cannot mean something else two exports over.
 ///
 /// # Safety
 ///
-/// `name`, `name_glob`, `component_field`, and `features_json` must each be null
-/// or a null-terminated UTF-8 string; `resolution` and `interval` must each be
-/// null or a null-terminated ISO-8601 period.
-#[allow(clippy::too_many_arguments)]
-unsafe fn build_list_filter(
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
-) -> std::result::Result<core_lib::ListFilter, i32> {
-    let mut filter = core_lib::ListFilter::new();
-    if has_owner {
-        filter = filter.owner_id(owner_id);
+/// `filter` must be null or reference a live [`InfraStoreFilter`] whose string
+/// fields are each null or a null-terminated UTF-8 string, with `resolution`
+/// and `interval` further being ISO-8601 periods.
+unsafe fn build_filter(filter: *const InfraStoreFilter) -> Result<core_lib::ListFilter, i32> {
+    let Some(f) = (unsafe { filter.as_ref() }) else {
+        return Ok(core_lib::ListFilter::new());
+    };
+    let mut out = core_lib::ListFilter::new();
+    if f.has_owner_id {
+        out = out.owner_id(f.owner_id);
     }
-    if has_owner_category {
-        let category = match owner_category {
+    if f.has_owner_category {
+        let category = match f.owner_category {
             0 => core_lib::OwnerCategory::Component,
             1 => core_lib::OwnerCategory::SupplementalAttribute,
             other => {
@@ -5670,73 +4927,98 @@ unsafe fn build_list_filter(
                 return Err(INFRASTORE_ERR_INVALID_PARAMETER);
             }
         };
-        filter = filter.owner_category(category);
+        out = out.owner_category(category);
     }
-    if has_time_series_type {
-        match resolve_requested_type_from_int(time_series_type) {
-            Some(t) => filter = filter.time_series_type(t),
+    if f.has_time_series_type {
+        match resolve_requested_type_from_int(f.time_series_type) {
+            Some(t) => out = out.time_series_type(t),
             None => {
-                set_error(format!("invalid time_series_type {time_series_type}"));
+                set_error(format!("invalid time_series_type {}", f.time_series_type));
                 return Err(INFRASTORE_ERR_INVALID_PARAMETER);
             }
         }
     }
-    match unsafe { cstr_to_optional_string(name) } {
-        Ok(Some(n)) => filter = filter.name(n),
-        Ok(None) => {}
-        Err(c) => {
-            set_error("name is not valid UTF-8");
-            return Err(c);
+    for (ptr, field, set) in [
+        (f.name, "name", 0u8),
+        (f.name_glob, "name_glob", 1),
+        (f.component_field, "component_field", 2),
+    ] {
+        match unsafe { cstr_to_optional_string(ptr) } {
+            Ok(Some(v)) => {
+                out = match set {
+                    0 => out.name(v),
+                    1 => out.name_glob(v),
+                    _ => out.component_field(v),
+                }
+            }
+            Ok(None) => {}
+            Err(c) => {
+                set_error(format!("{field} is not valid UTF-8"));
+                return Err(c);
+            }
         }
     }
-    match unsafe { cstr_to_optional_string(name_glob) } {
-        Ok(Some(g)) => filter = filter.name_glob(g),
-        Ok(None) => {}
-        Err(c) => {
-            set_error("name_glob is not valid UTF-8");
-            return Err(c);
-        }
+    if let Some(p) = unsafe { cstr_to_optional_period(f.resolution) }? {
+        out = out.resolution(p);
     }
-    match unsafe { cstr_to_optional_period(resolution) } {
-        Ok(Some(p)) => filter = filter.resolution(p),
-        Ok(None) => {}
-        Err(c) => return Err(c),
+    if let Some(p) = unsafe { cstr_to_optional_period(f.interval) }? {
+        out = out.interval(p);
     }
-    match unsafe { cstr_to_optional_period(interval) } {
-        Ok(Some(p)) => filter = filter.interval(p),
-        Ok(None) => {}
-        Err(c) => return Err(c),
+    if f.has_zoneless {
+        out = out.zoneless(f.zoneless);
     }
-    match unsafe { cstr_to_optional_string(component_field) } {
-        Ok(Some(f)) => filter = filter.component_field(f),
-        Ok(None) => {}
-        Err(c) => {
-            set_error("component_field is not valid UTF-8");
-            return Err(c);
-        }
+    let features = unsafe { parse_features_json(f.features_json) }?;
+    if !features.is_empty() || f.features_exact {
+        out = if f.features_exact {
+            out.exact_features(features)
+        } else {
+            out.features(features)
+        };
     }
-    if let Some(zoneless) = zoneless_filter(zoneless)? {
-        filter = filter.zoneless(zoneless);
+    if f.has_initial_timestamp {
+        let Some(t) = unix_ms_to_datetime(f.initial_timestamp_ms) else {
+            set_error(format!(
+                "invalid initial_timestamp_ms: {}",
+                f.initial_timestamp_ms
+            ));
+            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
+        };
+        out = out.initial_timestamp(t);
     }
-    let features = unsafe { parse_features_json(features_json) }?;
-    if !features.is_empty() {
-        filter = filter.features(features);
+    if f.has_length {
+        out = out.length(f.length as usize);
     }
-    filter = apply_grid_filter(
-        filter,
-        has_initial_timestamp,
-        initial_timestamp_ms,
-        has_length,
-        length,
-    )?;
-    Ok(filter)
+    Ok(out)
 }
 
-/// Serialize a key's `Features` map to a JSON object string of plain scalar
-/// values (the same shape `parse_features_json` accepts), so it round-trips back
-/// through the attribute-addressed entry points. An empty map serializes to
-/// `"{}"`.
-fn features_to_json(features: &core_lib::Features) -> String {
+/// [`build_filter`] for the two reader builders, whose type is a positional
+/// argument: a record that also names a type must agree with it, since a
+/// silently overridden type would read rows the caller did not ask for.
+///
+/// # Safety
+///
+/// As [`build_filter`].
+unsafe fn reader_filter(
+    filter: *const InfraStoreFilter,
+    time_series_type: i32,
+) -> Result<core_lib::ListFilter, i32> {
+    if let Some(f) = unsafe { filter.as_ref() }
+        && f.has_time_series_type
+        && f.time_series_type != time_series_type
+    {
+        set_error(format!(
+            "filter names time_series_type {} but the reader is built for {time_series_type}",
+            f.time_series_type
+        ));
+        return Err(INFRASTORE_ERR_INVALID_PARAMETER);
+    }
+    unsafe { build_filter(filter) }
+}
+
+/// A row's `Features` map as a JSON object of plain scalar values — the shape
+/// `parse_features_json` accepts, so a listed row's features round-trip into a
+/// filter. An empty map is `{}`.
+fn features_to_json(features: &core_lib::Features) -> Value {
     let mut map = serde_json::Map::with_capacity(features.len());
     for (k, v) in features {
         let jv = match v {
@@ -5747,7 +5029,7 @@ fn features_to_json(features: &core_lib::Features) -> String {
         };
         map.insert(k.clone(), jv);
     }
-    Value::Object(map).to_string()
+    Value::Object(map)
 }
 
 /// Release a `u64` dims buffer returned by `infrastore_bulk_result_get_forecast`.
@@ -5759,52 +5041,6 @@ fn features_to_json(features: &core_lib::Features) -> String {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_buffer_free_u64(ptr: *mut u64, len: u64) {
     unsafe { free_raw_buffer(ptr, len) };
-}
-
-/// True iff a time series of `ts_type` with the given attributes exists.
-///
-/// # Safety
-///
-/// `features_json` may be null.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_store_has_typed(
-    handle: *const InfraStoreHandle,
-    owner_id: i64,
-    owner_category: i32,
-    name: *const c_char,
-    ts_type: i32,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    out_present: *mut bool,
-) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    if out_present.is_null() {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe {
-        build_typed_key_from_attrs(
-            owner_id,
-            owner_category,
-            name,
-            ts_type,
-            resolution,
-            interval,
-            features_json,
-        )
-    } {
-        Ok(filter) => filter,
-        Err(c) => return c,
-    };
-    match store.inner.has_any_time_series(filter) {
-        Ok(b) => {
-            unsafe { *out_present = b };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
 }
 
 /// Copy the association filed under `src_id` onto another owner, optionally
@@ -6940,30 +6176,16 @@ pub unsafe extern "C" fn infrastore_store_remove_store_attribute(
 ///
 /// # Safety
 ///
-/// The scalar filter flags/values are plain scalars; `name`, `resolution`, `interval`,
-/// `features_json`; `component_field` must each be null or a null-terminated UTF-8 string.
-/// `out_json` must be valid for writing one pointer and `out_len` for writing one `u64`; on
-/// success `*out_json` must be released exactly once with `infrastore_string_free`.
+/// `handle` must reference a live store. `filter` must be null or point to a
+/// valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+/// duration of the call.
+/// `out_json` must be valid for writing one pointer and `out_len` for writing
+/// one `u64`; on success `*out_json` must be released exactly once with
+/// `infrastore_string_free`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openapi(
     handle: *const InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    has_time_series_type: bool,
-    time_series_type: i32,
-    name: *const c_char,
-    resolution: *const c_char,
-    interval: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
+    filter: *const InfraStoreFilter,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -6973,27 +6195,7 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
         set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let filter = match unsafe {
-        build_list_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            has_time_series_type,
-            time_series_type,
-            name,
-            std::ptr::null(),
-            resolution,
-            interval,
-            features_json,
-            component_field,
-            zoneless,
-            has_initial_timestamp,
-            initial_timestamp_ms,
-            has_length,
-            length,
-        )
-    } {
+    let filter = match unsafe { build_filter(filter) } {
         Ok(f) => f,
         Err(c) => return c,
     };
@@ -7312,121 +6514,6 @@ pub struct InfraStoreForecastReaderHandle {
     inner: core_lib::ForecastReader,
 }
 
-/// Apply the grid-filter pair — a static series' own `initial_timestamp` and
-/// `length` — to a filter under construction.
-///
-/// Shared by both FFI filter builders because it is one predicate wherever a
-/// filter is taken. Deliberately *not* spelling-checked: a filter selects rather
-/// than reads, so an anchor no row was written with is an empty result, not an
-/// error. Pair it with `zoneless` to pick a coherence group.
-fn apply_grid_filter(
-    filter: core_lib::ListFilter,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
-) -> Result<core_lib::ListFilter, i32> {
-    let mut filter = filter;
-    if has_initial_timestamp {
-        let Some(t) = unix_ms_to_datetime(initial_timestamp_ms) else {
-            set_error(format!(
-                "invalid initial_timestamp_ms: {initial_timestamp_ms}"
-            ));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        };
-        filter = filter.initial_timestamp(t);
-    }
-    if has_length {
-        filter = filter.length(length as usize);
-    }
-    Ok(filter)
-}
-
-/// Build a [`core_lib::ListFilter`] from the reader build arguments shared by
-/// both readers (owner / category / name / name_glob / resolution / features /
-/// component_field). The time-series type is set by the caller, not here.
-///
-/// # Safety
-///
-/// `name`, `name_glob`, `component_field`, and `features_json` must each be null
-/// or a null-terminated UTF-8 string; `resolution` must be null or a
-/// null-terminated ISO-8601 period.
-#[allow(clippy::too_many_arguments)]
-unsafe fn reader_filter(
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
-) -> Result<core_lib::ListFilter, i32> {
-    let mut filter = core_lib::ListFilter::new();
-    if has_owner {
-        filter = filter.owner_id(owner_id);
-    }
-    if has_owner_category {
-        let category = match owner_category {
-            0 => core_lib::OwnerCategory::Component,
-            1 => core_lib::OwnerCategory::SupplementalAttribute,
-            other => {
-                set_error(format!("invalid owner_category {other}"));
-                return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-            }
-        };
-        filter = filter.owner_category(category);
-    }
-    match unsafe { cstr_to_optional_string(name) } {
-        Ok(Some(n)) => filter = filter.name(n),
-        Ok(None) => {}
-        Err(c) => {
-            set_error("name is not valid UTF-8");
-            return Err(c);
-        }
-    }
-    match unsafe { cstr_to_optional_string(name_glob) } {
-        Ok(Some(g)) => filter = filter.name_glob(g),
-        Ok(None) => {}
-        Err(c) => {
-            set_error("name_glob is not valid UTF-8");
-            return Err(c);
-        }
-    }
-    if let Some(p) = unsafe { cstr_to_optional_period(resolution)? } {
-        filter = filter.resolution(p);
-    }
-    match unsafe { cstr_to_optional_string(component_field) } {
-        Ok(Some(f)) => filter = filter.component_field(f),
-        Ok(None) => {}
-        Err(c) => {
-            set_error("component_field is not valid UTF-8");
-            return Err(c);
-        }
-    }
-    if let Some(zoneless) = zoneless_filter(zoneless)? {
-        filter = filter.zoneless(zoneless);
-    }
-    let features = unsafe { parse_features_json(features_json) }?;
-    if !features.is_empty() {
-        filter = filter.features(features);
-    }
-    filter = apply_grid_filter(
-        filter,
-        has_initial_timestamp,
-        initial_timestamp_ms,
-        has_length,
-        length,
-    )?;
-    Ok(filter)
-}
-
 /// Write `values` into `buf` (truncated to `cap` elements), always reporting the
 /// full length through `out_len`. Probe-then-fetch: call with `buf` null and
 /// `cap` 0 to learn the length first. Used for the small shape arrays.
@@ -7447,11 +6534,15 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 // ---- StaticReader ---------------------------------------------------------
 
 /// Build a [`InfraStoreStaticReaderHandle`] over the static series matching the
-/// filter. The filter arguments are `infrastore_store_list_metadata`'s, minus the
-/// interval (a static series has none) -- `name_glob` included.
+/// filter. The filter is `infrastore_store_list_metadata`'s in full, `name_glob`
+/// included; a static series stores no interval, so a filter that sets one
+/// matches nothing here.
 ///
-/// `time_series_type` is a `TimeSeriesType` discriminant and selects the two
-/// shapes a reader can take:
+/// `time_series_type` is a `TimeSeriesType` discriminant and selects the three
+/// shapes a reader can take. A reader is built for one type, so a filter whose
+/// own `has_time_series_type` names a different one is refused
+/// (`INFRASTORE_ERR_INVALID_PARAMETER`) rather than overridden; a record shared
+/// with a listing that set the same type passes.
 ///
 /// * `SingleTimeSeries` (0): `resolution` must be a non-empty ISO-8601 period —
 ///   one resolution per reader — and the matched series must share one grid
@@ -7493,28 +6584,16 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 ///
 /// # Safety
 ///
-/// `name` / `name_glob` / `resolution` / `features_json` / `component_field` -- every string
-/// argument -- must be null or valid null-terminated UTF-8; must stay readable for the duration
-/// of the call.
+/// `handle` must reference a live store. `filter` must be null or point to a
+/// valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+/// duration of the call.
+/// `out_reader` must be valid for writing one pointer; on success `*out_reader`
+/// must be released exactly once with `infrastore_static_reader_free`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_build_static_reader(
     handle: *const InfraStoreHandle,
     time_series_type: i32,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
+    filter: *const InfraStoreFilter,
     has_window_start: bool,
     window_start_ms: i64,
     window_start_zoneless: bool,
@@ -7541,28 +6620,10 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let filter = match unsafe {
-        reader_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            name,
-            name_glob,
-            resolution,
-            features_json,
-            component_field,
-            zoneless,
-            has_initial_timestamp,
-            initial_timestamp_ms,
-            has_length,
-            length,
-        )
-    } {
-        Ok(f) => f,
+    let filter = match unsafe { reader_filter(filter, time_series_type) } {
+        Ok(f) => f.time_series_type(ts_type),
         Err(c) => return c,
     };
-    let filter = filter.time_series_type(ts_type);
     let start = if has_window_start {
         match unix_ms_to_datetime(window_start_ms) {
             Some(t) => Some(t),
@@ -8091,37 +7152,26 @@ pub unsafe extern "C" fn infrastore_static_reader_free(reader: *mut InfraStoreSt
 // ---- ForecastReader -------------------------------------------------------
 
 /// Build a [`InfraStoreForecastReaderHandle`] over the forecasts matching the filter.
-/// The filter arguments are `infrastore_store_list_metadata`'s, minus the interval --
-/// `name_glob` included.
-/// `time_series_type` must be a forecast type; a `Deterministic` reader also
-/// includes `DeterministicSingleTimeSeries`, matching the read request rule.
+/// The filter is `infrastore_store_list_metadata`'s in full, `name_glob` and
+/// `interval` included. `time_series_type` must be a forecast type; a
+/// `Deterministic` reader also includes `DeterministicSingleTimeSeries`,
+/// matching the read request rule. A filter whose own `has_time_series_type`
+/// names a different type is refused (`INFRASTORE_ERR_INVALID_PARAMETER`).
 /// `resolution` must be positive; matched forecasts must share one window
 /// timeline.
 ///
 /// # Safety
 ///
-/// `name` / `name_glob` / `resolution` / `features_json` / `component_field` -- every string
-/// argument -- must be null or valid null-terminated UTF-8; must stay readable for the duration
-/// of the call. Free the result with `infrastore_forecast_reader_free`.
+/// `handle` must reference a live store. `filter` must be null or point to a
+/// valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+/// duration of the call.
+/// `out_reader` must be valid for writing one pointer; on success `*out_reader`
+/// must be released exactly once with `infrastore_forecast_reader_free`.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
     handle: *const InfraStoreHandle,
-    has_owner: bool,
-    owner_id: i64,
-    has_owner_category: bool,
-    owner_category: i32,
     time_series_type: i32,
-    name: *const c_char,
-    name_glob: *const c_char,
-    resolution: *const c_char,
-    features_json: *const c_char,
-    component_field: *const c_char,
-    zoneless: i32,
-    has_initial_timestamp: bool,
-    initial_timestamp_ms: i64,
-    has_length: bool,
-    length: u64,
+    filter: *const InfraStoreFilter,
     out_reader: *mut *mut InfraStoreForecastReaderHandle,
 ) -> i32 {
     clear_error();
@@ -8143,28 +7193,10 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let mut filter = match unsafe {
-        reader_filter(
-            has_owner,
-            owner_id,
-            has_owner_category,
-            owner_category,
-            name,
-            name_glob,
-            resolution,
-            features_json,
-            component_field,
-            zoneless,
-            has_initial_timestamp,
-            initial_timestamp_ms,
-            has_length,
-            length,
-        )
-    } {
-        Ok(f) => f,
+    let filter = match unsafe { reader_filter(filter, time_series_type) } {
+        Ok(f) => f.time_series_type(ts_type),
         Err(c) => return c,
     };
-    filter = filter.time_series_type(ts_type);
     let reader = match store.inner.build_forecast_reader(filter) {
         Ok(r) => r,
         Err(e) => return map_core_error(e),
@@ -8583,22 +7615,10 @@ mod reader_ffi_tests {
             infrastore_store_build_static_reader(
                 &handle,
                 0,
-                // SingleTimeSeries
-                false,
-                0,
-                false,
-                0,
-                ptr::null(),
-                ptr::null(),
-                // name_glob
-                hour.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                -1,
-                false,
-                0,
-                false,
-                0,
+                &InfraStoreFilter {
+                    resolution: hour.as_ptr(),
+                    ..Default::default()
+                },
                 false,
                 0,
                 false,
@@ -8754,20 +7774,10 @@ mod reader_ffi_tests {
             infrastore_store_build_static_reader(
                 &handle,
                 0,
-                false,
-                0,
-                false,
-                0,
-                ptr::null(),
-                ptr::null(),
-                hour.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                -1,
-                false,
-                0,
-                false,
-                0,
+                &InfraStoreFilter {
+                    resolution: hour.as_ptr(),
+                    ..Default::default()
+                },
                 has_ts,
                 ms,
                 false,
@@ -8858,23 +7868,11 @@ mod reader_ffi_tests {
         let rc = unsafe {
             infrastore_store_build_forecast_reader(
                 &handle,
-                false,
-                0,
-                false,
-                0,
-                2,
-                // Deterministic
-                ptr::null(),
-                ptr::null(),
-                // name_glob
-                hour.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                -1,
-                false,
-                0,
-                false,
-                0,
+                2, // Deterministic
+                &InfraStoreFilter {
+                    resolution: hour.as_ptr(),
+                    ..Default::default()
+                },
                 &mut reader,
             )
         };
@@ -9135,6 +8133,142 @@ mod abi_tests {
         vals.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
 
+    /// Commit a one-item batch and hand back the id it was filed under.
+    ///
+    /// The C surface carries no per-type store-level add — `infrastore_batch_*`
+    /// plus `infrastore_store_add_batch` is the one write path, and the two
+    /// wrappers below exist so the tests still read as the single add they are
+    /// testing. They take the batch function's own arguments, so an error code
+    /// here is the code a caller would see.
+    unsafe fn abi_commit_one(
+        store: *mut InfraStoreHandle,
+        batch: *mut InfraStoreBatchHandle,
+        out_id: *mut i64,
+    ) -> i32 {
+        let mut len = 0u64;
+        let mut ids: *mut i64 = ptr::null_mut();
+        let rc = unsafe { infrastore_store_add_batch(store, batch, &mut len, &mut ids) };
+        unsafe { infrastore_batch_free(batch) };
+        if rc == INFRASTORE_OK {
+            assert_eq!(len, 1, "a one-item batch files exactly one row");
+            if !out_id.is_null() {
+                unsafe { *out_id = *ids };
+            }
+            unsafe { infrastore_buffer_free_i64(ids, len) };
+        }
+        rc
+    }
+
+    /// One `SingleTimeSeries` through the batch path. See [`abi_commit_one`].
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn abi_add_single(
+        store: *mut InfraStoreHandle,
+        owner_id: i64,
+        owner_type: *const c_char,
+        owner_category: i32,
+        name: *const c_char,
+        initial_ts_unix_ms: i64,
+        resolution: *const c_char,
+        element_type: *const c_char,
+        ndims: u64,
+        dims_ptr: *const u64,
+        data_ptr: *const u8,
+        data_byte_len: u64,
+        application_data: *const c_char,
+        features_json: *const c_char,
+        units: *const c_char,
+        quantity_kind: *const c_char,
+        unit_system: *const c_char,
+        time_reference: *const c_char,
+        component_field: *const c_char,
+        out_id: *mut i64,
+    ) -> i32 {
+        let batch = unsafe { infrastore_batch_new() };
+        let rc = unsafe {
+            infrastore_batch_add_single(
+                batch,
+                owner_id,
+                owner_type,
+                owner_category,
+                name,
+                initial_ts_unix_ms,
+                resolution,
+                element_type,
+                ndims,
+                dims_ptr,
+                data_ptr,
+                data_byte_len,
+                application_data,
+                features_json,
+                units,
+                quantity_kind,
+                unit_system,
+                time_reference,
+                component_field,
+            )
+        };
+        if rc != INFRASTORE_OK {
+            unsafe { infrastore_batch_free(batch) };
+            return rc;
+        }
+        unsafe { abi_commit_one(store, batch, out_id) }
+    }
+
+    /// One `NonSequentialTimeSeries` through the batch path.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn abi_add_non_sequential(
+        store: *mut InfraStoreHandle,
+        owner_id: i64,
+        owner_type: *const c_char,
+        owner_category: i32,
+        name: *const c_char,
+        timestamps_unix_ms: *const i64,
+        timestamps_len: u64,
+        element_type: *const c_char,
+        ndims: u64,
+        dims_ptr: *const u64,
+        data_ptr: *const u8,
+        data_byte_len: u64,
+        application_data: *const c_char,
+        features_json: *const c_char,
+        units: *const c_char,
+        quantity_kind: *const c_char,
+        unit_system: *const c_char,
+        time_reference: *const c_char,
+        component_field: *const c_char,
+        out_id: *mut i64,
+    ) -> i32 {
+        let batch = unsafe { infrastore_batch_new() };
+        let rc = unsafe {
+            infrastore_batch_add_non_sequential(
+                batch,
+                owner_id,
+                owner_type,
+                owner_category,
+                name,
+                timestamps_unix_ms,
+                timestamps_len,
+                element_type,
+                ndims,
+                dims_ptr,
+                data_ptr,
+                data_byte_len,
+                application_data,
+                features_json,
+                units,
+                quantity_kind,
+                unit_system,
+                time_reference,
+                component_field,
+            )
+        };
+        if rc != INFRASTORE_OK {
+            unsafe { infrastore_batch_free(batch) };
+            return rc;
+        }
+        unsafe { abi_commit_one(store, batch, out_id) }
+    }
+
     /// Add through the ABI without asserting success. Returns the catalog id
     /// the write was filed under, which is how every read addresses it.
     fn abi_try_add(
@@ -9151,7 +8285,7 @@ mod abi_tests {
         let dims = [length as u64];
         let mut id = 0i64;
         let rc = unsafe {
-            infrastore_store_add_single(
+            abi_add_single(
                 store,
                 owner,
                 owner_type.as_ptr(),
@@ -9191,23 +8325,13 @@ mod abi_tests {
             unsafe {
                 infrastore_store_list_metadata(
                     store,
-                    true,
-                    owner,
-                    true,
-                    0,
-                    false,
-                    0,
-                    name_c.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        has_owner_id: true,
+                        owner_id: owner,
+                        has_owner_category: true,
+                        name: name_c.as_ptr(),
+                        ..Default::default()
+                    },
                     &mut out,
                     &mut len,
                 )
@@ -9254,7 +8378,7 @@ mod abi_tests {
         let mut id = 0i64;
         assert_eq!(
             unsafe {
-                infrastore_store_add_non_sequential(
+                abi_add_non_sequential(
                     store,
                     7,
                     owner_type.as_ptr(),
@@ -9652,22 +8776,10 @@ mod abi_tests {
                 infrastore_store_build_static_reader(
                     ptr::null(),
                     0,
-                    // SingleTimeSeries
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    // name_glob
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        resolution: res.as_ptr(),
+                        ..Default::default()
+                    },
                     false,
                     0,
                     false,
@@ -9689,22 +8801,10 @@ mod abi_tests {
                 infrastore_store_build_static_reader(
                     store,
                     0,
-                    // SingleTimeSeries
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    // name_glob
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        resolution: res.as_ptr(),
+                        ..Default::default()
+                    },
                     false,
                     0,
                     false,
@@ -9809,24 +8909,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_list_metadata(
                     store,
-                    false,
-                    0,
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    // name_glob
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter::default(),
                     ptr::null_mut(),
                     ptr::null_mut(),
                 )
@@ -9893,23 +8976,7 @@ mod abi_tests {
     fn name_glob_filters_every_c_abi_surface() {
         type ListFn = unsafe extern "C" fn(
             *const InfraStoreHandle,
-            bool,
-            i64,
-            bool,
-            i32,
-            bool,
-            i32,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            i32,
-            bool,
-            i64,
-            bool,
-            u64,
+            *const InfraStoreFilter,
             *mut *mut c_char,
             *mut u64,
         ) -> i32;
@@ -9926,23 +8993,10 @@ mod abi_tests {
             let rc = unsafe {
                 f(
                     store,
-                    false,
-                    0,
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    pattern.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        name_glob: pattern.as_ptr(),
+                        ..Default::default()
+                    },
                     &mut out,
                     &mut len,
                 )
@@ -9990,23 +9044,10 @@ mod abi_tests {
             unsafe {
                 infrastore_store_has_any_by_filter(
                     store,
-                    false,
-                    0,
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    glob.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        name_glob: glob.as_ptr(),
+                        ..Default::default()
+                    },
                     &mut present,
                 )
             },
@@ -10014,8 +9055,7 @@ mod abi_tests {
         );
         assert!(present);
 
-        // The reader builder, whose filter is built by `reader_filter` rather
-        // than `build_list_filter` -- a second decode of the same argument.
+        // The reader builder decodes the same record through `build_filter`.
         let hour = CString::new(HOUR).unwrap();
         let mut reader: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
         assert_eq!(
@@ -10023,21 +9063,11 @@ mod abi_tests {
                 infrastore_store_build_static_reader(
                     store,
                     0,
-                    // SingleTimeSeries
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    glob.as_ptr(),
-                    hour.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        name_glob: glob.as_ptr(),
+                        resolution: hour.as_ptr(),
+                        ..Default::default()
+                    },
                     false,
                     0,
                     false,
@@ -10082,23 +9112,10 @@ mod abi_tests {
             unsafe {
                 infrastore_store_remove_by_filter(
                     store,
-                    false,
-                    0,
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    glob.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        name_glob: glob.as_ptr(),
+                        ..Default::default()
+                    },
                     &mut removed,
                 )
             },
@@ -10112,6 +9129,66 @@ mod abi_tests {
         );
         assert_eq!(total, 1, "solar_ghi is what is left");
 
+        unsafe { infrastore_store_free(store) };
+    }
+
+    /// A reader is built for one type, and the shared filter record can name
+    /// one too. The two must agree: a record reused from a listing that named
+    /// another type must not be silently re-typed into the reader's.
+    #[test]
+    fn reader_refuses_a_filter_naming_another_type() {
+        let store = abi_create_in_memory();
+        let _ = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        let hour = CString::new(HOUR).unwrap();
+        let mut reader: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
+        let build = |type_code: i32, reader: &mut *mut InfraStoreStaticReaderHandle| unsafe {
+            infrastore_store_build_static_reader(
+                store,
+                0,
+                &InfraStoreFilter {
+                    has_time_series_type: true,
+                    time_series_type: type_code,
+                    resolution: hour.as_ptr(),
+                    ..Default::default()
+                },
+                false,
+                0,
+                false,
+                false,
+                0,
+                reader,
+            )
+        };
+        assert_eq!(
+            build(3, &mut reader),
+            INFRASTORE_ERR_INVALID_PARAMETER,
+            "Deterministic vs Single"
+        );
+        assert!(reader.is_null());
+        assert!(
+            last_error().contains("time_series_type"),
+            "{}",
+            last_error()
+        );
+        assert_eq!(build(0, &mut reader), INFRASTORE_OK, "the same type passes");
+        unsafe { infrastore_static_reader_free(reader) };
+        unsafe { infrastore_store_free(store) };
+    }
+
+    /// The empty filter matches everything, and removal is the one destructive
+    /// export it reaches: a null record removes every series, as documented.
+    #[test]
+    fn null_filter_removes_every_series() {
+        let store = abi_create_in_memory();
+        for name in ["a", "b", "c"] {
+            let _ = abi_add_f64(store, 1, name, &[1.0, 2.0]);
+        }
+        let mut removed = 0u64;
+        assert_eq!(
+            unsafe { infrastore_store_remove_by_filter(store, ptr::null(), &mut removed) },
+            INFRASTORE_OK
+        );
+        assert_eq!(removed, 3);
         unsafe { infrastore_store_free(store) };
     }
 
@@ -10207,29 +9284,16 @@ mod abi_tests {
         let glob_ptr = bad_glob.as_ptr() as *const c_char;
         let res = CString::new(HOUR).unwrap();
 
-        // A catalog filter, via `build_list_filter`.
+        // A catalog filter, via `build_filter`.
         let mut out: *mut c_char = ptr::null_mut();
         let mut len = 0u64;
         let rc = unsafe {
             infrastore_store_list_metadata(
                 store,
-                false,
-                0,
-                false,
-                0,
-                false,
-                0,
-                ptr::null(),
-                glob_ptr,
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                -1,
-                false,
-                0,
-                false,
-                0,
+                &InfraStoreFilter {
+                    name_glob: glob_ptr,
+                    ..Default::default()
+                },
                 &mut out,
                 &mut len,
             )
@@ -10242,27 +9306,17 @@ mod abi_tests {
             last_error()
         );
 
-        // A reader builder, via `reader_filter`.
+        // A reader builder, via `reader_filter` over `build_filter`.
         let mut reader: *mut InfraStoreStaticReaderHandle = ptr::null_mut();
         let rc = unsafe {
             infrastore_store_build_static_reader(
                 store,
                 0,
-                // SingleTimeSeries
-                false,
-                0,
-                false,
-                0,
-                ptr::null(),
-                glob_ptr,
-                res.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                -1,
-                false,
-                0,
-                false,
-                0,
+                &InfraStoreFilter {
+                    name_glob: glob_ptr,
+                    resolution: res.as_ptr(),
+                    ..Default::default()
+                },
                 false,
                 0,
                 false,
@@ -10284,23 +9338,10 @@ mod abi_tests {
         let rc = unsafe {
             infrastore_store_list_metadata(
                 store,
-                false,
-                0,
-                false,
-                0,
-                false,
-                0,
-                ptr::null(),
-                good.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                ptr::null(),
-                -1,
-                false,
-                0,
-                false,
-                0,
+                &InfraStoreFilter {
+                    name_glob: good.as_ptr(),
+                    ..Default::default()
+                },
                 &mut out,
                 &mut len,
             )
@@ -10331,7 +9372,7 @@ mod abi_tests {
         let dims = [2u64];
         let mut id = 0i64;
         let rc = unsafe {
-            infrastore_store_add_single(
+            abi_add_single(
                 store,
                 1,
                 owner_type.as_ptr(),
@@ -10390,7 +9431,7 @@ mod abi_tests {
         let dims = [2u64];
         let mut id = 0i64;
         let rc = unsafe {
-            infrastore_store_add_single(
+            abi_add_single(
                 store,
                 1,
                 owner_type.as_ptr(),
@@ -10673,7 +9714,7 @@ mod abi_tests {
         let mut id = 0i64;
         assert_eq!(
             unsafe {
-                infrastore_store_add_single(
+                abi_add_single(
                     store,
                     1,
                     owner_type.as_ptr(),
@@ -10705,22 +9746,10 @@ mod abi_tests {
                 infrastore_store_build_static_reader(
                     store,
                     0,
-                    // SingleTimeSeries
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    // name_glob
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        resolution: res.as_ptr(),
+                        ..Default::default()
+                    },
                     false,
                     0,
                     false,
@@ -10788,22 +9817,10 @@ mod abi_tests {
                 infrastore_store_build_static_reader(
                     store,
                     0,
-                    // SingleTimeSeries
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    // name_glob
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter {
+                        resolution: res.as_ptr(),
+                        ..Default::default()
+                    },
                     false,
                     0,
                     false,
@@ -10867,23 +9884,11 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_forecast_reader(
                     det_store,
-                    false,
-                    0,
-                    false,
-                    0,
-                    2,
-                    // Deterministic
-                    ptr::null(),
-                    ptr::null(),
-                    // name_glob
-                    res.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    2, // Deterministic
+                    &InfraStoreFilter {
+                        resolution: res.as_ptr(),
+                        ..Default::default()
+                    },
                     &mut freader,
                 )
             },
@@ -11052,24 +10057,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_list_metadata(
                     store,
-                    false,
-                    0,
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    // name_glob
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter::default(),
                     &mut out,
                     &mut len,
                 )
@@ -11646,22 +10634,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_export_time_series_associations_openapi(
                     source,
-                    false,
-                    0,
-                    false,
-                    0,
-                    false,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null(),
-                    -1,
-                    false,
-                    0,
-                    false,
-                    0,
+                    &InfraStoreFilter::default(),
                     &mut json,
                     &mut json_len,
                 )

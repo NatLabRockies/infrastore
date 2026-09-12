@@ -17,7 +17,7 @@ use std::time::Duration as StdDuration;
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store, TimeRange,
-    TimeReference, TimeSeriesData, TypedArray, create_store,
+    TimeReference, TimeSeriesData, TypedArray,
 };
 use infrastore_server::client::RemoteClient;
 use infrastore_server::service::CatalogStoreService;
@@ -42,7 +42,7 @@ async fn spawn_server(store: Store) -> String {
 /// One hourly series per spelling, each under its own owner id so a filter can
 /// pick them apart.
 fn store_with_every_spelling() -> Store {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let values = TypedArray::from_f64(vec![4], &[1.0, 2.0, 3.0, 4.0]);
 
@@ -281,7 +281,7 @@ async fn a_ranged_bulk_read_cannot_span_both_coherence_groups() {
 /// there changes what the vector *means*, not just how it is labeled.
 #[tokio::test]
 async fn an_irregular_series_carries_its_spelling_too() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let stamps = vec![
         Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
         Utc.with_ymd_and_hms(2024, 1, 1, 5, 0, 0).unwrap(),

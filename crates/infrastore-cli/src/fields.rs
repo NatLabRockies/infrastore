@@ -15,15 +15,12 @@ use crate::parse;
 /// value is always one `info` or `-f json` away.
 pub const SHORT_HASH_LEN: usize = 12;
 
-/// Lowercase hex of a content hash, matching `hash_hex` in the core and the
-/// `time_series_readable` SQLite view.
-pub fn hash_hex(hash: &[u8; 32]) -> String {
-    infrastore_core::hash_hex(hash)
-}
-
 /// The leading [`SHORT_HASH_LEN`] characters of a content hash.
+///
+/// The full value is [`infrastore_core::hash_hex`], which is also what the
+/// `time_series_readable` SQLite view spells.
 pub fn short_hash(hash: &[u8; 32]) -> String {
-    let mut s = hash_hex(hash);
+    let mut s = infrastore_core::hash_hex(hash);
     s.truncate(SHORT_HASH_LEN);
     s
 }

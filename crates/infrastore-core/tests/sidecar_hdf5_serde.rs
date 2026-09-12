@@ -19,9 +19,8 @@ use sha2::{Digest, Sha256};
 
 use infrastore_core::{
     CatalogMode, Compression, Deterministic, Dtype, ElementType, Features, ListFilter,
-    OwnerCategory, ParentChildAssociation, ParentChildFilter, SingleTimeSeries, TimeSeriesData,
-    TimeSeriesType, TypedArray, array_hash, catalog_sqlite_path, create_store,
-    create_store_with_catalog, hash_hex, open_store,
+    OwnerCategory, ParentChildAssociation, ParentChildFilter, SingleTimeSeries, Store,
+    TimeSeriesData, TimeSeriesType, TypedArray, array_hash, catalog_sqlite_path, hash_hex,
 };
 
 /// SHA-256 of an empty `Features` map, reproducing the domain documented for
@@ -117,9 +116,13 @@ fn sidecar_reads_back_through_the_public_api() {
     // that *is* under test — the array datasets and the association rows — is
     // added below directly against the HDF5 file and the SQLite catalog.
     {
-        let mut store =
-            create_store_with_catalog(Some(&path), false, Compression::None, CatalogMode::Attached)
-                .unwrap();
+        let mut store = Store::create_with_catalog(
+            Some(&path),
+            false,
+            Compression::None,
+            CatalogMode::Attached,
+        )
+        .unwrap();
         store.flush().unwrap();
     }
 
@@ -225,7 +228,7 @@ fn sidecar_reads_back_through_the_public_api() {
     }
 
     // Deserialization: read the hand-built sidecar back through the public API.
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
 
     let report = store.verify_integrity().unwrap();
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
@@ -302,7 +305,7 @@ fn public_api_writes_the_documented_layout() {
     let forecast_values = forecast_values(horizon_len, count);
 
     let (static_hash, forecast_hash) = {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
 
         let single = SingleTimeSeries::new(
             initial_timestamp,

@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Dtype, ElementType, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, Period,
     PersistentTimeSeries, SingleTimeSeries, Store, TimeReference, TimeSeriesData,
-    TimeSeriesMetadata, TimeSeriesType, TypedArray, create_store,
+    TimeSeriesMetadata, TimeSeriesType, TypedArray,
 };
 use infrastore_parquet::partition::{PartitionKey, ValueKind, disambiguate, sanitize};
 use infrastore_parquet::table;
@@ -62,7 +62,7 @@ fn utc(data: TimeSeriesData) -> TimeSeriesData {
 /// Add every series to one store and hand back the `(row, values)` pairs the
 /// export takes, so what is exported is what a real read produces.
 fn stored(items: Vec<(i64, TimeSeriesData)>) -> Vec<(TimeSeriesMetadata, TimeSeriesData)> {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     read_back(&mut store, items)
 }
 
@@ -276,7 +276,7 @@ fn the_catalog_row_becomes_columns() {
     inner.component_field = Some("max_active_power".into());
     inner.application_data = Some(r#"{"k":1}"#.into());
 
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let mut features = Features::new();
     features.insert("model_year".into(), FeatureValue::Int(2030));
     let id = store

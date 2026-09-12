@@ -7,8 +7,8 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Compression, Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesId,
-    TimeSeriesType, TypedArray, create_store, create_store_with_compression, open_store,
+    Probabilistic, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesError,
+    TimeSeriesId, TimeSeriesType, TypedArray,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -25,7 +25,7 @@ fn persistent_round_trip() {
     let path = dir.path().join("store.h5");
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let s = series(2024, 24, 100.0);
         store
             .add_time_series(
@@ -41,7 +41,7 @@ fn persistent_round_trip() {
     }
 
     // Reopen and read back.
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let keys = store
         .list_metadata(
             ListFilter::new()
@@ -73,7 +73,7 @@ fn on_disk_persist_writes_afresh_and_leaves_the_source_usable() {
     let src = dir.path().join("store.h5");
     let dest = dir.path().join("copy.h5");
 
-    let mut store = create_store(Some(src.as_path()), false).unwrap();
+    let mut store = Store::create(Some(src.as_path()), false).unwrap();
     store
         .add_time_series(
             42,
@@ -114,7 +114,7 @@ fn on_disk_persist_writes_afresh_and_leaves_the_source_usable() {
     drop(store);
 
     // The copy is a complete, independent store holding the pre-persist state.
-    let copy = open_store(dest.as_path(), true).unwrap();
+    let copy = Store::open(dest.as_path(), true).unwrap();
     let copied = copy
         .list_metadata(
             ListFilter::new()
@@ -144,7 +144,7 @@ fn in_memory_persist_round_trip() {
     let path = dir.path().join("store.h5");
 
     {
-        let mut store = create_store(None, true).unwrap(); // in-memory
+        let mut store = Store::create(None, true).unwrap(); // in-memory
         let s = series(2024, 24, 100.0);
         store
             .add_time_series(
@@ -159,7 +159,7 @@ fn in_memory_persist_round_trip() {
         // in-memory store dropped; only the persisted files remain
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let keys = store
         .list_metadata(
             ListFilter::new()
@@ -190,7 +190,7 @@ fn in_memory_persist_preserves_forecast_window_reads() {
     let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
 
     {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         store
             .add_time_series(
                 1,
@@ -239,7 +239,7 @@ fn in_memory_persist_preserves_forecast_window_reads() {
         store.persist_to(&path).unwrap();
     }
 
-    let store = open_store(&path, false).unwrap();
+    let store = Store::open(&path, false).unwrap();
 
     // Forecast window reads work on the reopened store.
     let mut reader = store
@@ -309,7 +309,7 @@ fn compression_policies_round_trip() {
 
         {
             let mut store =
-                create_store_with_compression(Some(path.as_path()), false, compression).unwrap();
+                Store::create_with_compression(Some(path.as_path()), false, compression).unwrap();
             store
                 .add_time_series(
                     7,
@@ -325,7 +325,7 @@ fn compression_policies_round_trip() {
         // Reopen read-write and append a second series; this exercises the
         // restored-from-attribute compression path.
         {
-            let mut store = open_store(path.as_path(), false).unwrap();
+            let mut store = Store::open(path.as_path(), false).unwrap();
             // The policy is restored from the persisted file attribute.
             assert_eq!(store.compression(), compression, "{compression:?}");
             store
@@ -340,7 +340,7 @@ fn compression_policies_round_trip() {
             store.flush().unwrap();
         }
 
-        let store = open_store(path.as_path(), true).unwrap();
+        let store = Store::open(path.as_path(), true).unwrap();
         for (owner, base) in [(7i64, 100.0), (8, 200.0)] {
             let keys = store
                 .list_metadata(
@@ -374,7 +374,7 @@ fn read_only_open_works_on_write_protected_files() {
     let path = dir.path().join("store.h5");
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -397,7 +397,7 @@ fn read_only_open_works_on_write_protected_files() {
     }
 
     {
-        let mut store = open_store(path.as_path(), true).unwrap();
+        let mut store = Store::open(path.as_path(), true).unwrap();
         let keys = store
             .list_metadata(
                 ListFilter::new()
@@ -437,7 +437,7 @@ fn read_only_open_works_on_write_protected_files() {
 fn invalid_compression_level_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let err = create_store_with_compression(
+    let err = Store::create_with_compression(
         Some(path.as_path()),
         false,
         Compression::Deflate {
@@ -454,7 +454,7 @@ fn deduplication_persists() {
     let path = dir.path().join("store.h5");
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let s = series(2024, 24, 7.0);
         for owner in [1i64, 2, 3] {
             store
@@ -470,7 +470,7 @@ fn deduplication_persists() {
         store.flush().unwrap();
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     // Three associations exist…
     assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 3);
     // …but verify_integrity reads each only once at the array level — the
@@ -485,7 +485,7 @@ fn multiple_resolutions_separate_datasets() {
     let path = dir.path().join("store.h5");
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
 
@@ -511,7 +511,7 @@ fn multiple_resolutions_separate_datasets() {
         store.flush().unwrap();
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let resolutions = store.get_resolutions(None).unwrap();
     assert_eq!(resolutions.len(), 3);
     let report = store.verify_integrity().unwrap();
@@ -532,7 +532,7 @@ fn time_range_slicing_through_disk() {
     let s = SingleTimeSeries::new(initial, resolution, data, "load");
 
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let key = store
             .add_time_series(
                 1,
@@ -546,7 +546,7 @@ fn time_range_slicing_through_disk() {
         key
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let start = initial + Duration::hours(3);
     let end = initial + Duration::hours(7);
     let got = store
@@ -579,7 +579,7 @@ fn spill_into_new_dataset_past_capacity() {
     let total = DEFAULT_COLS_PER_DATASET + 1;
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         for i in 0..total {
             let vals = [i as f64, i as f64 + 1.0, i as f64 + 2.0, i as f64 + 3.0];
             let data = TypedArray::from_f64(vec![4], &vals);
@@ -598,7 +598,7 @@ fn spill_into_new_dataset_past_capacity() {
     }
 
     // Reopen, sample the first and the last association, and verify integrity.
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let counts = store.get_time_series_counts().unwrap();
     assert_eq!(counts.static_time_series as usize, total);
 
@@ -643,7 +643,7 @@ fn bulk_add_session_writes_block_and_round_trips() {
     // earlier series (different owner) to exercise the block writer's dedup.
     let n = 50usize;
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let mut bulk = store.bulk_add();
         for i in 0..n {
             bulk.add(
@@ -669,7 +669,7 @@ fn bulk_add_session_writes_block_and_round_trips() {
     }
 
     // Reopen and verify every series reads back, including the deduped duplicate.
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     assert_eq!(
         store.get_time_series_counts().unwrap().static_time_series as usize,
         n + 1
@@ -716,7 +716,7 @@ fn bulk_add_dropped_without_commit_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("discard.h5");
 
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     {
         let mut bulk = store.bulk_add();
         bulk.add(
@@ -743,7 +743,7 @@ fn bulk_read_matches_get_time_series_across_types() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let mut bulk = store.bulk_add();
         // A standalone series first, so the packed fast-path and the standalone
         // fallback interleave and bulk_read must keep input order.
@@ -774,7 +774,7 @@ fn bulk_read_matches_get_time_series_across_types() {
         store.flush().unwrap();
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let mut keys = Vec::new();
     for owner in 0..=(n as i64) {
         let k = store
@@ -818,7 +818,7 @@ fn compact_rewrites_the_file_and_reports_reclaimed_slots() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
 
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     // Three distinct arrays in the same family.
     let s1 = series(2024, 8, 1.0);
     let s2 = series(2024, 8, 100.0);
@@ -893,7 +893,7 @@ fn data_format_version_is_recorded() {
     let path = dir.path().join("store.h5");
 
     {
-        let _ = create_store(Some(path.as_path()), false).unwrap();
+        let _ = Store::create(Some(path.as_path()), false).unwrap();
     }
     // Open the file with hdf5-metno directly to read the attribute.
     let f = hdf5_metno::File::open(&path).unwrap();
@@ -918,7 +918,7 @@ fn disk_roundtrips_multidim_element_tuples() {
     let s = SingleTimeSeries::new(initial, resolution, data.clone(), "load");
 
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let key = store
             .add_time_series(
                 1,
@@ -932,7 +932,7 @@ fn disk_roundtrips_multidim_element_tuples() {
         key
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let got = store
         .read_by_id(key, infrastore_core::ReadWindow::full())
         .unwrap();
@@ -969,7 +969,7 @@ fn non_sequential_persistent_round_trip() {
     ];
     let data = TypedArray::from_f64(vec![3], &[1.5, 2.5, 3.5]);
     let key = {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         let series =
             NonSequentialTimeSeries::new(timestamps.clone(), data.clone(), "events").unwrap();
         let key = store
@@ -985,7 +985,7 @@ fn non_sequential_persistent_round_trip() {
         key
     };
 
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     let got = store
         .read_by_id(key, infrastore_core::ReadWindow::full())
         .unwrap();
@@ -1004,7 +1004,7 @@ fn opening_a_store_from_an_older_format_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -1021,7 +1021,7 @@ fn opening_a_store_from_an_older_format_is_rejected() {
     // by an older build.
     set_format_attr(&path, "0.9.0");
 
-    let Err(err) = open_store(path.as_path(), true) else {
+    let Err(err) = Store::open(path.as_path(), true) else {
         panic!("expected an older-format store to be rejected");
     };
     match err {
@@ -1048,7 +1048,7 @@ fn opening_an_older_format_store_for_writing_is_rejected_before_the_catalog_ddl_
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -1079,7 +1079,7 @@ fn opening_an_older_format_store_for_writing_is_rejected_before_the_catalog_ddl_
         .unwrap();
     }
 
-    let Err(err) = open_store(path.as_path(), false) else {
+    let Err(err) = Store::open(path.as_path(), false) else {
         panic!("expected an older-format store to be rejected for writing");
     };
     match err {
@@ -1102,7 +1102,7 @@ fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesId) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let key = store
             .add_time_series(
                 1,
@@ -1168,7 +1168,7 @@ fn verify_integrity_reports_a_hash_mismatch_when_stored_bytes_are_corrupted() {
         ds.write_raw(&vals).unwrap();
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let report = store.verify_integrity().unwrap();
     assert!(
         !report.ok(),
@@ -1202,7 +1202,7 @@ fn verify_integrity_reports_a_catalog_hash_that_names_no_stored_array() {
         assert_eq!(n, 1, "one association to corrupt");
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let report = store.verify_integrity().unwrap();
     assert!(!report.ok(), "a dangling catalog reference is corruption");
     assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
@@ -1238,7 +1238,7 @@ fn verify_integrity_keeps_going_past_a_catalog_row_it_cannot_use() {
         .unwrap();
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let report = store.verify_integrity().unwrap();
     assert!(!report.ok());
     assert!(
@@ -1262,7 +1262,7 @@ fn opening_a_store_whose_sqlite_half_is_missing_errors() {
     let (_dir, path, _key) = store_on_disk();
     std::fs::remove_file(sqlite_path_of(&path)).unwrap();
 
-    let err = open_store(path.as_path(), false)
+    let err = Store::open(path.as_path(), false)
         .err()
         .expect("a store missing its catalog must not open");
     assert!(
@@ -1280,7 +1280,7 @@ fn opening_a_store_whose_sqlite_half_is_missing_read_only_errors() {
     let (_dir, path, _key) = store_on_disk();
     std::fs::remove_file(sqlite_path_of(&path)).unwrap();
 
-    let Err(err) = open_store(path.as_path(), true) else {
+    let Err(err) = Store::open(path.as_path(), true) else {
         panic!("a read-only open with no catalog must fail");
     };
     assert!(
@@ -1296,7 +1296,7 @@ fn opening_a_zero_byte_file_is_rejected() {
     let path = dir.path().join("store.h5");
     std::fs::write(&path, b"").unwrap();
 
-    let Err(err) = open_store(path.as_path(), true) else {
+    let Err(err) = Store::open(path.as_path(), true) else {
         panic!("a zero-byte file is not a store");
     };
     // It is not an HDF5 file at all, so the failure comes from the backend
@@ -1318,7 +1318,7 @@ fn opening_a_truncated_file_is_rejected() {
     std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
 
     assert!(
-        open_store(truncated.as_path(), true).is_err(),
+        Store::open(truncated.as_path(), true).is_err(),
         "a truncated store file must not open"
     );
 }
@@ -1329,7 +1329,7 @@ fn opening_a_directory_as_a_store_is_rejected() {
     let subdir = dir.path().join("not_a_store.h5");
     std::fs::create_dir(&subdir).unwrap();
 
-    let Err(err) = open_store(subdir.as_path(), true) else {
+    let Err(err) = Store::open(subdir.as_path(), true) else {
         panic!("a directory is not a store");
     };
     assert!(!err.to_string().is_empty());
@@ -1347,7 +1347,7 @@ fn opening_a_nonexistent_path_is_rejected_as_a_missing_file() {
     let missing = dir.path().join("does_not_exist.h5");
 
     for read_only in [true, false] {
-        let Err(err) = open_store(missing.as_path(), read_only) else {
+        let Err(err) = Store::open(missing.as_path(), read_only) else {
             panic!("expected a missing path to be rejected (read_only={read_only})");
         };
         match err {
@@ -1375,7 +1375,7 @@ fn opening_a_store_from_a_newer_format_is_rejected() {
     let (_dir, path, _key) = store_on_disk();
     set_format_attr(&path, "99.0.0");
 
-    let Err(err) = open_store(path.as_path(), true) else {
+    let Err(err) = Store::open(path.as_path(), true) else {
         panic!("expected a newer-format store to be rejected");
     };
     match err {
@@ -1411,7 +1411,7 @@ fn opening_a_store_with_no_format_attribute_is_rejected_as_unspecified() {
     // against the HDF5 half first (see
     // `the_format_check_runs_before_the_catalog_half_is_opened`), so this
     // reports the missing attribute either way.
-    let Err(err) = open_store(path.as_path(), false) else {
+    let Err(err) = Store::open(path.as_path(), false) else {
         panic!("expected a store with no format attribute to be rejected");
     };
     match err {
@@ -1436,7 +1436,7 @@ fn the_format_check_runs_before_the_catalog_half_is_opened() {
     std::fs::remove_file(sqlite_path_of(&path)).unwrap();
 
     for read_only in [true, false] {
-        let Err(err) = open_store(path.as_path(), read_only) else {
+        let Err(err) = Store::open(path.as_path(), read_only) else {
             panic!("expected an error");
         };
         assert!(
@@ -1465,7 +1465,7 @@ fn discriminant_columns_are_stored_as_integer_codes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -1603,7 +1603,7 @@ fn compact_reports_the_shrink_a_caller_can_measure() {
     // truncation lands inside `compact` rather than before it.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     {
         let mut bulk = store.bulk_add();
         bulk.add(
@@ -1644,7 +1644,7 @@ fn compact_reports_the_shrink_a_caller_can_measure() {
 fn compact_shrinks_the_file_after_a_removal() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
 
     // The forecast goes in *before* the survivor so its space is interior to
     // the file: HDF5 truncates a freed tail on flush, and the point here is the
@@ -1702,7 +1702,7 @@ fn compact_preserves_every_stored_time_series_type() {
     let path = dir.path().join("store.h5");
     let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
 
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     // SingleTimeSeries (packed), plus the DST derived from it.
     store
         .add_time_series(
@@ -1830,7 +1830,7 @@ fn compact_preserves_every_stored_time_series_type() {
     // And again after a close/reopen, which re-derives the index from the
     // rewritten file's links.
     drop(store);
-    let store = open_store(path.as_path(), false).unwrap();
+    let store = Store::open(path.as_path(), false).unwrap();
     for (key, want) in keys.iter().zip(&before) {
         let got = store
             .read_by_id(*key, infrastore_core::ReadWindow::full())
@@ -1844,7 +1844,7 @@ fn compact_preserves_every_stored_time_series_type() {
 fn compact_is_idempotent_and_safe_with_no_dead_space() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     let key = store
         .add_time_series(
             1,
@@ -1895,7 +1895,7 @@ fn repack_temp_of(h5: &std::path::Path) -> std::path::PathBuf {
 fn compact_stages_through_a_unique_temp_and_leaves_a_stale_one_alone() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     store
         .add_time_series(
             1,
@@ -1937,7 +1937,7 @@ fn compact_drops_a_dataset_the_catalog_does_not_reference() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -1968,7 +1968,7 @@ fn compact_drops_a_dataset_the_catalog_does_not_reference() {
             .unwrap();
     }
 
-    let mut store = open_store(path.as_path(), false).unwrap();
+    let mut store = Store::open(path.as_path(), false).unwrap();
     let report = store.compact().unwrap();
     assert!(
         report.datasets_dropped >= 1,
@@ -2002,7 +2002,7 @@ fn a_file_that_will_not_open_is_not_reported_as_a_foreign_file() {
     let rubbish = dir.path().join("rubbish.h5");
     std::fs::write(&rubbish, b"certainly not hdf5").unwrap();
 
-    let Err(err) = open_store(rubbish.as_path(), true) else {
+    let Err(err) = Store::open(rubbish.as_path(), true) else {
         panic!("a non-HDF5 file is not a store");
     };
     let message = err.to_string();
@@ -2031,7 +2031,7 @@ fn a_file_that_will_not_open_is_not_reported_as_a_foreign_file() {
     // HDF5 file without our root attribute.
     let foreign = dir.path().join("foreign.h5");
     hdf5_metno::File::create(&foreign).unwrap();
-    let Err(err) = open_store(foreign.as_path(), true) else {
+    let Err(err) = Store::open(foreign.as_path(), true) else {
         panic!("a foreign HDF5 file is not a store");
     };
     let message = err.to_string();
@@ -2052,7 +2052,7 @@ fn irregular_store(path: &std::path::Path, count: i64) -> Vec<chrono::DateTime<U
     let stamps: Vec<_> = (0..6)
         .map(|k| Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 7))
         .collect();
-    let mut store = create_store(Some(path), false).unwrap();
+    let mut store = Store::create(Some(path), false).unwrap();
     for owner in 1..=count {
         let values: Vec<f64> = (0..stamps.len()).map(|i| owner as f64 + i as f64).collect();
         let ns = NonSequentialTimeSeries::new(
@@ -2131,7 +2131,7 @@ fn compaction_unlinks_a_time_axis_nothing_references() {
     let path = dir.path().join("store.h5");
     irregular_store(&path, 3);
 
-    let mut store = open_store(path.as_path(), false).unwrap();
+    let mut store = Store::open(path.as_path(), false).unwrap();
     let keys = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(keys.len(), 3);
     // Two of three go: the axis is still referenced, so nothing is reclaimed.
@@ -2179,7 +2179,7 @@ fn verify_integrity_reports_a_time_axis_perturbed_behind_its_hash() {
         ds.write_raw(&millis).unwrap();
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let report = store.verify_integrity().unwrap();
     assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     assert!(
@@ -2210,7 +2210,7 @@ fn clearing_the_store_reclaims_its_time_axes() {
     let path = dir.path().join("store.h5");
     irregular_store(&path, 3);
 
-    let mut store = open_store(path.as_path(), false).unwrap();
+    let mut store = Store::open(path.as_path(), false).unwrap();
     assert_eq!(timestamp_datasets(&path).len(), 1);
     assert_eq!(store.clear_time_series(None).unwrap(), 3);
     store.flush().unwrap();
@@ -2231,7 +2231,7 @@ fn rolling_back_a_transaction_removes_the_time_axis_it_wrote() {
         .map(|k| Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 7))
         .collect();
 
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     store.begin_transaction().unwrap();
     let ns = NonSequentialTimeSeries::new(
         stamps.clone(),
@@ -2334,7 +2334,7 @@ fn a_missing_time_axis_is_reported_and_refuses_the_read() {
         }
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let report = store.verify_integrity().unwrap();
     assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     assert!(

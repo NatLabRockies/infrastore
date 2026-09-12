@@ -430,6 +430,83 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
 
 // ---- Enums ----------------------------------------------------------------
 
+/// The descriptors every one of the six series types carries, as a
+/// `#[pymethods]` block of their own.
+///
+/// These getters read the same fields off `self.inner` whatever the type is, so
+/// they were six identical copies before this. They live in a second
+/// `#[pymethods]` impl (PyO3's `multiple-pymethods` feature) beside each type's
+/// hand-written one rather than wrapping it, so the hand-written block stays a
+/// plain impl that `rustfmt` formats — a macro invocation's body is out of its
+/// reach.
+macro_rules! series_pymethods {
+    ($ty:ident) => {
+        #[pymethods]
+        impl $ty {
+            /// The values, as a numpy array.
+            #[getter]
+            fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                numpy_from_typed(py, &self.inner.data)
+            }
+
+            /// The series' name. Fixed once written — there is no rename.
+            #[getter]
+            fn name(&self) -> String {
+                self.inner.name.clone()
+            }
+
+            /// Opaque, package-owned payload stored verbatim, or `None`.
+            #[getter]
+            fn application_data(&self) -> Option<String> {
+                self.inner.application_data.clone()
+            }
+
+            /// What the stored elements mean, in the store's own vocabulary.
+            /// Always concrete: a plain numeric series reports the array's dtype
+            /// spelling.
+            #[getter]
+            fn element_type(&self) -> String {
+                self.inner.element_type.to_string()
+            }
+
+            /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+            #[getter]
+            fn units(&self) -> Option<String> {
+                self.inner.units.clone()
+            }
+
+            /// What kind of physical quantity the values measure, or `None`.
+            #[getter]
+            fn quantity_kind(&self) -> Option<String> {
+                self.inner.quantity_kind.clone()
+            }
+
+            /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
+            #[getter]
+            fn unit_system(&self) -> Option<&'static str> {
+                self.inner.unit_system.map(|u| u.as_str())
+            }
+
+            /// The owning component's field these values vary, or `None`.
+            #[getter]
+            fn component_field(&self) -> Option<String> {
+                self.inner.component_field.clone()
+            }
+
+            /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`,
+            /// a fixed offset (`"-07:00"`), an IANA zone name, or `None` for
+            /// unspecified.
+            #[getter]
+            fn time_reference(&self) -> Option<String> {
+                self.inner
+                    .time_reference
+                    .as_ref()
+                    .map(core_lib::TimeReference::as_storage_string)
+            }
+        }
+    };
+}
+
 #[pyclass(
     eq,
     eq_int,
@@ -1343,6 +1420,8 @@ pub struct PyDeterministic {
     inner: core_lib::Deterministic,
 }
 
+series_pymethods!(PyDeterministic);
+
 #[pymethods]
 impl PyDeterministic {
     /// Build a `Deterministic` forecast. `data` is a numpy array of shape
@@ -1353,10 +1432,10 @@ impl PyDeterministic {
     /// come back on a read.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, data, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            initial_timestamp, resolution, horizon, interval, count, data, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -1417,10 +1496,10 @@ impl PyDeterministic {
     /// arithmetic `encode_element_values` otherwise leaves to the caller.
     #[classmethod]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, values, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            initial_timestamp, resolution, horizon, interval, count, values, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -1483,47 +1562,6 @@ impl PyDeterministic {
         decoded_or_none(py, &self.inner.data, self.inner.element_type, 2)
     }
 
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    /// Opaque, package-owned payload stored verbatim, or `None`.
-    #[getter]
-    fn application_data(&self) -> Option<String> {
-        self.inner.application_data.clone()
-    }
-
-    /// What the stored elements mean, in the store's own vocabulary.
-    #[getter]
-    fn element_type(&self) -> String {
-        self.inner.element_type.to_string()
-    }
-
-    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
-    #[getter]
-    fn units(&self) -> Option<String> {
-        self.inner.units.clone()
-    }
-
-    /// What kind of physical quantity the values measure, or `None`.
-    #[getter]
-    fn quantity_kind(&self) -> Option<String> {
-        self.inner.quantity_kind.clone()
-    }
-
-    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
-    #[getter]
-    fn unit_system(&self) -> Option<&'static str> {
-        self.inner.unit_system.map(|u| u.as_str())
-    }
-
-    /// The owning component's field these values vary, or `None`.
-    #[getter]
-    fn component_field(&self) -> Option<String> {
-        self.inner.component_field.clone()
-    }
-
     /// The first window's timestamp, spelled the way it was written.
     #[getter]
     fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1532,16 +1570,6 @@ impl PyDeterministic {
             self.inner.initial_timestamp,
             self.inner.time_reference.as_ref(),
         )
-    }
-
-    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
-    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
-    #[getter]
-    fn time_reference(&self) -> Option<String> {
-        self.inner
-            .time_reference
-            .as_ref()
-            .map(core_lib::TimeReference::as_storage_string)
     }
 
     #[getter]
@@ -1562,11 +1590,6 @@ impl PyDeterministic {
     #[getter]
     fn count(&self) -> usize {
         self.inner.count
-    }
-
-    #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        numpy_from_typed(py, &self.inner.data)
     }
 
     /// Value equality: all fields including the data array (bitwise).
@@ -1681,6 +1704,8 @@ pub struct PyProbabilistic {
     inner: core_lib::Probabilistic,
 }
 
+series_pymethods!(PyProbabilistic);
+
 #[pymethods]
 impl PyProbabilistic {
     /// Build a `Probabilistic` forecast. `data` is a numpy array of shape
@@ -1691,10 +1716,10 @@ impl PyProbabilistic {
     /// come back on a read.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, percentiles, data, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            initial_timestamp, resolution, horizon, interval, count, percentiles, data, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -1758,10 +1783,10 @@ impl PyProbabilistic {
     /// otherwise leaves to the caller.
     #[classmethod]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, percentiles, values, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            initial_timestamp, resolution, horizon, interval, count, percentiles, values, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -1826,47 +1851,6 @@ impl PyProbabilistic {
         decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
     }
 
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    /// Opaque, package-owned payload stored verbatim, or `None`.
-    #[getter]
-    fn application_data(&self) -> Option<String> {
-        self.inner.application_data.clone()
-    }
-
-    /// What the stored elements mean, in the store's own vocabulary.
-    #[getter]
-    fn element_type(&self) -> String {
-        self.inner.element_type.to_string()
-    }
-
-    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
-    #[getter]
-    fn units(&self) -> Option<String> {
-        self.inner.units.clone()
-    }
-
-    /// What kind of physical quantity the values measure, or `None`.
-    #[getter]
-    fn quantity_kind(&self) -> Option<String> {
-        self.inner.quantity_kind.clone()
-    }
-
-    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
-    #[getter]
-    fn unit_system(&self) -> Option<&'static str> {
-        self.inner.unit_system.map(|u| u.as_str())
-    }
-
-    /// The owning component's field these values vary, or `None`.
-    #[getter]
-    fn component_field(&self) -> Option<String> {
-        self.inner.component_field.clone()
-    }
-
     /// The first window's timestamp, spelled the way it was written.
     #[getter]
     fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1875,16 +1859,6 @@ impl PyProbabilistic {
             self.inner.initial_timestamp,
             self.inner.time_reference.as_ref(),
         )
-    }
-
-    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
-    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
-    #[getter]
-    fn time_reference(&self) -> Option<String> {
-        self.inner
-            .time_reference
-            .as_ref()
-            .map(core_lib::TimeReference::as_storage_string)
     }
 
     #[getter]
@@ -1910,11 +1884,6 @@ impl PyProbabilistic {
     #[getter]
     fn percentiles(&self) -> Vec<f64> {
         self.inner.percentiles.clone()
-    }
-
-    #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        numpy_from_typed(py, &self.inner.data)
     }
 
     /// Value equality: all fields including the data array (bitwise).
@@ -1951,6 +1920,8 @@ pub struct PyScenarios {
     inner: core_lib::Scenarios,
 }
 
+series_pymethods!(PyScenarios);
+
 #[pymethods]
 impl PyScenarios {
     /// Build a `Scenarios` forecast. `data` is a numpy array of shape
@@ -1962,10 +1933,10 @@ impl PyScenarios {
     /// come back on a read.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, data, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            initial_timestamp, resolution, horizon, interval, count, data, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -2034,10 +2005,10 @@ impl PyScenarios {
     /// array's first axis: there is no array yet to read it from.
     #[classmethod]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, scenario_count, values, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            initial_timestamp, resolution, horizon, interval, count, scenario_count, values, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -2102,47 +2073,6 @@ impl PyScenarios {
         decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
     }
 
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    /// Opaque, package-owned payload stored verbatim, or `None`.
-    #[getter]
-    fn application_data(&self) -> Option<String> {
-        self.inner.application_data.clone()
-    }
-
-    /// What the stored elements mean, in the store's own vocabulary.
-    #[getter]
-    fn element_type(&self) -> String {
-        self.inner.element_type.to_string()
-    }
-
-    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
-    #[getter]
-    fn units(&self) -> Option<String> {
-        self.inner.units.clone()
-    }
-
-    /// What kind of physical quantity the values measure, or `None`.
-    #[getter]
-    fn quantity_kind(&self) -> Option<String> {
-        self.inner.quantity_kind.clone()
-    }
-
-    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
-    #[getter]
-    fn unit_system(&self) -> Option<&'static str> {
-        self.inner.unit_system.map(|u| u.as_str())
-    }
-
-    /// The owning component's field these values vary, or `None`.
-    #[getter]
-    fn component_field(&self) -> Option<String> {
-        self.inner.component_field.clone()
-    }
-
     /// The first window's timestamp, spelled the way it was written.
     #[getter]
     fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -2151,16 +2081,6 @@ impl PyScenarios {
             self.inner.initial_timestamp,
             self.inner.time_reference.as_ref(),
         )
-    }
-
-    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
-    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
-    #[getter]
-    fn time_reference(&self) -> Option<String> {
-        self.inner
-            .time_reference
-            .as_ref()
-            .map(core_lib::TimeReference::as_storage_string)
     }
 
     #[getter]
@@ -2186,11 +2106,6 @@ impl PyScenarios {
     #[getter]
     fn scenario_count(&self) -> usize {
         self.inner.scenario_count
-    }
-
-    #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        numpy_from_typed(py, &self.inner.data)
     }
 
     /// Value equality: all fields including the data array (bitwise).
@@ -2227,6 +2142,8 @@ pub struct PySingleTimeSeries {
     inner: core_lib::SingleTimeSeries,
 }
 
+series_pymethods!(PySingleTimeSeries);
+
 #[pymethods]
 impl PySingleTimeSeries {
     /// `name` is required.
@@ -2258,10 +2175,10 @@ impl PySingleTimeSeries {
     /// (`"-07:00"`), or an IANA zone name.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, data, name, *, application_data=None,
-        element_type=None, units=None, quantity_kind=None, unit_system=None,
-        component_field=None, time_reference=None
-    ))]
+            initial_timestamp, resolution, data, name, *, application_data=None,
+            element_type=None, units=None, quantity_kind=None, unit_system=None,
+            component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -2334,9 +2251,9 @@ impl PySingleTimeSeries {
     /// ```
     #[classmethod]
     #[pyo3(signature = (
-        timestamps, data, name, *, application_data=None, element_type=None, units=None,
-        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-    ))]
+            timestamps, data, name, *, application_data=None, element_type=None, units=None,
+            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_timestamps(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -2417,10 +2334,10 @@ impl PySingleTimeSeries {
     /// disagree, or (for a forecast) a count that does not fill the windows.
     #[classmethod]
     #[pyo3(signature = (
-        initial_timestamp, resolution, values, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            initial_timestamp, resolution, values, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -2475,48 +2392,6 @@ impl PySingleTimeSeries {
         decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
     }
 
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    /// Opaque, package-owned payload stored verbatim, or `None`.
-    #[getter]
-    fn application_data(&self) -> Option<String> {
-        self.inner.application_data.clone()
-    }
-
-    /// What the stored elements mean, in the store's own vocabulary. Always
-    /// concrete: a plain numeric series reports the array's dtype spelling.
-    #[getter]
-    fn element_type(&self) -> String {
-        self.inner.element_type.to_string()
-    }
-
-    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
-    #[getter]
-    fn units(&self) -> Option<String> {
-        self.inner.units.clone()
-    }
-
-    /// What kind of physical quantity the values measure, or `None`.
-    #[getter]
-    fn quantity_kind(&self) -> Option<String> {
-        self.inner.quantity_kind.clone()
-    }
-
-    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
-    #[getter]
-    fn unit_system(&self) -> Option<&'static str> {
-        self.inner.unit_system.map(|u| u.as_str())
-    }
-
-    /// The owning component's field these values vary, or `None`.
-    #[getter]
-    fn component_field(&self) -> Option<String> {
-        self.inner.component_field.clone()
-    }
-
     /// The grid's first timestamp, spelled the way it was written.
     #[getter]
     fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -2527,16 +2402,6 @@ impl PySingleTimeSeries {
         )
     }
 
-    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
-    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
-    #[getter]
-    fn time_reference(&self) -> Option<String> {
-        self.inner
-            .time_reference
-            .as_ref()
-            .map(core_lib::TimeReference::as_storage_string)
-    }
-
     #[getter]
     fn length(&self) -> usize {
         self.inner.length
@@ -2545,11 +2410,6 @@ impl PySingleTimeSeries {
     #[getter]
     fn resolution(&self) -> String {
         self.inner.resolution.to_iso8601()
-    }
-
-    #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        numpy_from_typed(py, &self.inner.data)
     }
 
     /// The whole grid materialized, `initial_timestamp` first, spelled the way
@@ -2600,10 +2460,10 @@ impl PySingleTimeSeries {
     /// ```
     #[classmethod]
     #[pyo3(signature = (
-        table, *, name=None, resolution=None, application_data=None, element_type=None,
-        units=None, quantity_kind=None, unit_system=None, component_field=None,
-        time_reference=None
-    ))]
+            table, *, name=None, resolution=None, application_data=None, element_type=None,
+            units=None, quantity_kind=None, unit_system=None, component_field=None,
+            time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_arrow(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -2642,8 +2502,8 @@ impl PySingleTimeSeries {
                 let Some(&first) = instants.first() else {
                     return Err(InvalidParameterError::new_err(
                         "a SingleTimeSeries is anchored at its first timestamp, and this table \
-                         has no rows; give the anchor another way, or read it as a \
-                         NonSequentialTimeSeries"
+                             has no rows; give the anchor another way, or read it as a \
+                             NonSequentialTimeSeries"
                             .to_string(),
                     ));
                 };
@@ -2748,6 +2608,8 @@ pub struct PyNonSequentialTimeSeries {
     inner: core_lib::NonSequentialTimeSeries,
 }
 
+series_pymethods!(PyNonSequentialTimeSeries);
+
 #[pymethods]
 impl PyNonSequentialTimeSeries {
     /// `name` is required.
@@ -2757,9 +2619,9 @@ impl PyNonSequentialTimeSeries {
     /// back on a read.
     #[new]
     #[pyo3(signature = (
-        timestamps, data, name, *, application_data=None, element_type=None, units=None,
-        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-    ))]
+            timestamps, data, name, *, application_data=None, element_type=None, units=None,
+            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -2799,10 +2661,10 @@ impl PyNonSequentialTimeSeries {
     /// `SingleTimeSeries.from_values` for the value shapes and the rules.
     #[classmethod]
     #[pyo3(signature = (
-        timestamps, values, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            timestamps, values, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -2856,47 +2718,6 @@ impl PyNonSequentialTimeSeries {
         decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
     }
 
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    /// Opaque, package-owned payload stored verbatim, or `None`.
-    #[getter]
-    fn application_data(&self) -> Option<String> {
-        self.inner.application_data.clone()
-    }
-
-    /// What the stored elements mean, in the store's own vocabulary.
-    #[getter]
-    fn element_type(&self) -> String {
-        self.inner.element_type.to_string()
-    }
-
-    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
-    #[getter]
-    fn units(&self) -> Option<String> {
-        self.inner.units.clone()
-    }
-
-    /// What kind of physical quantity the values measure, or `None`.
-    #[getter]
-    fn quantity_kind(&self) -> Option<String> {
-        self.inner.quantity_kind.clone()
-    }
-
-    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
-    #[getter]
-    fn unit_system(&self) -> Option<&'static str> {
-        self.inner.unit_system.map(|u| u.as_str())
-    }
-
-    /// The owning component's field these values vary, or `None`.
-    #[getter]
-    fn component_field(&self) -> Option<String> {
-        self.inner.component_field.clone()
-    }
-
     /// The explicit timestamp vector, spelled the way it was written.
     #[getter]
     fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
@@ -2907,24 +2728,9 @@ impl PyNonSequentialTimeSeries {
         )
     }
 
-    /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`, a fixed
-    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
-    #[getter]
-    fn time_reference(&self) -> Option<String> {
-        self.inner
-            .time_reference
-            .as_ref()
-            .map(core_lib::TimeReference::as_storage_string)
-    }
-
     #[getter]
     fn length(&self) -> usize {
         self.inner.length
-    }
-
-    #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        numpy_from_typed(py, &self.inner.data)
     }
 
     /// Build a `NonSequentialTimeSeries` from a `pyarrow.Table` — the inverse of
@@ -2933,9 +2739,9 @@ impl PyNonSequentialTimeSeries {
     /// walk a grid.
     #[classmethod]
     #[pyo3(signature = (
-        table, *, name=None, application_data=None, element_type=None, units=None,
-        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-    ))]
+            table, *, name=None, application_data=None, element_type=None, units=None,
+            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_arrow(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -3031,6 +2837,8 @@ pub struct PyPersistentTimeSeries {
     inner: core_lib::PersistentTimeSeries,
 }
 
+series_pymethods!(PyPersistentTimeSeries);
+
 #[pymethods]
 impl PyPersistentTimeSeries {
     /// `name` is required.
@@ -3041,9 +2849,9 @@ impl PyPersistentTimeSeries {
     /// `application_data` — the store has no column for it.
     #[new]
     #[pyo3(signature = (
-        timestamps, data, name, *, application_data=None, element_type=None, units=None,
-        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-    ))]
+            timestamps, data, name, *, application_data=None, element_type=None, units=None,
+            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -3083,10 +2891,10 @@ impl PyPersistentTimeSeries {
     /// `SingleTimeSeries.from_values` for the value shapes and the rules.
     #[classmethod]
     #[pyo3(signature = (
-        timestamps, values, name, *,
-        application_data=None, element_type=None, units=None, quantity_kind=None,
-        unit_system=None, component_field=None, time_reference=None
-    ))]
+            timestamps, values, name, *,
+            application_data=None, element_type=None, units=None, quantity_kind=None,
+            unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -3140,47 +2948,6 @@ impl PyPersistentTimeSeries {
         decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
     }
 
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    /// Opaque, package-owned payload stored verbatim, or `None`.
-    #[getter]
-    fn application_data(&self) -> Option<String> {
-        self.inner.application_data.clone()
-    }
-
-    /// What the stored elements mean, in the store's own vocabulary.
-    #[getter]
-    fn element_type(&self) -> String {
-        self.inner.element_type.to_string()
-    }
-
-    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
-    #[getter]
-    fn units(&self) -> Option<String> {
-        self.inner.units.clone()
-    }
-
-    /// What kind of physical quantity the values measure, or `None`.
-    #[getter]
-    fn quantity_kind(&self) -> Option<String> {
-        self.inner.quantity_kind.clone()
-    }
-
-    /// `"natural_units"`, `"component_base"`, or `None` for unspecified.
-    #[getter]
-    fn unit_system(&self) -> Option<&'static str> {
-        self.inner.unit_system.map(|u| u.as_str())
-    }
-
-    /// The owning component's field these values vary, or `None`.
-    #[getter]
-    fn component_field(&self) -> Option<String> {
-        self.inner.component_field.clone()
-    }
-
     /// The breakpoint vector, spelled the way it was written.
     #[getter]
     fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
@@ -3191,24 +2958,9 @@ impl PyPersistentTimeSeries {
         )
     }
 
-    /// How this series' breakpoints were spelled: `"utc"`, `"zoneless"`, a fixed
-    /// offset (`"-07:00"`), an IANA zone name, or `None` for unspecified.
-    #[getter]
-    fn time_reference(&self) -> Option<String> {
-        self.inner
-            .time_reference
-            .as_ref()
-            .map(core_lib::TimeReference::as_storage_string)
-    }
-
     #[getter]
     fn length(&self) -> usize {
         self.inner.length
-    }
-
-    #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        numpy_from_typed(py, &self.inner.data)
     }
 
     /// The value in force at `at`.
@@ -3277,9 +3029,9 @@ impl PyPersistentTimeSeries {
     /// mean between the rows.
     #[classmethod]
     #[pyo3(signature = (
-        table, *, name=None, application_data=None, element_type=None, units=None,
-        quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-    ))]
+            table, *, name=None, application_data=None, element_type=None, units=None,
+            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+        ))]
     #[allow(clippy::too_many_arguments)]
     fn from_arrow(
         _cls: &Bound<'_, pyo3::types::PyType>,
@@ -4045,9 +3797,9 @@ impl PyStore {
                 let path = path.as_deref().ok_or_else(|| {
                     InvalidParameterError::new_err("path is required when in_memory=False")
                 })?;
-                core_lib::create_store_replacing(path, compression, catalog)
+                core_lib::Store::create_replacing(path, compression, catalog)
             }
-            (false, _) => core_lib::create_store_with_catalog(
+            (false, _) => core_lib::Store::create_with_catalog(
                 path.as_deref(),
                 in_memory,
                 compression,
@@ -4085,7 +3837,7 @@ impl PyStore {
     ) -> PyResult<Self> {
         let catalog = parse_catalog(Some(catalog), false)?;
         let descr = dest.display().to_string();
-        let store = core_lib::open_store_copy(&src, &dest, catalog).map_err(map_err)?;
+        let store = core_lib::Store::open_copy(&src, &dest, catalog).map_err(map_err)?;
         Ok(Self {
             inner: Some(store),
             read_only: false,
@@ -4110,7 +3862,7 @@ impl PyStore {
         let catalog = parse_catalog(Some(catalog), false)?;
         let descr = path.display().to_string();
         let store =
-            core_lib::open_store_with_catalog(&path, read_only, catalog).map_err(map_err)?;
+            core_lib::Store::open_with_catalog(&path, read_only, catalog).map_err(map_err)?;
         Ok(Self {
             inner: Some(store),
             read_only,
@@ -4147,7 +3899,7 @@ impl PyStore {
     ) -> PyResult<Self> {
         let catalog = parse_catalog(Some(catalog), false)?;
         let descr = path.display().to_string();
-        let store = core_lib::open_store_without_catalog(&path, catalog).map_err(map_err)?;
+        let store = core_lib::Store::open_without_catalog(&path, catalog).map_err(map_err)?;
         Ok(Self {
             inner: Some(store),
             read_only: false,
@@ -4463,7 +4215,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_metadata<'py>(
@@ -4482,6 +4235,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let filter = build_list_filter(
             owner_id,
@@ -4497,6 +4251,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         let metas = self.store()?.list_metadata(filter).map_err(map_err)?;
         let mut out = Vec::with_capacity(metas.len());
@@ -4514,7 +4269,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn has_any_time_series(
@@ -4532,6 +4288,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<bool> {
         let filter = build_list_filter(
             owner_id,
@@ -4547,6 +4304,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store()?.has_any_time_series(filter).map_err(map_err)
     }
@@ -4800,7 +4558,7 @@ impl PyStore {
     /// )
     /// reader.grid()["length"]
     /// ```
-    #[pyo3(signature = (resolution=None, *, window_start=None, window_length=None, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None))]
+    #[pyo3(signature = (resolution=None, *, window_start=None, window_length=None, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None, features_exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
         &self,
@@ -4818,6 +4576,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<PyStaticReader> {
         let filter = build_list_filter(
             owner_id,
@@ -4833,6 +4592,7 @@ impl PyStore {
             length,
             None,
             features,
+            features_exact,
         )?;
         let window = core_lib::ReadWindow {
             start: window_start.as_ref().map(|s| s.instant),
@@ -4864,7 +4624,7 @@ impl PyStore {
     /// the filter. A `resolution` is required; a `Deterministic` reader also
     /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
     /// Drive it with `forecast_read`.
-    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None))]
+    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, zoneless=None, initial_timestamp=None, length=None, features=None, features_exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
         &self,
@@ -4880,6 +4640,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<PyForecastReader> {
         let filter = build_list_filter(
             owner_id,
@@ -4895,6 +4656,7 @@ impl PyStore {
             length,
             None,
             features,
+            features_exact,
         )?;
         let reader = self
             .store()?
@@ -5143,7 +4905,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_names(
@@ -5161,6 +4924,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<Vec<String>> {
         let filter = build_list_filter(
             owner_id,
@@ -5176,6 +4940,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store()?.list_names(filter).map_err(map_err)
     }
@@ -5184,7 +4949,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_owner_types(
@@ -5202,6 +4968,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<Vec<String>> {
         let filter = build_list_filter(
             owner_id,
@@ -5217,6 +4984,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store()?.list_owner_types(filter).map_err(map_err)
     }
@@ -5226,7 +4994,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn remove_by_filter(
@@ -5244,6 +5013,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<usize> {
         let filter = build_list_filter(
             owner_id,
@@ -5259,6 +5029,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store_mut()?.remove_by_filter(filter).map_err(map_err)
     }
@@ -5940,7 +5711,8 @@ impl PyStore {
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None
+        interval=None, initial_timestamp=None, length=None, features=None,
+        features_exact=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn export_time_series_associations_openapi(
@@ -5958,6 +5730,7 @@ impl PyStore {
         initial_timestamp: Option<PyInstant>,
         length: Option<usize>,
         features: Option<&Bound<'_, PyDict>>,
+        features_exact: bool,
     ) -> PyResult<String> {
         let filter = build_list_filter(
             owner_id,
@@ -5973,6 +5746,7 @@ impl PyStore {
             length,
             interval,
             features,
+            features_exact,
         )?;
         self.store()?
             .export_time_series_associations_openapi(&filter)
@@ -6139,27 +5913,18 @@ fn reject_unknown_item_keys(item: &Bound<'_, PyDict>, index: usize) -> PyResult<
     Ok(())
 }
 
+/// [`core_lib::hash_from_hex`] with this layer's error.
+///
+/// The shared decoder compares over bytes rather than `&str` slices, which is
+/// what keeps a 64-*byte* string of multi-byte characters from slicing through
+/// a character boundary. That panicked, and PyO3 surfaces a panic as
+/// `PanicException` — inheriting from `BaseException`, so it escapes both
+/// `except Exception` and this module's own exception hierarchy, an uncatchable
+/// error from an ordinary bad argument.
 fn hash_from_hex(s: &str) -> PyResult<[u8; 32]> {
-    // Over bytes, not `&str` slices: the length guard counts bytes, so a
-    // 64-*byte* string of multi-byte characters passed it and then sliced
-    // through a character boundary. That panics, and PyO3 surfaces a panic as
-    // `PanicException`, which inherits from `BaseException` and so escapes both
-    // `except Exception` and this module's own exception hierarchy — an
-    // uncatchable error from an ordinary bad argument.
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 || !s.is_ascii() {
-        return Err(InvalidParameterError::new_err(
-            "data_hash must be a 64-character hex string",
-        ));
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        let pair = std::str::from_utf8(&bytes[i * 2..i * 2 + 2])
-            .map_err(|_| InvalidParameterError::new_err("data_hash is not valid hex"))?;
-        *byte = u8::from_str_radix(pair, 16)
-            .map_err(|_| InvalidParameterError::new_err("data_hash is not valid hex"))?;
-    }
-    Ok(out)
+    core_lib::hash_from_hex(s).ok_or_else(|| {
+        InvalidParameterError::new_err("data_hash must be a 64-character hex string")
+    })
 }
 
 /// Build a [`core_lib::ListFilter`] from the optional filter kwargs shared by the
@@ -6182,6 +5947,7 @@ fn build_list_filter(
     length: Option<usize>,
     interval: Option<Bound<'_, PyAny>>,
     features: Option<&Bound<'_, PyDict>>,
+    features_exact: bool,
 ) -> PyResult<core_lib::ListFilter> {
     let mut filter = core_lib::ListFilter::new();
     if let Some(id) = owner_id {
@@ -6224,7 +5990,11 @@ fn build_list_filter(
     if let Some(i) = interval {
         filter = filter.interval(pyany_to_period(&i)?);
     }
-    if let Some(f) = features {
+    if features_exact {
+        // The row's whole feature set, by content hash -- so `features=None`
+        // here selects the rows that carry no features at all.
+        filter = filter.exact_features(features_from_dict(features)?);
+    } else if let Some(f) = features {
         filter = filter.features(features_from_dict(Some(f))?);
     }
     Ok(filter)

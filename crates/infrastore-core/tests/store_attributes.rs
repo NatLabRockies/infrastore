@@ -9,10 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use infrastore_core::{
-    CatalogMode, Compression, Store, TimeSeriesError, create_store, create_store_with_catalog,
-    open_store,
-};
+use infrastore_core::{CatalogMode, Compression, Store, TimeSeriesError};
 
 fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
@@ -33,7 +30,7 @@ fn stamp(store: &mut Store) {
 
 #[test]
 fn set_get_list_remove_round_trip() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     assert_eq!(
         store.list_store_attributes().expect("list should succeed"),
         BTreeMap::new(),
@@ -75,7 +72,7 @@ fn set_get_list_remove_round_trip() {
 
 #[test]
 fn set_replaces_rather_than_appends() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     store
         .set_store_attribute("schema_version", "3")
         .expect("setting an attribute should succeed");
@@ -91,7 +88,7 @@ fn set_replaces_rather_than_appends() {
 
 #[test]
 fn absent_key_is_a_question_not_an_error() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     assert_eq!(
         store
             .get_store_attribute("nothing")
@@ -108,7 +105,7 @@ fn absent_key_is_a_question_not_an_error() {
 
 #[test]
 fn empty_key_is_refused() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     assert!(matches!(
         store.set_store_attribute("", "value"),
         Err(TimeSeriesError::InvalidParameter(_))
@@ -121,7 +118,7 @@ fn empty_key_is_refused() {
 
 #[test]
 fn reserved_prefix_is_refused_in_both_directions() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let err = store
         .set_store_attribute("infrastore.generation", "1")
         .expect_err("the reserved prefix should be refused");
@@ -147,12 +144,12 @@ fn writes_are_refused_on_a_read_only_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(&path), false).expect("store should be created");
+        let mut store = Store::create(Some(&path), false).expect("store should be created");
         stamp(&mut store);
         store.flush().expect("flush should succeed");
     }
 
-    let mut store = open_store(&path, true).expect("read-only open should succeed");
+    let mut store = Store::open(&path, true).expect("read-only open should succeed");
     assert!(matches!(
         store.set_store_attribute("creator", "someone else"),
         Err(TimeSeriesError::ReadOnlyStore)
@@ -177,12 +174,12 @@ fn writes_are_refused_on_a_read_only_store() {
 fn a_bad_key_is_refused_before_a_read_only_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.h5");
-    create_store(Some(&path), false)
+    Store::create(Some(&path), false)
         .expect("store should be created")
         .flush()
         .expect("flush should succeed");
 
-    let mut store = open_store(&path, true).expect("read-only open should succeed");
+    let mut store = Store::open(&path, true).expect("read-only open should succeed");
     for key in ["", "infrastore.version"] {
         assert!(matches!(
             store.set_store_attribute(key, "v"),
@@ -197,7 +194,7 @@ fn a_bad_key_is_refused_before_a_read_only_store() {
 
 #[test]
 fn attributes_take_part_in_the_ambient_transaction() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     store
         .set_store_attribute("creator", "before")
         .expect("setting an attribute should succeed");
@@ -222,7 +219,7 @@ fn attributes_take_part_in_the_ambient_transaction() {
 
 #[test]
 fn a_store_holding_only_attributes_is_not_empty() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     assert!(store.is_empty().expect("is_empty should succeed"));
     store
         .set_store_attribute("creator", "sienna-build")
@@ -239,11 +236,11 @@ fn attributes_survive_persist_to() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("saved.h5");
     {
-        let mut store = create_store(None, true).expect("in-memory store should initialize");
+        let mut store = Store::create(None, true).expect("in-memory store should initialize");
         stamp(&mut store);
         store.persist_to(&path).expect("persist_to should succeed");
     }
-    let store = open_store(&path, true).expect("the saved artifact should open");
+    let store = Store::open(&path, true).expect("the saved artifact should open");
     assert_eq!(
         store.list_store_attributes().expect("list should succeed"),
         map(&[
@@ -258,7 +255,7 @@ fn attributes_survive_persist_catalog_from_an_in_memory_catalog() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store_with_catalog(
+        let mut store = Store::create_with_catalog(
             Some(&path),
             false,
             Compression::default(),
@@ -270,7 +267,7 @@ fn attributes_survive_persist_catalog_from_an_in_memory_catalog() {
             .persist_catalog()
             .expect("persist_catalog should succeed");
     }
-    let store = open_store(&path, true).expect("the artifact should open");
+    let store = Store::open(&path, true).expect("the artifact should open");
     assert_eq!(
         store
             .get_store_attribute("creator")
@@ -283,7 +280,7 @@ fn attributes_survive_persist_catalog_from_an_in_memory_catalog() {
 fn attributes_survive_compact() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.h5");
-    let mut store = create_store(Some(&path), false).expect("store should be created");
+    let mut store = Store::create(Some(&path), false).expect("store should be created");
     stamp(&mut store);
     store.compact().expect("compact should succeed");
     assert_eq!(
@@ -302,7 +299,7 @@ fn attributes_survive_open_copy() {
     let src = dir.path().join("src.h5");
     let dest = dir.path().join("dest.h5");
     {
-        let mut store = create_store(Some(&src), false).expect("store should be created");
+        let mut store = Store::create(Some(&src), false).expect("store should be created");
         stamp(&mut store);
         store.flush().expect("flush should succeed");
     }
@@ -319,7 +316,7 @@ fn open_without_catalog_mints_an_empty_attribute_table() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(&path), false).expect("store should be created");
+        let mut store = Store::create(Some(&path), false).expect("store should be created");
         stamp(&mut store);
         store.flush().expect("flush should succeed");
     }

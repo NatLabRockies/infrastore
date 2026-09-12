@@ -16,7 +16,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, Probabilistic,
-    Scenarios, Store, TimeSeriesData, TimeSeriesId, TypedArray, create_store, open_store,
+    Scenarios, Store, TimeSeriesData, TimeSeriesId, TypedArray,
 };
 
 fn t0() -> DateTime<Utc> {
@@ -111,7 +111,7 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) -> TimeSeriesId {
 /// second reading correctly with the array still present; removing the second
 /// drops the last reference and integrity still holds.
 fn shares_and_reclaims(build: impl Fn(f64) -> TimeSeriesData) {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     let k1 = add(&mut store, 1, build(7.0));
     let k2 = add(&mut store, 2, build(7.0));
@@ -165,7 +165,7 @@ fn scenarios_shares_and_reclaims_standalone_array() {
 
 #[test]
 fn remove_by_filter_reclaims_standalone_array() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // Three distinct standalone arrays (distinct `base`s -> distinct hashes).
     for owner in 1..=3 {
         add(&mut store, owner, nonseq(owner as f64 * 10.0));
@@ -183,7 +183,7 @@ fn remove_by_filter_reclaims_standalone_array() {
 
 #[test]
 fn remove_bulk_reclaims_shared_standalone_only_when_last_reference_gone() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // Two owners share one standalone array; a third owner holds a distinct one.
     let k1 = add(&mut store, 1, nonseq(5.0));
     let k2 = add(&mut store, 2, nonseq(5.0));
@@ -216,7 +216,7 @@ fn nonseq_typed(data: TypedArray) -> TimeSeriesData {
 }
 
 fn standalone_dtype_cycle(data: TypedArray) {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let k1 = add(&mut store, 1, nonseq_typed(data.clone()));
     let k2 = add(&mut store, 2, nonseq_typed(data.clone()));
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
@@ -261,7 +261,7 @@ fn standalone_orphan_persists_across_reopen() {
     // Three distinct standalone forecasts on disk.
     let k2_identity;
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let _k1 = add(&mut store, 1, deterministic(1.0));
         let k2 = add(&mut store, 2, deterministic(100.0));
         let _k3 = add(&mut store, 3, deterministic(200.0));
@@ -272,7 +272,7 @@ fn standalone_orphan_persists_across_reopen() {
 
     // Reopen writable and drop owner 1's array (no other reference).
     {
-        let mut store = open_store(path.as_path(), false).unwrap();
+        let mut store = Store::open(path.as_path(), false).unwrap();
         assert_eq!(store.num_distinct_arrays().unwrap(), 3);
         let k1 = store.list_metadata(ListFilter::new().owner_id(1)).unwrap()[0]
             .id
@@ -285,7 +285,7 @@ fn standalone_orphan_persists_across_reopen() {
     // Reopen again: the orphaned hash must not resurrect, survivors read, and a
     // fresh distinct add after the orphaning round-trips.
     {
-        let mut store = open_store(path.as_path(), false).unwrap();
+        let mut store = Store::open(path.as_path(), false).unwrap();
         assert_eq!(
             store.num_distinct_arrays().unwrap(),
             2,

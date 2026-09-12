@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use infrastore_core::{CatalogMode, Compression, Store, create_store, open_store};
+use infrastore_core::{CatalogMode, Compression, Store};
 
 /// Where the SQLite catalog lives *while a command runs*.
 ///
@@ -61,7 +61,7 @@ pub fn open_readonly(path: &Path) -> Result<Store, String> {
     if !path.exists() {
         return Err(format!("store not found: {}", path.display()));
     }
-    open_store(path, true).map_err(|e| e.to_string())
+    Store::open(path, true).map_err(|e| e.to_string())
 }
 
 /// Open a writable store, creating it (and its SQLite catalog) if absent.
@@ -88,7 +88,7 @@ pub fn open_writable_with(
         Store::open_with_catalog(path, false, catalog.mode()).map_err(|e| e.to_string())
     } else {
         match (compression, catalog) {
-            (None, CatalogChoice::Attached) => create_store(Some(path), false),
+            (None, CatalogChoice::Attached) => Store::create(Some(path), false),
             (compression, catalog) => Store::create_with_catalog(
                 Some(path),
                 false,

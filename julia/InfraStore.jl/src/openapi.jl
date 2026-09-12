@@ -14,7 +14,7 @@
     export_time_series_associations_openapi(store; owner_id=nothing,
         owner_category=nothing, time_series_type=nothing, name=nothing,
         resolution=nothing, interval=nothing, features=nothing,
-        component_field=nothing) -> String
+        features_exact=false, component_field=nothing) -> String
 
 Export `time_series_associations` matching the filter (the same filter
 keywords as [`list_metadata`](@ref)) as a sorted OpenAPI-row JSON array.
@@ -33,38 +33,25 @@ function export_time_series_associations_openapi(
     resolution=nothing,
     interval=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field=nothing,
     initial_timestamp=nothing,
     length=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, _name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg, has_initial, initial_arg, has_length, length_arg) = _filter_args(
-        owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, nothing, nothing, initial_timestamp, length,
-    )
-    return _owned_str(
-        (out_json, out_len) ->
-            @ccall libinfrastore.infrastore_store_export_time_series_associations_openapi(
-                store::Ptr{Cvoid},
-                has_owner::Bool,
-                owner_arg::Int64,
-                has_category::Bool,
-                category_arg::Int32,
-                has_type::Bool,
-                type_arg::Int32,
-                name_arg::Cstring,
-                resolution_iso::Cstring,
-                interval_iso::Cstring,
-                features_json::Cstring,
-                component_field_arg::Cstring,
-                zoneless_arg::Int32,
-                has_initial::Bool,
-                initial_arg::Int64,
-                has_length::Bool,
-                length_arg::UInt64,
-                out_json::Ref{Ptr{Cchar}},
-                out_len::Ref{UInt64},
-            )::Int32
-    )
+    return _with_filter(;
+        owner_id, owner_category, time_series_type, name, resolution, interval,
+        features, features_exact, component_field, initial_timestamp, length,
+    ) do filter
+        return _owned_str(
+            (out_json, out_len) ->
+                @ccall libinfrastore.infrastore_store_export_time_series_associations_openapi(
+                    store::Ptr{Cvoid},
+                    filter::Ref{FilterRecord},
+                    out_json::Ref{Ptr{Cchar}},
+                    out_len::Ref{UInt64},
+                )::Int32
+        )
+    end
 end
 
 """

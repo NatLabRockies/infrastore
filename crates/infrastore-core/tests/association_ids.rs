@@ -20,7 +20,7 @@ use infrastore_core::{
     AddRequest, FeatureValue, Features, ListFilter, OwnerCategory, ParentChildAssociation, Period,
     ReadWindow, SingleTimeSeries, Store, SupplementalAttributeAssociation,
     SupplementalAttributeFilter, TimeRange, TimeSeriesData, TimeSeriesError, TimeSeriesId,
-    TimeSeriesType, TransformPolicy, TypedArray, create_store, open_store,
+    TimeSeriesType, TransformPolicy, TypedArray,
 };
 
 /// One hourly `SingleTimeSeries` named `name`, three points long.
@@ -93,7 +93,7 @@ fn every_association_table_declares_autoincrement() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -184,7 +184,7 @@ fn an_id_is_not_reused_after_its_row_is_deleted() {
     };
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         for name in ["first", "second", "third"] {
             store
                 .add_time_series(
@@ -208,7 +208,7 @@ fn an_id_is_not_reused_after_its_row_is_deleted() {
 
     // Remove the row holding the highest id, then add a fresh series.
     {
-        let mut store = open_store(path.as_path(), false).unwrap();
+        let mut store = Store::open(path.as_path(), false).unwrap();
         let doomed = &before.last().unwrap().0;
         let doomed = key(&store, doomed);
         store.remove_by_ids(&[doomed]).unwrap();
@@ -259,7 +259,7 @@ fn the_three_tables_have_independent_id_streams() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         // Two time series, one attachment, one edge: if the streams were shared
         // the attachment and the edge could not both be id 1.
         for name in ["load", "wind"] {
@@ -316,7 +316,7 @@ fn the_three_tables_have_independent_id_streams() {
 /// whatever the catalog assigned.
 #[test]
 fn a_stored_row_reports_the_id_the_catalog_gave_it() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add(AddRequest::new(
             1,
@@ -343,7 +343,7 @@ fn a_stored_row_reports_the_id_the_catalog_gave_it() {
 /// another is filed under a fresh id rather than carrying the old one over.
 #[test]
 fn an_add_always_lets_the_catalog_assign() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add(AddRequest::new(
             1,
@@ -388,7 +388,7 @@ fn an_add_always_lets_the_catalog_assign() {
 /// it — so a later assigned id cannot land on top of one the document placed.
 #[test]
 fn an_imported_id_is_honored_and_ratchets_the_counter() {
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     advance_ids(&mut source, 500);
     source
         .add(AddRequest::new(
@@ -402,7 +402,7 @@ fn an_imported_id_is_honored_and_ratchets_the_counter() {
         .export_time_series_associations_openapi(&ListFilter::default())
         .unwrap();
 
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     target
         .add(AddRequest::new(
             9,
@@ -449,7 +449,7 @@ fn an_imported_id_is_honored_and_ratchets_the_counter() {
 #[test]
 fn an_id_collision_and_an_identity_collision_are_different_errors() {
     // A document exported from a store whose ids start at 1.
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     source
         .add(AddRequest::new(
             1,
@@ -464,7 +464,7 @@ fn an_id_collision_and_an_identity_collision_are_different_errors() {
 
     // The target already holds the array, under a row that took id 1 — so the
     // document's own id 1 is at the high-water mark and cannot be re-filed.
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     target
         .add(AddRequest::new(
             9,
@@ -504,7 +504,7 @@ fn an_id_collision_and_an_identity_collision_are_different_errors() {
 /// taken.
 #[test]
 fn a_copy_gets_its_own_id() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add(AddRequest::new(
             1,
@@ -547,7 +547,7 @@ fn a_copy_gets_its_own_id() {
 /// included, invisibly, with no compiler error to catch it.
 #[test]
 fn a_derived_view_gets_its_own_id() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let long = {
         let initial_timestamp = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let values: Vec<f64> = (0..24).map(|i| i as f64).collect();
@@ -597,7 +597,7 @@ fn a_derived_view_gets_its_own_id() {
 /// `id` is a reserved feature name, so it cannot shadow the metadata field.
 #[test]
 fn id_cannot_be_used_as_a_feature_name() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let mut features = Features::new();
     features.insert("id".to_string(), FeatureValue::Int(3));
     let err = store
@@ -625,7 +625,7 @@ fn id_cannot_be_used_as_a_feature_name() {
 /// reports. The bulk form does the same, in input order.
 #[test]
 fn a_write_reports_the_id_it_used() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let added = store
         .add(AddRequest::new(
             1,
@@ -674,7 +674,7 @@ fn a_write_reports_the_id_it_used() {
 #[test]
 fn an_imported_id_cannot_reissue_a_deleted_one() {
     // Source rows at 1 and 2; the document names both.
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     for name in ["first", "second"] {
         source
             .add(AddRequest::new(
@@ -692,7 +692,7 @@ fn an_imported_id_cannot_reissue_a_deleted_one() {
     // A target that issued id 1 and then deleted that row. The id is retired,
     // not free: the primary key would accept it, and the high-water mark is
     // what refuses it.
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     let anchor = target
         .add(AddRequest::new(
             9,
@@ -744,7 +744,7 @@ fn attach(component_id: i64, attribute_id: i64) -> SupplementalAttributeAssociat
 /// the way in is ignored in favor of this table's own stream.
 #[test]
 fn attaching_reports_its_id() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let first = store
         .add_supplemental_attribute_association(attach(1, 100))
         .unwrap();
@@ -828,7 +828,7 @@ fn an_association_id_is_outside_equality_and_hashing() {
 /// own importer refuses.
 #[test]
 fn the_attribute_association_wire_form_carries_no_id() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_supplemental_attribute_associations(vec![attach(1, 100), attach(2, 101)])
         .unwrap();
@@ -841,7 +841,7 @@ fn the_attribute_association_wire_form_carries_no_id() {
         "the wire form must not carry the catalog id; got {json}",
     );
 
-    let mut fresh = create_store(None, true).unwrap();
+    let mut fresh = Store::create(None, true).unwrap();
     let n = fresh
         .import_supplemental_attribute_associations_openapi(&json)
         .unwrap();
@@ -866,7 +866,7 @@ fn the_attribute_association_wire_form_carries_no_id() {
 /// earlier is asking a question, and a stale reference is an answer.
 #[test]
 fn an_id_resolves_to_its_row_or_to_nothing() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let added = store
         .add(AddRequest::new(
             1,
@@ -897,7 +897,7 @@ fn an_id_resolves_to_its_row_or_to_nothing() {
 /// stale, but it cannot quietly come back meaning a different series.
 #[test]
 fn a_removed_rows_id_stops_resolving_and_is_not_reused() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let added = store
         .add(AddRequest::new(
             1,
@@ -928,7 +928,7 @@ fn a_removed_rows_id_stops_resolving_and_is_not_reused() {
 /// repeats included, and refuses a set containing an id that names no row.
 #[test]
 fn a_bulk_read_by_id_follows_the_order_it_was_given() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let mut ids = Vec::new();
     for (name, base) in [("a", 1.0), ("b", 10.0), ("c", 100.0)] {
         let data = TypedArray::from_f64(vec![3], &[base, base + 1.0, base + 2.0]);
@@ -976,7 +976,7 @@ fn a_bulk_read_by_id_follows_the_order_it_was_given() {
 /// array, and leaves every other row alone.
 #[test]
 fn a_removal_by_id_takes_only_the_row_it_names() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let mut ids = Vec::new();
     for name in ["a", "b", "c"] {
         ids.push(
@@ -1017,7 +1017,7 @@ fn a_removal_by_id_takes_only_the_row_it_names() {
 /// removal is a no-op.
 #[test]
 fn a_removal_by_id_is_all_or_nothing() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let a = store
         .add(AddRequest::new(
             1,
@@ -1058,7 +1058,7 @@ fn a_removal_by_id_is_all_or_nothing() {
 /// other association still references it.
 #[test]
 fn a_removal_by_id_reclaims_only_the_last_reference() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // Same values under two owners: one array, two associations.
     let first = store
         .add(AddRequest::new(
@@ -1093,7 +1093,7 @@ fn a_removal_by_id_reclaims_only_the_last_reference() {
 /// cannot go on its own, but the pair can go together in one batch.
 #[test]
 fn a_removal_by_id_refuses_to_orphan_a_derived_view() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let source = add_long(&mut store, "load");
     let view = store
         .transform_single_time_series(
@@ -1125,7 +1125,7 @@ fn a_read_only_store_refuses_a_removal_by_id() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let id = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let added = store
             .add(AddRequest::new(
                 1,
@@ -1138,7 +1138,7 @@ fn a_read_only_store_refuses_a_removal_by_id() {
         added
     };
 
-    let mut store = open_store(path.as_path(), true).unwrap();
+    let mut store = Store::open(path.as_path(), true).unwrap();
     let err = store.remove_by_ids(&[id]).unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::ReadOnlyStore),
@@ -1155,7 +1155,7 @@ fn ids_survive_a_persist_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let expected: Vec<(String, i64)> = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let mut out = Vec::new();
         for name in ["first", "second", "third"] {
             let added = store
@@ -1172,7 +1172,7 @@ fn ids_survive_a_persist_and_reopen() {
         out
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     for (name, id) in &expected {
         let meta = store
             .get_metadata_by_id(TimeSeriesId(*id))
@@ -1213,7 +1213,7 @@ fn add_long(store: &mut infrastore_core::Store, name: &str) -> TimeSeriesId {
 /// one without listing the store to find it again.
 #[test]
 fn the_sweep_reports_the_views_it_wrote() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for name in ["load", "wind"] {
         add_long(&mut store, name);
     }
@@ -1239,7 +1239,7 @@ fn the_sweep_reports_the_views_it_wrote() {
     }
 
     // A dry run writes nothing, and says so.
-    let mut fresh = create_store(None, true).unwrap();
+    let mut fresh = Store::create(None, true).unwrap();
     add_long(&mut fresh, "load");
     let rehearsal = fresh
         .transform_single_time_series(
@@ -1285,7 +1285,7 @@ fn the_sweep_reports_the_views_it_wrote() {
 /// wrong series.
 #[test]
 fn a_document_round_trips_with_its_ids() {
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     // Ids above whatever the target will have issued for its own rows.
     advance_ids(&mut source, 100);
     let mut expected = Vec::new();
@@ -1312,7 +1312,7 @@ fn a_document_round_trips_with_its_ids() {
     // identity of its own. Arrays are content-addressed, so "the artifact
     // brought the values" is exactly this: the bytes are present, and the rows
     // being imported are the ones that do not exist yet.
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     target
         .add(AddRequest::new(
             9,
@@ -1342,7 +1342,7 @@ fn a_document_round_trips_with_its_ids() {
 /// where the keyed read of the same series does not.
 #[test]
 fn a_read_by_ids_spans_many_query_chunks() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let mut bulk = store.bulk_add();
     for i in 0..1_200 {
@@ -1379,7 +1379,7 @@ fn a_read_by_ids_spans_many_query_chunks() {
 /// and the reference is not on the schema at all.
 #[test]
 fn an_imported_row_is_identical_to_the_exported_one() {
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
     let values: Vec<f64> = (0..24 * 365).map(|i| i as f64).collect();
     let forecast = infrastore_core::Deterministic::new(
@@ -1419,7 +1419,7 @@ fn an_imported_row_is_identical_to_the_exported_one() {
         "{json}"
     );
 
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     // The array, under another owner, so only the row is missing.
     target
         .add(AddRequest::new(
@@ -1452,7 +1452,7 @@ fn an_imported_row_is_identical_to_the_exported_one() {
 /// outcome would depend on an order the document's author never saw.
 #[test]
 fn an_import_refuses_a_document_that_mixes_supplied_and_missing_ids() {
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     for (owner, name) in [(1, "load"), (2, "wind")] {
         source
             .add(AddRequest::new(
@@ -1470,7 +1470,7 @@ fn an_import_refuses_a_document_that_mixes_supplied_and_missing_ids() {
     rows[1].as_object_mut().unwrap().remove("association_id");
     let mixed = serde_json::to_string(&rows).unwrap();
 
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     target
         .add(AddRequest::new(
             9,
@@ -1506,7 +1506,7 @@ fn an_import_refuses_a_document_that_mixes_supplied_and_missing_ids() {
 /// what it may not be is absent.
 #[test]
 fn an_import_refuses_a_view_without_its_source() {
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     // High ids, so the document fits a target that has issued ids of its own.
     advance_ids(&mut source, 100);
     source
@@ -1540,7 +1540,7 @@ fn an_import_refuses_a_view_without_its_source() {
 
     // The array is present (another owner holds the same values), so only
     // the source check stands between the view and the catalog.
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     target
         .add(AddRequest::new(
             9,
@@ -1586,7 +1586,7 @@ fn an_import_refuses_a_view_without_its_source() {
 /// failing later with nothing pointing back at the import.
 #[test]
 fn an_import_refuses_a_row_that_misdescribes_its_array() {
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     // Above the target's anchor row, so the closing import turns on the shape
     // check alone rather than on an id the target has already issued.
     advance_ids(&mut source, 10);
@@ -1610,7 +1610,7 @@ fn an_import_refuses_a_row_that_misdescribes_its_array() {
 
     // A target holding the real array, so only the geometry check stands
     // between the row and the catalog.
-    let mut target = create_store(None, true).unwrap();
+    let mut target = Store::create(None, true).unwrap();
     target
         .add(AddRequest::new(
             9,
@@ -1649,7 +1649,7 @@ fn an_import_refuses_a_row_that_misdescribes_its_array() {
 /// writing an association that reads back as nothing.
 #[test]
 fn an_import_refuses_a_row_whose_array_is_absent() {
-    let mut source = create_store(None, true).unwrap();
+    let mut source = Store::create(None, true).unwrap();
     source
         .add(AddRequest::new(
             1,
@@ -1662,7 +1662,7 @@ fn an_import_refuses_a_row_whose_array_is_absent() {
         .export_time_series_associations_openapi(&ListFilter::default())
         .unwrap();
 
-    let mut empty = create_store(None, true).unwrap();
+    let mut empty = Store::create(None, true).unwrap();
     let err = empty
         .import_time_series_associations_openapi(&json)
         .unwrap_err();
@@ -1686,7 +1686,7 @@ fn an_import_refuses_a_row_whose_array_is_absent() {
 /// issued its ids.
 #[test]
 fn an_irregular_row_carries_its_axis_and_its_id() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let timestamps = vec![
         Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
         Utc.with_ymd_and_hms(2024, 1, 1, 5, 0, 0).unwrap(),
@@ -1743,7 +1743,7 @@ fn an_irregular_row_carries_its_axis_and_its_id() {
 /// name.
 #[test]
 fn a_persistent_row_travels_in_neither_direction() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let breakpoints = vec![
         Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
         Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap(),
@@ -1861,7 +1861,7 @@ fn add_day_series(store: &mut infrastore_core::Store, name: &str) -> TimeSeriesI
 /// `initial_timestamp` to the one it starts at.
 #[test]
 fn a_windowed_read_by_id_slices_a_single_time_series() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let id = add_day_series(&mut store, "load");
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
@@ -1902,7 +1902,7 @@ fn a_windowed_read_by_id_slices_a_single_time_series() {
 /// by a raw range and refused by a window.
 #[test]
 fn a_windowed_read_by_id_refuses_what_a_range_would_clamp() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let id = add_day_series(&mut store, "load");
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
@@ -1961,7 +1961,7 @@ fn a_windowed_read_by_id_refuses_what_a_range_would_clamp() {
 /// A start between two steps is off the grid, not rounded down onto it.
 #[test]
 fn a_windowed_read_by_id_refuses_an_off_grid_start() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let id = add_day_series(&mut store, "load");
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
@@ -1977,7 +1977,7 @@ fn a_windowed_read_by_id_refuses_an_off_grid_start() {
 /// A forecast slices on its window axis by `count`, from a window boundary.
 #[test]
 fn a_windowed_read_by_id_slices_a_forecast_by_count() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(2);
@@ -2036,7 +2036,7 @@ fn a_windowed_read_by_id_slices_a_forecast_by_count() {
 /// The extent argument belonging to the other family is refused, not ignored.
 #[test]
 fn a_windowed_read_by_id_refuses_the_wrong_extent_argument() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let id = add_day_series(&mut store, "load");
 
     let err = store
@@ -2052,7 +2052,7 @@ fn a_windowed_read_by_id_refuses_the_wrong_extent_argument() {
 /// timestamps — there is no grid to round onto.
 #[test]
 fn a_windowed_read_by_id_slices_a_non_sequential_series() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let timestamps = vec![
         initial,
@@ -2106,7 +2106,7 @@ fn a_windowed_read_by_id_slices_a_non_sequential_series() {
 /// fails it — matching `read_by_ids` and `remove_by_ids`.
 #[test]
 fn a_windowed_read_by_id_fails_on_a_dangling_id() {
-    let store = create_store(None, true).unwrap();
+    let store = Store::create(None, true).unwrap();
     assert!(matches!(
         store
             .read_by_id(TimeSeriesId(9_999), ReadWindow::full())
@@ -2125,7 +2125,7 @@ fn a_windowed_read_by_id_fails_on_a_dangling_id() {
 
 /// Two owners, each with one series, and the ids of both.
 fn two_owners() -> (Store, TimeSeriesId, TimeSeriesId) {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for owner in [1, 2] {
         store
             .add(AddRequest::new(

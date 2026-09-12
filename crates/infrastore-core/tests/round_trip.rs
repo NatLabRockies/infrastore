@@ -6,8 +6,7 @@ use std::collections::BTreeMap;
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     FeatureValue, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
-    open_store,
+    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -35,7 +34,7 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
     let values: Vec<f64> = (0..12).map(|i| 100.0 + i as f64).collect();
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let s = SingleTimeSeries::new(
             initial,
             Period::Months(1),
@@ -56,7 +55,7 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
 
     // Reopen read-only: the resolution survives the ISO round trip as a calendar
     // period (not a fixed ms span).
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let keys = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].resolution, Some(Period::Months(1)));
@@ -89,7 +88,7 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
 
 #[test]
 fn add_and_get_round_trip() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let s = series(2024, 24, 100.0);
 
     let key = store
@@ -121,7 +120,7 @@ fn add_and_get_round_trip() {
 /// unequal.
 #[test]
 fn a_series_reads_back_equal_to_the_one_written() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     // The plain case: nothing declared, so the constructor resolves the element
     // type and the read must agree with what it chose.
@@ -186,7 +185,7 @@ fn a_series_reads_back_equal_to_the_one_written() {
 
 #[test]
 fn duplicate_key_rejected() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let s = series(2024, 12, 1.0);
 
     store
@@ -213,7 +212,7 @@ fn duplicate_key_rejected() {
 
 #[test]
 fn features_disambiguate_keys() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let s1 = series(2024, 12, 1.0);
     let s2 = series(2024, 12, 100.0);
 
@@ -254,7 +253,7 @@ fn features_disambiguate_keys() {
 #[test]
 fn deduplication_via_content_addressing() {
     // Two associations with identical data should share one underlying array.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let s = series(2024, 24, 7.0);
 
     store
@@ -314,7 +313,7 @@ fn deduplication_via_content_addressing() {
 
 #[test]
 fn remove_keeps_array_when_other_refs_exist() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let s = series(2024, 12, 1.0);
 
     let k1 = store
@@ -354,7 +353,7 @@ fn remove_keeps_array_when_other_refs_exist() {
 fn bulk_add_atomic_rollback() {
     use infrastore_core::AddRequest;
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let s_ok = series(2024, 12, 1.0);
     let s_dup = series(2024, 12, 100.0);
 
@@ -395,7 +394,7 @@ fn bulk_add_atomic_rollback() {
 
 #[test]
 fn time_range_slicing() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let data = TypedArray::from_f64(vec![6], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
@@ -426,7 +425,7 @@ fn time_range_slicing() {
 
 #[test]
 fn clear_by_owner() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let s = series(2024, 12, 1.0);
 
     for owner in [1i64, 2, 3] {
@@ -462,7 +461,7 @@ fn read_only_blocks_writes() {
 
     // Create a writable store at `path` (catalog sqlite) and add a row.
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let s = series(2024, 12, 1.0);
         store
             .add_time_series(
@@ -476,7 +475,7 @@ fn read_only_blocks_writes() {
     }
 
     // Reopen read-only.
-    let mut ro = infrastore_core::open_store(path.as_path() as &Path, true).unwrap();
+    let mut ro = infrastore_core::Store::open(path.as_path() as &Path, true).unwrap();
     let s = series(2024, 12, 1.0);
     let err = ro
         .add_time_series(
@@ -492,7 +491,7 @@ fn read_only_blocks_writes() {
 
 #[test]
 fn distinct_resolutions_returned_sorted() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
 
@@ -529,7 +528,7 @@ fn distinct_resolutions_returned_sorted() {
 
 #[test]
 fn non_sequential_round_trip_and_time_slice() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let timestamps = vec![
         initial,
@@ -589,7 +588,7 @@ fn non_sequential_validates_timestamps() {
 
 #[test]
 fn duplicate_non_sequential_key_is_rejected() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     for values in [[1.0, 2.0], [3.0, 4.0]] {
         let series = NonSequentialTimeSeries::new(
@@ -620,7 +619,7 @@ fn duplicate_non_sequential_key_is_rejected() {
 fn list_keys_with_hash_groups_shared_arrays() {
     use std::collections::HashMap;
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // Two owners with identical data: deduplicated to one stored array (one hash).
     for owner in [1, 2] {
         store
@@ -683,7 +682,7 @@ fn only_key(store: &infrastore_core::Store, owner: i64) -> infrastore_core::Time
 
 #[test]
 fn copy_time_series_shares_the_array_and_renames() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_time_series(
             1,
@@ -716,7 +715,7 @@ fn copy_time_series_shares_the_array_and_renames() {
 
 #[test]
 fn copy_time_series_preserves_deterministic_single_type() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_time_series(
             1,
@@ -777,7 +776,7 @@ fn copy_time_series_preserves_deterministic_single_type() {
 
 #[test]
 fn copy_time_series_rejects_a_duplicate_destination() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_time_series(
             1,
@@ -812,7 +811,7 @@ fn copy_time_series_rejects_a_duplicate_destination() {
 /// invariant: a stray cascade would silently blank the survivors.
 #[test]
 fn deleting_one_sharer_leaves_the_others_features_intact() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let features = features_with_year(2030);
 
     // Three owners, one identical feature set: one stored `feature_sets` group.
@@ -850,7 +849,7 @@ fn deleting_one_sharer_leaves_the_others_features_intact() {
 /// shared, so deletion cannot cascade), and `compact` is what reclaims it.
 #[test]
 fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let features = features_with_year(2031);
     let key = store
         .add_time_series(
@@ -883,7 +882,7 @@ fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
 /// from scaling with feature count.
 #[test]
 fn transform_reuses_the_sources_feature_set() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let features = features_with_year(2032);
 
     for owner in 1..=5i64 {
@@ -937,7 +936,7 @@ fn transform_reuses_the_sources_feature_set() {
 #[test]
 fn static_consistency_is_checked_per_resolution() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let add = |store: &mut infrastore_core::Store, owner: i64, res, len: usize| {
         let values: Vec<f64> = (0..len).map(|i| owner as f64 * 100.0 + i as f64).collect();
         let s = SingleTimeSeries::new(
@@ -1002,7 +1001,7 @@ fn static_consistency_is_checked_per_resolution() {
 /// and it is reclaimed only when the last of them goes.
 #[test]
 fn a_shared_timestamp_vector_is_stored_once_and_swept_when_orphaned() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let stamps: Vec<_> = (0..64)
         .map(|k| {
             Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 7 + k % 3)
@@ -1080,7 +1079,7 @@ fn the_catalog_does_not_scale_with_rows_times_timestamps() {
         .collect();
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let mut bulk = store.bulk_add();
         for owner in 1..=50i64 {
             let values: Vec<f64> = (0..stamps.len()).map(|i| owner as f64 + i as f64).collect();
@@ -1109,7 +1108,7 @@ fn the_catalog_does_not_scale_with_rows_times_timestamps() {
     );
 
     // And it still reads back intact.
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let keys = store.list_metadata(ListFilter::new()).unwrap();
     assert_eq!(keys.len(), 50);
     match store
@@ -1127,7 +1126,7 @@ fn the_catalog_does_not_scale_with_rows_times_timestamps() {
 /// only a working-set-exceeding test can catch that.
 #[test]
 fn many_distinct_time_axes_survive_the_decode_memo() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
     // Deliberately more than the memo's capacity, each axis distinct in both
     // spacing and extent so a mix-up cannot go unnoticed.

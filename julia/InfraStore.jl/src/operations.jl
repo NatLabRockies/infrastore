@@ -448,21 +448,17 @@ function has_time_series(
     resolution::Union{Nothing, Period}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
 )
-    resolution_iso = _period_to_cstr(resolution)
-    features_json =
-        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features)
-    out = Ref{Bool}(false)
-    code = @ccall libinfrastore.infrastore_store_has_by_attrs(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        name::Cstring,
-        resolution_iso::Cstring,
-        features_json::Cstring,
-        out::Ref{Bool},
-    )::Int32
-    _check(code)
-    return out[]
+    # `features_exact`: this is the key-identity probe, so `features` is the
+    # row's whole feature set, not a subset it must contain.
+    return has_any_time_series(
+        store;
+        owner_id=owner_id,
+        owner_category=owner_category,
+        name=name,
+        resolution=resolution,
+        features=features,
+        features_exact=true,
+    )
 end
 
 """
@@ -479,18 +475,12 @@ function has_for_owner(
     owner_category::OwnerCategory;
     time_series_type::Union{Nothing, Type}=nothing,
 )
-    out = Ref{Bool}(false)
-    use_type = time_series_type !== nothing
-    code = @ccall libinfrastore.infrastore_store_has_for_owner(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        (use_type ? _filter_type_code(time_series_type) : Int32(0))::Int32,
-        use_type::Bool,
-        out::Ref{Bool},
-    )::Int32
-    _check(code)
-    return out[]
+    return has_any_time_series(
+        store;
+        owner_id=owner_id,
+        owner_category=owner_category,
+        time_series_type=time_series_type,
+    )
 end
 
 # Reconstruct one SingleTimeSeries from a bulk-read result slot. Like the other

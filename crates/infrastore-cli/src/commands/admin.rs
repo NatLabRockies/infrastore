@@ -133,7 +133,7 @@ pub fn arrays(
     for key in rows {
         let hash = key.data_hash;
         if let Some(prefix) = &wanted
-            && !fields::hash_hex(&hash).starts_with(prefix)
+            && !infrastore_core::hash_hex(&hash).starts_with(prefix)
         {
             continue;
         }
@@ -158,7 +158,7 @@ pub fn arrays(
             .count_array_references(hash)
             .map_err(|e| e.to_string())?;
         items.push(json!({
-            "data_hash": fields::hash_hex(hash),
+            "data_hash": infrastore_core::hash_hex(hash),
             "location": location,
             "refs": keys.len(),
             "refs_single": sts_refs,

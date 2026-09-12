@@ -8,7 +8,6 @@ use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Dtype, ElementType, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, Period,
     PersistentTimeSeries, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesType, TypedArray,
-    create_store,
 };
 use infrastore_server::client::RemoteClient;
 use infrastore_server::service::CatalogStoreService;
@@ -42,7 +41,7 @@ fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
 }
 
 fn fixture_store() -> Store {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let s = series(2024, 24, 100.0);
     let mut features: Features = BTreeMap::new();
     features.insert("model_year".into(), FeatureValue::Int(2030));
@@ -347,7 +346,7 @@ async fn persistent_round_trip_over_grpc() {
 
 #[tokio::test]
 async fn dtype_preserved_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let mut bytes = Vec::new();
@@ -390,7 +389,7 @@ async fn dtype_preserved_over_grpc() {
 /// the same shape, and decode it.
 #[tokio::test]
 async fn element_type_preserved_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     // Two timesteps; the widest has 2 points, so the row width is 1 + 2*2 = 5.
     let data = TypedArray::from_f64(
@@ -524,7 +523,7 @@ async fn additive_read_rpcs() {
 /// metadata row, so a remote reader can both select by it and read it.
 #[tokio::test]
 async fn component_field_filters_and_round_trips_over_the_wire() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for (owner, field) in [
         (1i64, Some("max_active_power")),
         (2, Some("rating")),
@@ -637,7 +636,7 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
 /// ever asserted descriptors through `GetMetadata`, so the gap was invisible.
 #[tokio::test]
 async fn a_value_read_carries_the_unit_descriptors() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let described = TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0))
         .with_units("MW")
         .with_quantity_kind("ActivePower")
@@ -703,7 +702,7 @@ async fn a_value_read_carries_the_unit_descriptors() {
 
 #[tokio::test]
 async fn store_attributes_read_over_the_wire() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .set_store_attribute("creator", "sienna-build")
         .unwrap();

@@ -11,7 +11,6 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, PersistentTimeSeries, ReadWindow,
     StaticReader, Store, TimeRange, TimeSeriesData, TimeSeriesId, TimeSeriesType, TypedArray,
-    create_store,
 };
 
 /// `2024-<month>-01T00:00:00Z`.
@@ -174,7 +173,7 @@ fn a_persistent_series_round_trips_through_an_on_disk_store() {
         .with_component_field("fuel_cost")
         .with_application_data(r#"{"as_time_series":false,"force_scalar_mode":"midpoint"}"#);
     let id = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let id = store
             .add_time_series(
                 7,
@@ -188,7 +187,7 @@ fn a_persistent_series_round_trips_through_an_on_disk_store() {
         id
     };
 
-    let store = infrastore_core::open_store(path.as_path(), true).unwrap();
+    let store = infrastore_core::Store::open(path.as_path(), true).unwrap();
     let back = store.read_by_id(id, ReadWindow::full()).unwrap();
     let back = back.as_persistent().expect("reads back as persistent");
     assert_eq!(back.timestamps, original.timestamps);
@@ -210,7 +209,7 @@ fn a_persistent_series_round_trips_through_an_on_disk_store() {
 
 #[test]
 fn a_range_read_starts_at_the_breakpoint_in_force_not_the_next_one() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let id = store
         .add_time_series(
             1,
@@ -259,7 +258,7 @@ fn a_range_read_starts_at_the_breakpoint_in_force_not_the_next_one() {
 /// the same behavior.
 #[test]
 fn a_zero_width_range_read_selects_no_breakpoints() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let id = add(&mut store, 1, curve("gas", &[1, 4, 7, 10]));
     let read_range = |range| {
         store
@@ -289,7 +288,7 @@ fn a_zero_width_range_read_selects_no_breakpoints() {
 
 #[test]
 fn the_write_path_refuses_a_malformed_persistent_series() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let mut bad = curve("gas", &[1, 4, 7]);
     bad.timestamps = vec![month(4), month(1), month(7)];
     let err = store
@@ -330,7 +329,7 @@ fn the_write_path_refuses_a_malformed_persistent_series() {
 fn a_persistent_and_a_non_sequential_series_share_one_stored_array() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
 
     let timestamps: Vec<_> = [1u32, 4, 7].iter().map(|m| month(*m)).collect();
     let values = [10.0f64, 40.0, 70.0];
@@ -393,7 +392,7 @@ fn expected(months: &[u32], at: DateTime<Utc>) -> Option<f64> {
 fn a_reader_resolves_each_column_on_its_own_breakpoints() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
 
     // Deliberately misaligned: monthly, quarterly, and a single breakpoint. No
     // two share an axis except by accident, which is the whole point.
@@ -454,7 +453,7 @@ fn a_reader_resolves_each_column_on_its_own_breakpoints() {
 
 #[test]
 fn columns_sharing_a_vector_are_interned_and_still_read_correctly() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // Two on one axis, one on another: exercises both the interning and the
     // `(dataset, row)` bucketing in the backend override.
     let shared = vec![1u32, 4, 7, 10];
@@ -495,7 +494,7 @@ fn columns_sharing_a_vector_are_interned_and_still_read_correctly() {
 
 #[test]
 fn vector_ids_stay_parallel_through_the_group_sort() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // Mixed dtypes and element shapes force several groups, and `build_groups`
     // sorts rows to make column order stable. The vector ids must ride along.
     let f64_curve = curve("z_f64", &[1, 7]);
@@ -580,7 +579,7 @@ fn vector_ids_stay_parallel_through_the_group_sort() {
 
 #[test]
 fn reading_before_a_column_s_first_breakpoint_names_that_column() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(&mut store, 1, curve("early", &[1, 6]));
     let late = add(&mut store, 2, curve("late", &[9]));
 
@@ -606,7 +605,7 @@ fn reading_before_a_column_s_first_breakpoint_names_that_column() {
 
 #[test]
 fn a_reader_refuses_to_mix_persistent_with_non_sequential_columns() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let timestamps = vec![month(1), month(6)];
     add(&mut store, 1, curve("step", &[1, 6]));
     store
@@ -659,7 +658,7 @@ fn a_reader_refuses_to_mix_persistent_with_non_sequential_columns() {
 
 #[test]
 fn a_persistent_reader_takes_no_resolution_filter() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(&mut store, 1, curve("gas", &[1, 6]));
     let err = store
         .build_static_reader(
@@ -674,7 +673,7 @@ fn a_persistent_reader_takes_no_resolution_filter() {
 
 #[test]
 fn an_empty_persistent_selection_is_an_error_not_an_empty_reader() {
-    let store = create_store(None, true).unwrap();
+    let store = Store::create(None, true).unwrap();
     let err = store
         .build_static_reader(
             ListFilter::new().time_series_type(TimeSeriesType::PersistentTimeSeries),

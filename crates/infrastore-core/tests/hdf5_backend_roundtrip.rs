@@ -4,8 +4,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Deterministic, Features, ListFilter, OwnerCategory, SingleTimeSeries, TimeSeriesData,
-    TypedArray, create_store, open_store,
+    Deterministic, Features, ListFilter, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData,
+    TypedArray,
 };
 
 fn series(length: usize, base: f64) -> SingleTimeSeries {
@@ -40,7 +40,7 @@ fn hdf5_store_round_trip_reopen_and_persist() {
     let path = dir.path().join("store.h5");
 
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -63,7 +63,7 @@ fn hdf5_store_round_trip_reopen_and_persist() {
     }
 
     // Reopen: `open_store` validates the backend attribute from the file.
-    let mut store = open_store(path.as_path(), false).unwrap();
+    let mut store = Store::open(path.as_path(), false).unwrap();
     let keys = store
         .list_metadata(
             ListFilter::new()
@@ -83,7 +83,7 @@ fn hdf5_store_round_trip_reopen_and_persist() {
     // actually carries; any other backend type fails on an hdf5-backend file.
     let dest = dir.path().join("copy.h5");
     store.persist_to(dest.as_path()).unwrap();
-    let copy = open_store(dest.as_path(), true).unwrap();
+    let copy = Store::open(dest.as_path(), true).unwrap();
     assert_eq!(
         copy.list_metadata(
             ListFilter::new()

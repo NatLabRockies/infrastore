@@ -206,52 +206,50 @@ function _decode_metadata(r::AbstractDict)
     )
 end
 
-# Marshal the shared catalog-filter arguments every `infrastore_store_list_*` /
-# `infrastore_store_remove_by_filter` FFI takes, as a tuple in argument order.
-function _filter_args(
-    owner_id, owner_category, time_series_type, name, resolution, interval, features,
-    component_field=nothing, name_glob=nothing, zoneless=nothing,
-    initial_timestamp=nothing, length=nothing,
-)
-    has_owner = owner_id !== nothing
-    has_category = owner_category !== nothing
-    has_type = time_series_type !== nothing
-    return (
-        has_owner,
-        has_owner ? Int64(owner_id) : Int64(0),
-        has_category,
-        has_category ? _category_int(owner_category) : Int32(0),
-        has_type,
-        has_type ? _filter_type_code(time_series_type) : Int32(0),
-        name === nothing ? C_NULL : String(name),
-        name_glob === nothing ? C_NULL : String(name_glob),
-        _period_to_cstr(resolution),
-        _period_to_cstr(interval),
-        (features === nothing || isempty(features)) ? C_NULL : JSON.json(features),
-        component_field === nothing ? C_NULL : String(component_field),
-        # Tri-state: negative is "no filter", which is what a caller that does
-        # not care passes. The two coherence groups are 0 and 1.
-        zoneless === nothing ? Int32(-1) : Int32(zoneless ? 1 : 0),
-        # The grid pair. Matched on the instant a row stores, so no spelling flag
-        # rides along: a filter selects rather than reads, and an anchor no row
-        # was written with is an empty listing, not an error.
-        initial_timestamp !== nothing,
-        initial_timestamp === nothing ? Int64(0) : _to_unix_ms(initial_timestamp),
-        length !== nothing,
-        length === nothing ? UInt64(0) : UInt64(length),
-    )
+# ---- The catalog filter record ----------------------------------------------
+#
+# Mirrors `#[repr(C)] struct InfraStoreFilter` in `crates/infrastore-ffi`: one
+# record in place of the seventeen positional arguments every filter-taking
+# export used to carry, so adding a filter changes no signature. Field order and
+# types must match the Rust struct exactly. All-zero is the empty filter, which
+# matches everything.
+struct FilterRecord
+    has_owner_id::Bool
+    owner_id::Int64
+    has_owner_category::Bool
+    owner_category::Int32
+    has_time_series_type::Bool
+    time_series_type::Int32
+    name::Ptr{Cchar}
+    name_glob::Ptr{Cchar}
+    resolution::Ptr{Cchar}
+    interval::Ptr{Cchar}
+    features_json::Ptr{Cchar}
+    features_exact::Bool
+    component_field::Ptr{Cchar}
+    has_zoneless::Bool
+    zoneless::Bool
+    has_initial_timestamp::Bool
+    initial_timestamp_ms::Int64
+    has_length::Bool
+    length::UInt64
 end
 
-# Run one JSON-returning catalog-filter FFI export (`fname`) with the shared
-# filter arguments. The exports share one C signature, so the symbol is resolved
-# at runtime (`_cached_dlsym`, `lib.jl`) and called through the pointer.
+_cptr(::Nothing) = Ptr{Cchar}(C_NULL)
+# Through `Cstring` rather than `pointer` so an embedded NUL is still the
+# `ArgumentError` a `::Cstring` `@ccall` argument raised: a raw pointer would
+# hand the C side a silently truncated name.
+_cptr(s::String) = Ptr{Cchar}(Base.unsafe_convert(Cstring, s))
+
+# Marshal the catalog-filter keywords into a `FilterRecord` and run `f` on a
+# reference to it.
 #
-# These return an owned string rather than following the probe-then-fetch
-# convention: a listing's size scales with the catalog, and probe-then-fetch
-# would run the query and serialize every row twice, once per call.
-function _filter_list_json(
-    fname::Symbol,
-    store::Store;
+# The strings are materialized as locals of this frame and preserved across the
+# call: the record holds raw pointers into them, and a Julia String is
+# collectable the moment nothing references it. `f` runs inside the
+# `GC.@preserve` block for that reason -- the record must not outlive it.
+function _with_filter(
+    f::Function;
     owner_id=nothing,
     owner_category=nothing,
     time_series_type=nothing,
@@ -259,41 +257,71 @@ function _filter_list_json(
     resolution=nothing,
     interval=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field=nothing,
     name_glob=nothing,
-    zoneless=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
     length=nothing,
 )
+    name_s = name === nothing ? nothing : String(name)
+    glob_s = name_glob === nothing ? nothing : String(name_glob)
+    resolution_s = resolution === nothing ? nothing : _period_to_iso(resolution)
+    interval_s = interval === nothing ? nothing : _period_to_iso(interval)
+    features_s =
+        (features === nothing || isempty(features)) ? nothing : JSON.json(features)
+    component_field_s = component_field === nothing ? nothing : String(component_field)
+    GC.@preserve name_s glob_s resolution_s interval_s features_s component_field_s begin
+        record = FilterRecord(
+            owner_id !== nothing,
+            owner_id === nothing ? Int64(0) : Int64(owner_id),
+            owner_category !== nothing,
+            owner_category === nothing ? Int32(0) : _category_int(owner_category),
+            time_series_type !== nothing,
+            time_series_type === nothing ? Int32(0) :
+            _filter_type_code(time_series_type),
+            _cptr(name_s),
+            _cptr(glob_s),
+            _cptr(resolution_s),
+            _cptr(interval_s),
+            _cptr(features_s),
+            features_exact,
+            _cptr(component_field_s),
+            # The two coherence groups; unset leaves the choice to the caller's
+            # other filters.
+            zoneless !== nothing,
+            zoneless === true,
+            # The grid pair. Matched on the instant a row stores, so no spelling
+            # flag rides along: a filter selects rather than reads, and an anchor
+            # no row was written with is an empty listing, not an error.
+            initial_timestamp !== nothing,
+            initial_timestamp === nothing ? Int64(0) : _to_unix_ms(initial_timestamp),
+            length !== nothing,
+            length === nothing ? UInt64(0) : UInt64(length),
+        )
+        return f(Ref(record))
+    end
+end
+
+# Run one JSON-returning catalog-filter FFI export (`fname`) with the shared
+# filter record. The exports share one C signature, so the symbol is resolved at
+# runtime (`_cached_dlsym`, `lib.jl`) and called through the pointer.
+#
+# These return an owned string rather than following the probe-then-fetch
+# convention: a listing's size scales with the catalog, and probe-then-fetch
+# would run the query and serialize every row twice, once per call.
+function _filter_list_json(fname::Symbol, store::Store; kwargs...)
     fptr = _cached_dlsym(fname)
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg, has_initial, initial_arg, has_length, length_arg) = _filter_args(
-        owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob, zoneless, initial_timestamp, length,
-    )
-    return _owned_str(
-        (out_json, out_len) -> @ccall $fptr(
-            store::Ptr{Cvoid},
-            has_owner::Bool,
-            owner_arg::Int64,
-            has_category::Bool,
-            category_arg::Int32,
-            has_type::Bool,
-            type_arg::Int32,
-            name_arg::Cstring,
-            name_glob_arg::Cstring,
-            resolution_iso::Cstring,
-            interval_iso::Cstring,
-            features_json::Cstring,
-            component_field_arg::Cstring,
-            zoneless_arg::Int32,
-            has_initial::Bool,
-            initial_arg::Int64,
-            has_length::Bool,
-            length_arg::UInt64,
-            out_json::Ref{Ptr{Cchar}},
-            out_len::Ref{UInt64},
-        )::Int32
-    )
+    return _with_filter(; kwargs...) do filter
+        return _owned_str(
+            (out_json, out_len) -> @ccall $fptr(
+                store::Ptr{Cvoid},
+                filter::Ref{FilterRecord},
+                out_json::Ref{Ptr{Cchar}},
+                out_len::Ref{UInt64},
+            )::Int32
+        )
+    end
 end
 
 """
@@ -321,7 +349,8 @@ is the one part of a row that costs a read per row, so a listing omits it and
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and
   never match an interval filter).
-- `features` — match rows whose features include all the given entries (subset).
+- `features` — match rows whose features include all the given entries (subset);
+  `features_exact=true` matches them as the row's whole feature set instead.
 - `component_field` — exact, case-sensitive match on the owning component's
   field (e.g. `"max_active_power"`). A row that declares none matches no value,
   so this cannot select the rows that left it unset.
@@ -404,38 +433,25 @@ function remove_by_filter!(
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field::Union{Nothing, AbstractString}=nothing,
     name_glob::Union{Nothing, AbstractString}=nothing,
     zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
     length::Union{Nothing, Integer}=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg, has_initial, initial_arg, has_length, length_arg) = _filter_args(
-        owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob, zoneless, initial_timestamp, length,
-    )
     out_removed = Ref{UInt64}(0)
-    code = @ccall libinfrastore.infrastore_store_remove_by_filter(
-        store::Ptr{Cvoid},
-        has_owner::Bool,
-        owner_arg::Int64,
-        has_category::Bool,
-        category_arg::Int32,
-        has_type::Bool,
-        type_arg::Int32,
-        name_arg::Cstring,
-        name_glob_arg::Cstring,
-        resolution_iso::Cstring,
-        interval_iso::Cstring,
-        features_json::Cstring,
-        component_field_arg::Cstring,
-        zoneless_arg::Int32,
-        has_initial::Bool,
-        initial_arg::Int64,
-        has_length::Bool,
-        length_arg::UInt64,
-        out_removed::Ref{UInt64},
-    )::Int32
+    code = _with_filter(;
+        owner_id, owner_category, time_series_type, name, resolution, interval,
+        features, features_exact, component_field, name_glob, zoneless,
+        initial_timestamp, length,
+    ) do filter
+        @ccall libinfrastore.infrastore_store_remove_by_filter(
+            store::Ptr{Cvoid},
+            filter::Ref{FilterRecord},
+            out_removed::Ref{UInt64},
+        )::Int32
+    end
     _check(code)
     return Int(out_removed[])
 end
@@ -503,11 +519,12 @@ it is safe for hot per-component loops.
 An existence question is an *identify* operation, which is why it stayed
 attribute-addressed when the reads moved to ids: routing it through a
 resolution would trade an index seek for a row fetch in exactly the loops it
-exists for. `features` is a subset match here — but it stays on indexes: the
-store probes the requested
-set as an exact set (by hash) first, so callers passing the complete feature
-set get a single covering-index seek; only genuinely partial feature lists take
-the indexed per-feature fallback probe.
+exists for. `features` is a subset match by default — but it stays on indexes:
+the store probes the requested set as an exact set (by hash) first, so callers
+passing the complete feature set get a single covering-index seek; only
+genuinely partial feature lists take the indexed per-feature fallback probe.
+Pass `features_exact=true` to match `features` as the row's whole feature set,
+which is the content-hash comparison and always an index seek.
 """
 function has_any_time_series(
     store::Store;
@@ -518,38 +535,25 @@ function has_any_time_series(
     resolution=nothing,
     interval=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
+    features_exact::Bool=false,
     component_field=nothing,
     name_glob=nothing,
-    zoneless=nothing,
+    zoneless::Union{Nothing, Bool}=nothing,
     initial_timestamp=nothing,
     length=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, name_glob_arg, resolution_iso, interval_iso, features_json, component_field_arg, zoneless_arg, has_initial, initial_arg, has_length, length_arg) = _filter_args(
-        owner_id, owner_category, time_series_type, name, resolution, interval, features,
-        component_field, name_glob, zoneless, initial_timestamp, length,
-    )
     out = Ref{Bool}(false)
-    code = @ccall libinfrastore.infrastore_store_has_any_by_filter(
-        store::Ptr{Cvoid},
-        has_owner::Bool,
-        owner_arg::Int64,
-        has_category::Bool,
-        category_arg::Int32,
-        has_type::Bool,
-        type_arg::Int32,
-        name_arg::Cstring,
-        name_glob_arg::Cstring,
-        resolution_iso::Cstring,
-        interval_iso::Cstring,
-        features_json::Cstring,
-        component_field_arg::Cstring,
-        zoneless_arg::Int32,
-        has_initial::Bool,
-        initial_arg::Int64,
-        has_length::Bool,
-        length_arg::UInt64,
-        out::Ref{Bool},
-    )::Int32
+    code = _with_filter(;
+        owner_id, owner_category, time_series_type, name, resolution, interval,
+        features, features_exact, component_field, name_glob, zoneless,
+        initial_timestamp, length,
+    ) do filter
+        @ccall libinfrastore.infrastore_store_has_any_by_filter(
+            store::Ptr{Cvoid},
+            filter::Ref{FilterRecord},
+            out::Ref{Bool},
+        )::Int32
+    end
     _check(code)
     return out[]
 end

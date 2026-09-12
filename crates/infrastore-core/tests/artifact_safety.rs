@@ -10,8 +10,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     CatalogMode, Compression, Features, ListFilter, OwnerCategory, SingleTimeSeries, Store,
-    TimeSeriesData, TimeSeriesError, TypedArray, catalog_sqlite_path, create_store,
-    create_store_replacing, create_store_with_catalog, open_store, open_store_copy,
+    TimeSeriesData, TimeSeriesError, TypedArray, catalog_sqlite_path,
 };
 
 fn series(base: f64) -> SingleTimeSeries {
@@ -93,7 +92,7 @@ fn staging_strays(dir: &std::path::Path) -> Vec<String> {
 
 /// A saved store at `path` holding one series for owner 1.
 fn saved_store(path: &std::path::Path) {
-    let mut store = create_store(Some(path), false).unwrap();
+    let mut store = Store::create(Some(path), false).unwrap();
     add(&mut store, 1, 100.0);
     store.flush().unwrap();
 }
@@ -116,7 +115,7 @@ fn creating_over_a_saved_store_is_refused() {
     saved_store(&path);
     let before = std::fs::metadata(&path).unwrap().len();
 
-    let err = create_store(Some(&path), false)
+    let err = Store::create(Some(&path), false)
         .err()
         .expect("creating over a saved store must be refused");
     assert!(
@@ -130,7 +129,7 @@ fn creating_over_a_saved_store_is_refused() {
         before,
         "the refused create still truncated the file"
     );
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(read_values(&store, 1)[0], 100.0);
     assert!(store.verify_integrity().unwrap().ok());
 }
@@ -147,7 +146,7 @@ fn creating_over_a_lone_half_is_refused() {
     saved_store(&only_catalog);
     std::fs::remove_file(&only_catalog).unwrap();
     assert!(matches!(
-        create_store(Some(&only_catalog), false).err(),
+        Store::create(Some(&only_catalog), false).err(),
         Some(TimeSeriesError::StoreExists { .. })
     ));
 
@@ -155,7 +154,7 @@ fn creating_over_a_lone_half_is_refused() {
     saved_store(&only_arrays);
     std::fs::remove_file(catalog_sqlite_path(&only_arrays)).unwrap();
     assert!(matches!(
-        create_store(Some(&only_arrays), false).err(),
+        Store::create(Some(&only_arrays), false).err(),
         Some(TimeSeriesError::StoreExists { .. })
     ));
 }
@@ -168,14 +167,14 @@ fn create_replacing_discards_both_halves() {
 
     {
         let mut store =
-            create_store_replacing(&path, Compression::default(), CatalogMode::Attached).unwrap();
+            Store::create_replacing(&path, Compression::default(), CatalogMode::Attached).unwrap();
         add(&mut store, 2, 200.0);
         store.flush().unwrap();
     }
 
     // The old catalog went with the old arrays. Had it survived, owner 1 would
     // still be listed here with nothing behind it.
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert!(
         store
             .list_metadata(ListFilter::new().owner_id(1))
@@ -200,7 +199,7 @@ fn open_copy_leaves_the_original_alone() {
     let src_bytes = std::fs::read(&src).unwrap();
 
     {
-        let mut copy = open_store_copy(&src, &dest, CatalogMode::Attached).unwrap();
+        let mut copy = Store::open_copy(&src, &dest, CatalogMode::Attached).unwrap();
         assert_eq!(read_values(&copy, 1)[0], 100.0, "the copy carries the data");
         add(&mut copy, 2, 200.0);
         copy.flush().unwrap();
@@ -211,7 +210,7 @@ fn open_copy_leaves_the_original_alone() {
         src_bytes,
         "the source file changed"
     );
-    let original = open_store(&src, true).unwrap();
+    let original = Store::open(&src, true).unwrap();
     assert!(
         original
             .list_metadata(ListFilter::new().owner_id(2))
@@ -225,9 +224,9 @@ fn open_copy_leaves_the_original_alone() {
     // and nothing may still hold it open, since Windows refuses to rename over
     // a file with a live handle.
     drop(original);
-    let mut copy = open_store(&dest, false).unwrap();
+    let mut copy = Store::open(&dest, false).unwrap();
     copy.persist_to(&src).unwrap();
-    let reloaded = open_store(&src, true).unwrap();
+    let reloaded = Store::open(&src, true).unwrap();
     assert_eq!(read_values(&reloaded, 2)[0], 200.0);
     assert!(reloaded.verify_integrity().unwrap().ok());
 }
@@ -262,14 +261,14 @@ fn open_copy_carries_rows_still_in_the_sources_wal() {
     let hoard_sqlite = dir.path().join("h.sqlite");
     let hoard_wal = dir.path().join("h.wal");
     {
-        let mut store = create_store(Some(&src), false).unwrap();
+        let mut store = Store::create(Some(&src), false).unwrap();
         add(&mut store, 1, 100.0);
         store.flush().unwrap(); // checkpoints owner 1 into the main database
     }
     // Snapshotted closed, so the copy is safe on every platform.
     std::fs::copy(&sqlite, &hoard_sqlite).unwrap();
     {
-        let mut store = open_store(&src, false).unwrap();
+        let mut store = Store::open(&src, false).unwrap();
         add(&mut store, 2, 200.0); // committed, but still only in the `-wal`
         std::fs::copy(&wal, &hoard_wal).expect("an attached catalog journals through a -wal");
     }
@@ -280,7 +279,7 @@ fn open_copy_carries_rows_still_in_the_sources_wal() {
     std::fs::copy(&hoard_wal, &wal).unwrap();
 
     let dest = dir.path().join("copy.h5");
-    let copy = open_store_copy(&src, &dest, CatalogMode::Attached).unwrap();
+    let copy = Store::open_copy(&src, &dest, CatalogMode::Attached).unwrap();
     let mut owners: Vec<i64> = copy
         .list_metadata(ListFilter::new())
         .unwrap()
@@ -297,7 +296,7 @@ fn open_copy_carries_rows_still_in_the_sources_wal() {
     // still has both rows once its own connection is gone.
     drop(copy);
     assert_eq!(
-        open_store(&dest, true)
+        Store::open(&dest, true)
             .unwrap()
             .list_metadata(ListFilter::new())
             .unwrap()
@@ -320,7 +319,7 @@ fn open_copy_of_a_half_artifact_refuses_rather_than_reading_it_empty() {
     let dir = tempfile::tempdir().unwrap();
     let scratch = dir.path().join("scratch.h5");
     {
-        let mut store = create_store_with_catalog(
+        let mut store = Store::create_with_catalog(
             Some(&scratch),
             false,
             Compression::default(),
@@ -333,7 +332,7 @@ fn open_copy_of_a_half_artifact_refuses_rather_than_reading_it_empty() {
     assert!(!catalog_sqlite_path(&scratch).exists());
 
     let attached = dir.path().join("attached-copy.h5");
-    let err = open_store_copy(&scratch, &attached, CatalogMode::Attached)
+    let err = Store::open_copy(&scratch, &attached, CatalogMode::Attached)
         .err()
         .expect("a copy of a half-artifact must not open");
     assert!(
@@ -350,14 +349,14 @@ fn open_copy_of_a_half_artifact_refuses_rather_than_reading_it_empty() {
     );
     assert!(!catalog_sqlite_path(&attached).exists());
     // So the same call can simply be tried again.
-    let err = open_store_copy(&scratch, &attached, CatalogMode::Attached)
+    let err = Store::open_copy(&scratch, &attached, CatalogMode::Attached)
         .err()
         .expect("still a half-artifact");
     assert!(matches!(err, TimeSeriesError::MismatchedArtifact { .. }));
 
     let loaded = dir.path().join("in-memory-copy.h5");
     assert!(
-        open_store_copy(&scratch, &loaded, CatalogMode::InMemory).is_err(),
+        Store::open_copy(&scratch, &loaded, CatalogMode::InMemory).is_err(),
         "loading the copy's catalog into memory needs a catalog to load"
     );
 }
@@ -372,7 +371,7 @@ fn open_copy_can_hand_back_an_in_memory_catalog() {
     let dest = dir.path().join("scratch.h5");
     saved_store(&src);
 
-    let mut copy = open_store_copy(&src, &dest, CatalogMode::InMemory).unwrap();
+    let mut copy = Store::open_copy(&src, &dest, CatalogMode::InMemory).unwrap();
     assert_eq!(copy.catalog_mode(), CatalogMode::InMemory);
     add(&mut copy, 2, 200.0);
     copy.flush().unwrap();
@@ -385,11 +384,11 @@ fn open_copy_can_hand_back_an_in_memory_catalog() {
     copy.persist_catalog().unwrap();
     drop(copy);
 
-    let landed = open_store(&dest, true).unwrap();
+    let landed = Store::open(&dest, true).unwrap();
     assert_eq!(read_values(&landed, 1)[0], 100.0);
     assert_eq!(read_values(&landed, 2)[0], 200.0);
     assert_eq!(
-        owners(&open_store(&src, true).unwrap()),
+        owners(&Store::open(&src, true).unwrap()),
         vec![1],
         "nothing reached the source"
     );
@@ -403,7 +402,7 @@ fn open_copy_refuses_a_destination_that_already_holds_a_store() {
     saved_store(&src);
     saved_store(&dest);
 
-    let err = open_store_copy(&src, &dest, CatalogMode::Attached)
+    let err = Store::open_copy(&src, &dest, CatalogMode::Attached)
         .err()
         .expect("copying onto a live store must be refused");
     assert!(
@@ -422,7 +421,7 @@ fn persist_catalog_pairs_an_in_memory_catalog_with_the_arrays_beside_it() {
     let path = dir.path().join("scratch.h5");
 
     {
-        let mut store = create_store_with_catalog(
+        let mut store = Store::create_with_catalog(
             Some(&path),
             false,
             Compression::default(),
@@ -439,7 +438,7 @@ fn persist_catalog_pairs_an_in_memory_catalog_with_the_arrays_beside_it() {
 
     // The catalog landed beside the arrays already in place — no copy of the
     // HDF5 half, and stamped to match it, so the pair opens.
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(read_values(&store, 1)[0], 100.0);
     assert!(store.verify_integrity().unwrap().ok());
 }
@@ -449,7 +448,7 @@ fn persist_catalog_is_a_checkpoint_not_a_mode_switch() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scratch.h5");
 
-    let mut store = create_store_with_catalog(
+    let mut store = Store::create_with_catalog(
         Some(&path),
         false,
         Compression::default(),
@@ -471,7 +470,7 @@ fn persist_catalog_is_a_checkpoint_not_a_mode_switch() {
     store.persist_catalog().unwrap();
     assert_eq!(owners_on_disk(&path), vec![1, 2]);
     drop(store);
-    let reopened = open_store(&path, true).unwrap();
+    let reopened = Store::open(&path, true).unwrap();
     assert_eq!(read_values(&reopened, 1)[0], 100.0);
     assert_eq!(read_values(&reopened, 2)[0], 200.0);
 }
@@ -488,7 +487,7 @@ fn persist_catalog_refuses_what_it_cannot_pair() {
     // No HDF5 file means no half to pair a catalog with. `persist_to` is the
     // call that materializes an in-memory store; this one has nothing to sit
     // beside.
-    let mut in_memory = create_store(None, true).unwrap();
+    let mut in_memory = Store::create(None, true).unwrap();
     add(&mut in_memory, 1, 100.0);
     let err = in_memory
         .persist_catalog()
@@ -501,7 +500,7 @@ fn persist_catalog_refuses_what_it_cannot_pair() {
     // An open transaction holds uncommitted rows a rollback would take back;
     // writing them out would publish a state the caller has not committed to.
     let scratch = dir.path().join("scratch.h5");
-    let mut store = create_store_with_catalog(
+    let mut store = Store::create_with_catalog(
         Some(&scratch),
         false,
         Compression::default(),
@@ -522,7 +521,7 @@ fn persist_catalog_refuses_what_it_cannot_pair() {
     drop(store);
 
     // A read-only store may not write either half.
-    let mut ro = open_store(&scratch, true).unwrap();
+    let mut ro = Store::open(&scratch, true).unwrap();
     assert!(matches!(
         ro.persist_catalog().err(),
         Some(TimeSeriesError::ReadOnlyStore)
@@ -533,12 +532,12 @@ fn persist_catalog_refuses_what_it_cannot_pair() {
     // flush rather than an error — the same call works whichever mode a caller
     // happens to hold.
     let attached = dir.path().join("attached.h5");
-    let mut store = create_store(Some(&attached), false).unwrap();
+    let mut store = Store::create(Some(&attached), false).unwrap();
     add(&mut store, 7, 700.0);
     store.persist_catalog().unwrap();
     drop(store);
     assert_eq!(
-        read_values(&open_store(&attached, true).unwrap(), 7)[0],
+        read_values(&Store::open(&attached, true).unwrap(), 7)[0],
         700.0
     );
 }
@@ -557,7 +556,7 @@ fn persist_stages_through_a_unique_temp() {
     let scratch = dir.path().join("scratch.h5");
     let dest = dir.path().join("system.h5");
 
-    let mut store = create_store(Some(&scratch), false).unwrap();
+    let mut store = Store::create(Some(&scratch), false).unwrap();
     add(&mut store, 1, 100.0);
 
     // What an interrupted save under the old fixed-name scheme left behind.
@@ -566,7 +565,7 @@ fn persist_stages_through_a_unique_temp() {
 
     store.persist_to(&dest).unwrap();
 
-    assert_eq!(read_values(&open_store(&dest, true).unwrap(), 1)[0], 100.0);
+    assert_eq!(read_values(&Store::open(&dest, true).unwrap(), 1)[0], 100.0);
     assert!(
         legacy_temp.exists(),
         "an unrelated leftover must be left alone, not adopted as staging"
@@ -606,7 +605,7 @@ fn a_failed_save_leaves_a_disk_backed_store_live() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("store.h5");
 
-    let mut store = create_store(Some(&src), false).unwrap();
+    let mut store = Store::create(Some(&src), false).unwrap();
     add(&mut store, 1, 100.0);
 
     let doomed = dir.path().join("no-such-dir").join("system.h5");
@@ -622,7 +621,7 @@ fn a_failed_save_leaves_a_disk_backed_store_live() {
     store.persist_to(&good).unwrap();
     drop(store);
 
-    let saved = open_store(&good, true).unwrap();
+    let saved = Store::open(&good, true).unwrap();
     assert_eq!(owners(&saved), vec![1, 2]);
     assert!(
         staging_strays(dir.path()).is_empty(),
@@ -637,7 +636,7 @@ fn a_failed_save_leaves_a_disk_backed_store_live() {
 fn a_failed_save_leaves_an_in_memory_store_live() {
     let dir = tempfile::tempdir().unwrap();
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(&mut store, 1, 100.0);
 
     let doomed = dir.path().join("no-such-dir").join("system.h5");
@@ -649,7 +648,7 @@ fn a_failed_save_leaves_an_in_memory_store_live() {
     store.persist_to(&good).unwrap();
     drop(store);
 
-    assert_eq!(owners(&open_store(&good, true).unwrap()), vec![1, 2]);
+    assert_eq!(owners(&Store::open(&good, true).unwrap()), vec![1, 2]);
     assert!(staging_strays(dir.path()).is_empty());
 }
 
@@ -662,7 +661,7 @@ fn a_failed_catalog_checkpoint_keeps_the_catalog_in_ram() {
     let scratch = dir.path().join("scratch.h5");
     let sqlite = catalog_sqlite_path(&scratch);
 
-    let mut store = create_store_with_catalog(
+    let mut store = Store::create_with_catalog(
         Some(&scratch),
         false,
         Compression::default(),
@@ -686,7 +685,7 @@ fn a_failed_catalog_checkpoint_keeps_the_catalog_in_ram() {
     store.persist_catalog().unwrap();
     drop(store);
 
-    assert_eq!(owners(&open_store(&scratch, true).unwrap()), vec![1, 2]);
+    assert_eq!(owners(&Store::open(&scratch, true).unwrap()), vec![1, 2]);
 }
 
 /// The documented limit of `persist_to`, pinned rather than papered over.
@@ -704,7 +703,7 @@ fn a_failed_save_can_still_have_replaced_the_destination() {
     let dest = dir.path().join("system.h5");
     let dest_sqlite = catalog_sqlite_path(&dest);
 
-    let mut store = create_store(Some(&scratch), false).unwrap();
+    let mut store = Store::create(Some(&scratch), false).unwrap();
     add(&mut store, 1, 100.0);
 
     // Let the arrays land and block the catalog behind them.
@@ -723,7 +722,7 @@ fn a_failed_save_can_still_have_replaced_the_destination() {
     );
 
     std::fs::remove_dir(&dest_sqlite).unwrap();
-    let err = open_store(&dest, false)
+    let err = Store::open(&dest, false)
         .err()
         .expect("a half-saved destination must not open");
     assert!(
@@ -751,13 +750,13 @@ fn stale_staging_files_are_inert() {
         std::fs::write(f, b"leftover from an interrupted save").unwrap();
     }
 
-    let mut store = create_store(Some(&path), false).unwrap();
+    let mut store = Store::create(Some(&path), false).unwrap();
     add(&mut store, 1, 100.0);
     store.compact().unwrap();
     store.persist_to(&dest).unwrap();
     drop(store);
 
-    assert_eq!(owners(&open_store(&dest, true).unwrap()), vec![1]);
+    assert_eq!(owners(&Store::open(&dest, true).unwrap()), vec![1]);
     for f in &litter {
         assert_eq!(
             std::fs::read(f).unwrap(),
@@ -777,7 +776,7 @@ fn an_abandoned_scratch_file_blocks_recreation_until_it_is_replaced() {
     let dir = tempfile::tempdir().unwrap();
     let scratch = dir.path().join("scratch.h5");
     {
-        let mut store = create_store_with_catalog(
+        let mut store = Store::create_with_catalog(
             Some(&scratch),
             false,
             Compression::default(),
@@ -788,7 +787,7 @@ fn an_abandoned_scratch_file_blocks_recreation_until_it_is_replaced() {
         store.flush().unwrap();
     }
 
-    let err = create_store_with_catalog(
+    let err = Store::create_with_catalog(
         Some(&scratch),
         false,
         Compression::default(),
@@ -802,12 +801,12 @@ fn an_abandoned_scratch_file_blocks_recreation_until_it_is_replaced() {
     );
 
     let mut fresh =
-        create_store_replacing(&scratch, Compression::default(), CatalogMode::InMemory).unwrap();
+        Store::create_replacing(&scratch, Compression::default(), CatalogMode::InMemory).unwrap();
     add(&mut fresh, 7, 700.0);
     fresh.persist_catalog().unwrap();
     drop(fresh);
 
-    let store = open_store(&scratch, true).unwrap();
+    let store = Store::open(&scratch, true).unwrap();
     assert_eq!(
         owners(&store),
         vec![7],
@@ -824,14 +823,14 @@ fn an_abandoned_scratch_file_blocks_recreation_until_it_is_replaced() {
 fn a_second_handle_on_an_open_artifact_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("held.h5");
-    let mut writer = create_store(Some(&path), false).unwrap();
+    let mut writer = Store::create(Some(&path), false).unwrap();
     add(&mut writer, 1, 0.0);
     let in_use =
         |r: Result<Store, TimeSeriesError>| matches!(r, Err(TimeSeriesError::StoreInUse { .. }));
-    assert!(in_use(open_store(&path, false)));
-    assert!(in_use(open_store(&path, true)));
+    assert!(in_use(Store::open(&path, false)));
+    assert!(in_use(Store::open(&path, true)));
     // Another spelling of the same path is the same artifact.
-    assert!(in_use(open_store(
+    assert!(in_use(Store::open(
         &dir.path().join(".").join("held.h5"),
         true
     )));
@@ -840,9 +839,9 @@ fn a_second_handle_on_an_open_artifact_is_refused() {
     {
         let alias = dir.path().join("alias.h5");
         std::os::unix::fs::symlink(&path, &alias).unwrap();
-        assert!(in_use(open_store(&alias, true)));
+        assert!(in_use(Store::open(&alias, true)));
     }
-    assert!(in_use(create_store_replacing(
+    assert!(in_use(Store::create_replacing(
         &path,
         Compression::default(),
         CatalogMode::Attached
@@ -855,7 +854,7 @@ fn a_second_handle_on_an_open_artifact_is_refused() {
     )));
     // A save onto a held path would rename its file out from under it --
     // whether it lands both halves or the arrays alone.
-    let mut other = create_store(Some(&dir.path().join("other.h5")), false).unwrap();
+    let mut other = Store::create(Some(&dir.path().join("other.h5")), false).unwrap();
     assert!(matches!(
         other.persist_to(&path),
         Err(TimeSeriesError::StoreInUse { .. })
@@ -869,13 +868,13 @@ fn a_second_handle_on_an_open_artifact_is_refused() {
     // dropping it frees the path again.
     add(&mut writer, 2, 10.0);
     drop(writer);
-    let reader = open_store(&path, true).unwrap();
+    let reader = Store::open(&path, true).unwrap();
     assert_eq!(read_values(&reader, 2)[0], 10.0);
     drop(reader);
     // An open that fails for some other reason releases the path with the error.
     assert!(matches!(
-        create_store(Some(&path), false),
+        Store::create(Some(&path), false),
         Err(TimeSeriesError::StoreExists { .. })
     ));
-    open_store(&path, true).unwrap();
+    Store::open(&path, true).unwrap();
 }

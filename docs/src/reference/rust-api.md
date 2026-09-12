@@ -4,7 +4,7 @@ The public surface of `infrastore-core`. Import paths below are relative to the 
 
 ```rust
 use infrastore_core::{
-    create_store, open_store, Store, BulkAdd, TimeSeriesId, KeyIdentity,
+    Store, BulkAdd, TimeSeriesId, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, Period,
@@ -33,42 +33,48 @@ always `Period`. Instants (`DateTime<Utc>`) remain chrono types.
 ## Constructors
 
 ```rust
-pub fn create_store(path: Option<&Path>, in_memory: bool) -> Result<Store>
-pub fn create_store_with_compression(
-    path: Option<&Path>,
-    in_memory: bool,
-    compression: Compression,
-) -> Result<Store>
-pub fn create_store_replacing(
-    path: &Path,
-    compression: Compression,
-    catalog: CatalogMode,
-) -> Result<Store>
-pub fn open_store(path: &Path, read_only: bool) -> Result<Store>
-pub fn open_store_copy(src: &Path, dest: &Path, catalog: CatalogMode) -> Result<Store>
-pub fn open_store_without_catalog(path: &Path, catalog: CatalogMode) -> Result<Store>
+impl Store {
+    pub fn create(path: Option<&Path>, in_memory: bool) -> Result<Store>
+    pub fn create_with_compression(
+        path: Option<&Path>,
+        in_memory: bool,
+        compression: Compression,
+    ) -> Result<Store>
+    pub fn create_with_catalog(
+        path: Option<&Path>,
+        in_memory: bool,
+        compression: Compression,
+        catalog: CatalogMode,
+    ) -> Result<Store>
+    pub fn create_replacing(
+        path: &Path,
+        compression: Compression,
+        catalog: CatalogMode,
+    ) -> Result<Store>
+    pub fn open(path: &Path, read_only: bool) -> Result<Store>
+    pub fn open_with_catalog(path: &Path, read_only: bool, catalog: CatalogMode) -> Result<Store>
+    pub fn open_copy(src: &Path, dest: &Path, catalog: CatalogMode) -> Result<Store>
+    pub fn open_without_catalog(path: &Path, catalog: CatalogMode) -> Result<Store>
+}
 ```
 
-- `create_store(None, true)` — in-memory store, no filesystem I/O.
-- `create_store(Some(path), false)` — creates `path` (HDF5) and `path.sqlite` (metadata). **Fails
+- `Store::create(None, true)` — in-memory store, no filesystem I/O.
+- `Store::create(Some(path), false)` — creates `path` (HDF5) and `path.sqlite` (metadata). **Fails
   with [`StoreExists`](#errors) if either half is already there**; see
   [protecting a saved artifact](../explanation/storage-model.md#protecting-a-saved-artifact) for why
   creating over an existing store is refused rather than allowed to truncate it.
-- `create_store_with_compression(...)` — as above but with an explicit HDF5 compression policy.
-- `create_store_replacing(...)` — discards any artifact already at `path`, both halves plus the
+- `Store::create_with_compression(...)` — as above but with an explicit HDF5 compression policy.
+- `Store::create_replacing(...)` — discards any artifact already at `path`, both halves plus the
   catalog's `-wal`/`-shm` sidecars, then creates. Destructive and not atomic: an interrupted call
   can leave neither the old store nor the new one.
-- `open_store(path, read_only)` — opens an existing pair. `read_only = true` rejects all writes.
-- `open_store_copy(src, dest, catalog)` — copies both halves to `dest` and opens the copy
+- `Store::open(path, read_only)` — opens an existing pair. `read_only = true` rejects all writes.
+- `Store::open_copy(src, dest, catalog)` — copies both halves to `dest` and opens the copy
   read-write, leaving `src` untouched. The safe way to load a store you intend to change: mutating
   an artifact in place is unrecoverable if interrupted, since HDF5 has no journal.
-- `open_store_without_catalog(path, catalog)` — opens the array half of an artifact whose catalog is
-  **absent** and mints an empty one, returning a writable store that holds every array and no rows.
-  The way in to a store shipped as arrays plus an OpenAPI document; see
+- `Store::open_without_catalog(path, catalog)` — opens the array half of an artifact whose catalog
+  is **absent** and mints an empty one, returning a writable store that holds every array and no
+  rows. The way in to a store shipped as arrays plus an OpenAPI document; see
   [restoring a catalog from a document](#restoring-a-catalog-from-a-document).
-
-`Store::create` / `Store::create_with_compression` / `Store::create_replacing` / `Store::open` /
-`Store::open_copy` / `Store::open_without_catalog` are the inherent-method equivalents.
 
 ```rust
 pub enum Compression {
@@ -77,7 +83,7 @@ pub enum Compression {
 }
 ```
 
-`create_store` uses `Compression::default()` (DEFLATE level 3 + shuffle). The policy is persisted
+`Store::create` uses `Compression::default()` (DEFLATE level 3 + shuffle). The policy is persisted
 and restored when the store is reopened for appends, applies only to on-disk stores, and never
 changes how data is read back — see the [storage model](../explanation/storage-model.md).
 
@@ -1850,7 +1856,7 @@ pub enum TimeSeriesError {
     /// legal; exactly one stamped is not. `"none"` renders a missing stamp.
     MismatchedArtifact { h5: String, sqlite: String },
     /// A store already exists where one was about to be created. See
-    /// [`create_store`](#constructors).
+    /// [`Store::create`](#constructors).
     StoreExists { path: String },
     /// The artifact is already open in this process, in any mode. One handle
     /// per artifact per process; drop it before opening another. Surfaces as
@@ -1941,13 +1947,14 @@ pub trait StorageBackend: Send + Sync {
 
 ## Hashing
 
-In the `hash` module (`infrastore_core::hash`). `array_hash` and `hash_hex` are also re-exported at
-the crate root; `features_hash` is only reachable through the module.
+In the `hash` module (`infrastore_core::hash`). `array_hash`, `hash_hex`, and `hash_from_hex` are
+also re-exported at the crate root; `features_hash` is only reachable through the module.
 
 ```rust
 pub fn array_hash(data: &TypedArray) -> [u8; 32];   // domain: dtype tag + shape + typed bytes
 pub fn features_hash(features: &Features) -> [u8; 32];
 pub fn hash_hex(hash: &[u8; 32]) -> String;
+pub fn hash_from_hex(s: &str) -> Option<[u8; 32]>;  // inverse; None unless exactly 64 hex digits
 ```
 
 These define the cross-language content-addressing contract; see

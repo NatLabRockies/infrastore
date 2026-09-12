@@ -362,7 +362,10 @@ fn render_json(
     // which of several same-named series it holds, and cannot be turned back
     // into a descriptor that would recreate it.
     obj.insert("features".into(), fields::features_json(&meta.features));
-    obj.insert("data_hash".into(), json!(fields::hash_hex(&meta.data_hash)));
+    obj.insert(
+        "data_hash".into(),
+        json!(infrastore_core::hash_hex(&meta.data_hash)),
+    );
     match data {
         TimeSeriesData::SingleTimeSeries(s) => {
             obj.insert(

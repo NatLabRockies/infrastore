@@ -357,10 +357,27 @@ def test_has_any_time_series():
     # No filters: any association at all.
     assert store.has_any_time_series() is True
 
-    # The features filter is a subset match.
-    _add(store, 3, _sts("wind", np.arange(4, dtype=np.float64)), features={"s": "hi"})
+    # The features filter is a subset match; `features_exact` is the whole set.
+    _add(
+        store,
+        3,
+        _sts("wind", np.arange(4, dtype=np.float64)),
+        features={"s": "hi", "m": "m1"},
+    )
     assert store.has_any_time_series(owner_id=3, features={"s": "hi"}) is True
     assert store.has_any_time_series(owner_id=3, features={"s": "lo"}) is False
+    assert (
+        store.has_any_time_series(owner_id=3, features={"s": "hi"}, features_exact=True)
+        is False
+    )
+    assert (
+        store.has_any_time_series(
+            owner_id=3, features={"s": "hi", "m": "m1"}, features_exact=True
+        )
+        is True
+    )
+    # With no features named, the exact form selects the feature-less rows.
+    assert store.list_metadata(owner_id=3, features_exact=True) == []
 
 
 def test_remove_time_series_bulk():

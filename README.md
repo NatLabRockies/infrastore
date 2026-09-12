@@ -105,11 +105,10 @@ See [Building from source](#building-from-source) below for the toolchain prereq
 ```rust
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, OwnerCategory, ReadWindow, SingleTimeSeries, TimeSeriesData, TypedArray,
-    create_store,
+    Features, OwnerCategory, ReadWindow, SingleTimeSeries, Store, TimeSeriesData, TypedArray,
 };
 
-let mut store = create_store(None, true)?;
+let mut store = Store::create(None, true)?;
 
 let values: Vec<f64> = (0..24).map(|i| 100.0 + i as f64).collect();
 let data = TypedArray::from_f64(vec![24], &values);
