@@ -71,7 +71,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::slice;
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use infrastore_core as core_lib;
 use serde_json::Value;
 
@@ -199,8 +199,28 @@ fn optional_owner(
 ///
 /// `deref_handle!(ref p)` yields `&T` via `p.as_ref()`; `deref_handle!(mut p)`
 /// yields `&mut T` via `p.as_mut()`. Both early-return on a null pointer, so
-/// this is only usable inside functions returning `i32`.
+/// this is only usable inside functions returning `i32`. A trailing message
+/// argument (`deref_handle!(ref p, "store handle is null")`) also records it as
+/// the last error.
 macro_rules! deref_handle {
+    (ref $ptr:expr, $msg:expr) => {
+        match unsafe { $ptr.as_ref() } {
+            Some(v) => v,
+            None => {
+                set_error($msg);
+                return INFRASTORE_ERR_NULL_POINTER;
+            }
+        }
+    };
+    (mut $ptr:expr, $msg:expr) => {
+        match unsafe { $ptr.as_mut() } {
+            Some(v) => v,
+            None => {
+                set_error($msg);
+                return INFRASTORE_ERR_NULL_POINTER;
+            }
+        }
+    };
     (ref $ptr:expr) => {
         match unsafe { $ptr.as_ref() } {
             Some(v) => v,
@@ -212,6 +232,38 @@ macro_rules! deref_handle {
             Some(v) => v,
             None => return INFRASTORE_ERR_NULL_POINTER,
         }
+    };
+}
+
+/// Unwrap a `Result` or early-return its error code.
+///
+/// `ffi_try!(expr)` takes a core `Result` and returns `map_core_error(e)` on
+/// `Err`; `ffi_try!(code expr)` takes a `Result<_, i32>` and returns the code.
+macro_rules! ffi_try {
+    (code $e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(code) => return code,
+        }
+    };
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(e) => return map_core_error(e),
+        }
+    };
+}
+
+/// Return `INFRASTORE_ERR_NULL_POINTER`, naming the argument, if any of the
+/// given pointers is null.
+macro_rules! require_nonnull {
+    ($($ptr:ident),+ $(,)?) => {
+        $(
+            if $ptr.is_null() {
+                set_error(concat!(stringify!($ptr), " is null"));
+                return INFRASTORE_ERR_NULL_POINTER;
+            }
+        )+
     };
 }
 
@@ -237,10 +289,7 @@ pub unsafe extern "C" fn infrastore_store_init_logging(filter: *const c_char) ->
     let env_filter = if filter.is_null() {
         EnvFilter::from_default_env()
     } else {
-        let s = match unsafe { cstr_to_str(filter) } {
-            Ok(s) => s,
-            Err(code) => return code,
-        };
+        let s = ffi_try!(code unsafe { cstr_to_str(filter) });
         match EnvFilter::try_new(s) {
             Ok(f) => f,
             Err(e) => {
@@ -494,116 +543,6 @@ unsafe fn write_owned_str_out(s: String, out: *mut *mut c_char, out_len: *mut u6
 
 // ---- Store create / open / free ------------------------------------------
 
-/// Create a time-series store and return an owning handle through `out`.
-///
-/// # Safety
-///
-/// When non-null, `path` must point to a valid, null-terminated UTF-8 string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_create(
-    path: *const c_char,
-    in_memory: bool,
-    out: *mut *mut InfraStoreHandle,
-) -> i32 {
-    clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let path = match unsafe { cstr_to_optional_path(path) } {
-        Ok(p) => p,
-        Err(code) => {
-            set_error("invalid path");
-            return code;
-        }
-    };
-    let store = match core_lib::Store::create(path.as_deref(), in_memory) {
-        Ok(s) => s,
-        Err(e) => return map_core_error(e),
-    };
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
-    INFRASTORE_OK
-}
-
-/// Create a store with an explicit compression policy.
-///
-/// `compression_kind` selects the filter: `0` = none (uncompressed), `1` =
-/// DEFLATE at `deflate_level` (0–9) with byte `shuffle` when non-zero. Any
-/// other `compression_kind` is rejected. The policy is ignored for in-memory
-/// stores and persisted so later appends reuse it. Equivalent to
-/// [`infrastore_store_create`] with `compression_kind = 1`, level 3, shuffle on.
-///
-/// # Safety
-///
-/// When non-null, `path` must point to a valid, null-terminated UTF-8 string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_create_with_compression(
-    path: *const c_char,
-    in_memory: bool,
-    compression_kind: u8,
-    deflate_level: u8,
-    shuffle: bool,
-    out: *mut *mut InfraStoreHandle,
-) -> i32 {
-    clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let path = match unsafe { cstr_to_optional_path(path) } {
-        Ok(p) => p,
-        Err(code) => {
-            set_error("invalid path");
-            return code;
-        }
-    };
-    let compression = match compression_from_code(compression_kind, deflate_level, shuffle) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let store =
-        match core_lib::Store::create_with_compression(path.as_deref(), in_memory, compression) {
-            Ok(s) => s,
-            Err(e) => return map_core_error(e),
-        };
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
-    INFRASTORE_OK
-}
-
-/// Open an existing time-series store and return an owning handle through `out`.
-///
-/// # Safety
-///
-/// Standard: see the crate-level ABI conventions.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_open(
-    path: *const c_char,
-    read_only: bool,
-    out: *mut *mut InfraStoreHandle,
-) -> i32 {
-    clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let path = match unsafe { cstr_to_str(path) } {
-        Ok(s) => PathBuf::from(s),
-        Err(code) => {
-            set_error("invalid path string");
-            return code;
-        }
-    };
-    let store = match core_lib::Store::open(&path, read_only) {
-        Ok(s) => s,
-        Err(e) => return map_core_error(e),
-    };
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
-    INFRASTORE_OK
-}
-
 /// Translate a `compression_kind` code plus its parameters into a core
 /// [`Compression`](core_lib::Compression).
 ///
@@ -648,7 +587,8 @@ fn catalog_from_code(code: u8) -> std::result::Result<core_lib::CatalogMode, i32
 
 /// Create a store, choosing where the SQLite catalog lives.
 ///
-/// Like `infrastore_store_create_with_compression`, but `catalog_mode` selects the catalog's
+/// `compression_kind` selects the array filter: `0` = none, `1` = DEFLATE at `deflate_level` (0–9)
+/// with byte `shuffle`; `1`, `3`, `true` is the default policy. `catalog_mode` selects the catalog's
 /// placement: `0` attaches it to `<path>.sqlite`, where every commit is durable; `1` holds it in
 /// memory, where nothing survives a crash and only `infrastore_store_persist` writes it out.
 /// Arrays stream to the HDF5 file either way. `in_memory=true` admits only `catalog_mode=1`.
@@ -667,10 +607,7 @@ pub unsafe extern "C" fn infrastore_store_create_with_catalog(
     out: *mut *mut InfraStoreHandle,
 ) -> i32 {
     clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out);
     let path = match unsafe { cstr_to_optional_path(path) } {
         Ok(p) => p,
         Err(code) => {
@@ -678,23 +615,15 @@ pub unsafe extern "C" fn infrastore_store_create_with_catalog(
             return code;
         }
     };
-    let compression = match compression_from_code(compression_kind, deflate_level, shuffle) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let catalog = match catalog_from_code(catalog_mode) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let store = match core_lib::Store::create_with_catalog(
+    let compression =
+        ffi_try!(code compression_from_code(compression_kind, deflate_level, shuffle));
+    let catalog = ffi_try!(code catalog_from_code(catalog_mode));
+    let store = ffi_try!(core_lib::Store::create_with_catalog(
         path.as_deref(),
         in_memory,
         compression,
         catalog,
-    ) {
-        Ok(s) => s,
-        Err(e) => return map_core_error(e),
-    };
+    ));
     let handle = Box::new(InfraStoreHandle { inner: store });
     unsafe { *out = Box::into_raw(handle) };
     INFRASTORE_OK
@@ -726,10 +655,7 @@ pub unsafe extern "C" fn infrastore_store_create_replacing(
     out: *mut *mut InfraStoreHandle,
 ) -> i32 {
     clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out);
     let path = match unsafe { cstr_to_str(path) } {
         Ok(s) => PathBuf::from(s),
         Err(code) => {
@@ -737,18 +663,14 @@ pub unsafe extern "C" fn infrastore_store_create_replacing(
             return code;
         }
     };
-    let compression = match compression_from_code(compression_kind, deflate_level, shuffle) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let catalog = match catalog_from_code(catalog_mode) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let store = match core_lib::Store::create_replacing(&path, compression, catalog) {
-        Ok(s) => s,
-        Err(e) => return map_core_error(e),
-    };
+    let compression =
+        ffi_try!(code compression_from_code(compression_kind, deflate_level, shuffle));
+    let catalog = ffi_try!(code catalog_from_code(catalog_mode));
+    let store = ffi_try!(core_lib::Store::create_replacing(
+        &path,
+        compression,
+        catalog
+    ));
     let handle = Box::new(InfraStoreHandle { inner: store });
     unsafe { *out = Box::into_raw(handle) };
     INFRASTORE_OK
@@ -775,10 +697,7 @@ pub unsafe extern "C" fn infrastore_store_open_copy(
     out: *mut *mut InfraStoreHandle,
 ) -> i32 {
     clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out);
     let src = match unsafe { cstr_to_str(src) } {
         Ok(s) => PathBuf::from(s),
         Err(code) => {
@@ -793,14 +712,8 @@ pub unsafe extern "C" fn infrastore_store_open_copy(
             return code;
         }
     };
-    let catalog = match catalog_from_code(catalog_mode) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let store = match core_lib::Store::open_copy(&src, &dest, catalog) {
-        Ok(s) => s,
-        Err(e) => return map_core_error(e),
-    };
+    let catalog = ffi_try!(code catalog_from_code(catalog_mode));
+    let store = ffi_try!(core_lib::Store::open_copy(&src, &dest, catalog));
     let handle = Box::new(InfraStoreHandle { inner: store });
     unsafe { *out = Box::into_raw(handle) };
     INFRASTORE_OK
@@ -808,7 +721,7 @@ pub unsafe extern "C" fn infrastore_store_open_copy(
 
 /// Open an existing store, choosing where the SQLite catalog lives.
 ///
-/// Like `infrastore_store_open`, but `catalog_mode=1` reads `<path>.sqlite` into memory and leaves
+/// `catalog_mode=0` attaches `<path>.sqlite`; `catalog_mode=1` reads it into memory and leaves
 /// the file alone; later mutations reach disk only through `infrastore_store_persist`. The HDF5
 /// half is still opened in place, so a caller that means to leave the original untouched until an
 /// explicit save must open a copy.
@@ -824,10 +737,7 @@ pub unsafe extern "C" fn infrastore_store_open_with_catalog(
     out: *mut *mut InfraStoreHandle,
 ) -> i32 {
     clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out);
     let path = match unsafe { cstr_to_str(path) } {
         Ok(s) => PathBuf::from(s),
         Err(code) => {
@@ -835,14 +745,10 @@ pub unsafe extern "C" fn infrastore_store_open_with_catalog(
             return code;
         }
     };
-    let catalog = match catalog_from_code(catalog_mode) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let store = match core_lib::Store::open_with_catalog(&path, read_only, catalog) {
-        Ok(s) => s,
-        Err(e) => return map_core_error(e),
-    };
+    let catalog = ffi_try!(code catalog_from_code(catalog_mode));
+    let store = ffi_try!(core_lib::Store::open_with_catalog(
+        &path, read_only, catalog
+    ));
     let handle = Box::new(InfraStoreHandle { inner: store });
     unsafe { *out = Box::into_raw(handle) };
     INFRASTORE_OK
@@ -853,10 +759,10 @@ pub unsafe extern "C" fn infrastore_store_open_with_catalog(
 /// The way in to a store shipped as arrays plus an OpenAPI document: the returned handle holds
 /// every array and no rows, ready for `infrastore_store_import_time_series_associations_openapi`
 /// and its supplemental-attribute counterpart to replay them. The fresh catalog inherits the array
-/// file's own generation stamp, so a later `infrastore_store_open` sees a coherent pair.
+/// file's own generation stamp, so a later `infrastore_store_open_with_catalog` sees a coherent pair.
 ///
 /// Refuses (`INFRASTORE_ERR_STORE_EXISTS`) when `<path>.sqlite` is already there — that store wants
-/// `infrastore_store_open`. Never read-only.
+/// `infrastore_store_open_with_catalog`. Never read-only.
 ///
 /// # Safety
 ///
@@ -868,10 +774,7 @@ pub unsafe extern "C" fn infrastore_store_open_without_catalog(
     out: *mut *mut InfraStoreHandle,
 ) -> i32 {
     clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out);
     let path = match unsafe { cstr_to_str(path) } {
         Ok(s) => PathBuf::from(s),
         Err(code) => {
@@ -879,14 +782,8 @@ pub unsafe extern "C" fn infrastore_store_open_without_catalog(
             return code;
         }
     };
-    let catalog = match catalog_from_code(catalog_mode) {
-        Ok(c) => c,
-        Err(code) => return code,
-    };
-    let store = match core_lib::Store::open_without_catalog(&path, catalog) {
-        Ok(s) => s,
-        Err(e) => return map_core_error(e),
-    };
+    let catalog = ffi_try!(code catalog_from_code(catalog_mode));
+    let store = ffi_try!(core_lib::Store::open_without_catalog(&path, catalog));
     let handle = Box::new(InfraStoreHandle { inner: store });
     unsafe { *out = Box::into_raw(handle) };
     INFRASTORE_OK
@@ -903,14 +800,8 @@ pub unsafe extern "C" fn infrastore_store_catalog_mode(
     out: *mut u8,
 ) -> i32 {
     clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let Some(store) = (unsafe { handle.as_ref() }) else {
-        set_error("store handle is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    };
+    require_nonnull!(out);
+    let store = deref_handle!(ref handle, "store handle is null");
     let code = match store.inner.catalog_mode() {
         core_lib::CatalogMode::Attached => 0,
         core_lib::CatalogMode::InMemory => 1,
@@ -919,7 +810,7 @@ pub unsafe extern "C" fn infrastore_store_catalog_mode(
     INFRASTORE_OK
 }
 
-/// Release a store handle returned by `infrastore_store_create` or `infrastore_store_open`.
+/// Release a store handle returned by any `infrastore_store_create_*` / `infrastore_store_open_*`.
 ///
 /// # Safety
 ///
@@ -1040,7 +931,7 @@ unsafe fn build_single_request(
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
     let features = unsafe { parse_features_json(features_json) }?;
 
-    let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
+    let initial_timestamp = match DateTime::from_timestamp_millis(initial_ts_unix_ms) {
         Some(d) => d,
         None => {
             set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
@@ -1075,34 +966,6 @@ unsafe fn build_single_request(
 }
 
 // ---- add_non_sequential / add_persistent ----------------------------------
-
-/// The descriptive attributes of a `NonSequentialTimeSeries`, gathered so the
-/// bulk element readers can emit them without knowing which of the two
-/// irregular static types they hold.
-fn descriptors_of_irregular_nsts(s: &core_lib::NonSequentialTimeSeries) -> core_lib::Descriptors {
-    core_lib::Descriptors {
-        element_type: s.element_type,
-        units: s.units.clone(),
-        quantity_kind: s.quantity_kind.clone(),
-        unit_system: s.unit_system,
-        time_reference: s.time_reference.clone(),
-        component_field: s.component_field.clone(),
-        application_data: s.application_data.clone(),
-    }
-}
-
-/// [`descriptors_of_irregular_nsts`] for a `PersistentTimeSeries`.
-fn descriptors_of_irregular_pts(s: &core_lib::PersistentTimeSeries) -> core_lib::Descriptors {
-    core_lib::Descriptors {
-        element_type: s.element_type,
-        units: s.units.clone(),
-        quantity_kind: s.quantity_kind.clone(),
-        unit_system: s.unit_system,
-        time_reference: s.time_reference.clone(),
-        component_field: s.component_field.clone(),
-        application_data: s.application_data.clone(),
-    }
-}
 
 /// Parse the argument list shared by the two irregular static types into an
 /// [`core_lib::AddRequest`].
@@ -1151,7 +1014,7 @@ unsafe fn build_irregular_request(
     let timestamps = match unsafe {
         slice::from_raw_parts(timestamps_unix_ms, timestamps_len as usize)
             .iter()
-            .map(|&ns| unix_ms_to_datetime(ns).ok_or(ns))
+            .map(|&ns| DateTime::from_timestamp_millis(ns).ok_or(ns))
             .collect::<std::result::Result<Vec<_>, _>>()
     } {
         Ok(timestamps) => timestamps,
@@ -1252,10 +1115,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
     // Named separately, as the id-addressed read does: one of these is the
     // caller's output buffer and the other is its input, and a C caller can
     // only act on the diagnostic if it says which.
-    if out_removed.is_null() {
-        set_error("out_removed pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_removed);
     if ids.is_null() && count != 0 {
         set_error("ids pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
@@ -1270,10 +1130,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
         .copied()
         .map(core_lib::TimeSeriesId)
         .collect();
-    let owner = match optional_owner(has_owner, owner_id, owner_category) {
-        Ok(owner) => owner,
-        Err(code) => return code,
-    };
+    let owner = ffi_try!(code optional_owner(has_owner, owner_id, owner_category));
     let removed = match owner {
         Some(owner) => store.inner.remove_by_ids_for_owner(&id_slice, owner),
         None => store.inner.remove_by_ids(&id_slice),
@@ -1301,12 +1158,11 @@ pub unsafe extern "C" fn infrastore_store_counts(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_components_with_time_series.is_null()
-        || out_static_time_series.is_null()
-        || out_forecasts.is_null()
-    {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(
+        out_components_with_time_series,
+        out_static_time_series,
+        out_forecasts
+    );
     match store.inner.get_time_series_counts() {
         Ok(c) => {
             unsafe {
@@ -1352,23 +1208,16 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_parameters(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_present.is_null()
-        || out_horizon.is_null()
-        || out_interval.is_null()
-        || out_count.is_null()
-        || out_resolution.is_null()
-        || out_initial_ms.is_null()
-    {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let resolution = match unsafe { cstr_to_optional_period(filter_resolution) } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    let interval = match unsafe { cstr_to_optional_period(filter_interval) } {
-        Ok(i) => i,
-        Err(c) => return c,
-    };
+    require_nonnull!(
+        out_present,
+        out_horizon,
+        out_interval,
+        out_count,
+        out_resolution,
+        out_initial_ms
+    );
+    let resolution = ffi_try!(code unsafe { cstr_to_optional_period(filter_resolution) });
+    let interval = ffi_try!(code unsafe { cstr_to_optional_period(filter_interval) });
     match store.inner.get_forecast_parameters(resolution, interval) {
         Ok(p) => {
             let present = p.horizon.is_some()
@@ -1383,7 +1232,10 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_parameters(
                 *out_interval = opt_period_cstr(p.interval);
                 *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
                 *out_resolution = opt_period_cstr(p.resolution);
-                *out_initial_ms = p.initial_timestamp.map(datetime_to_unix_ms).unwrap_or(-1);
+                *out_initial_ms = p
+                    .initial_timestamp
+                    .map(|t| t.timestamp_millis())
+                    .unwrap_or(-1);
             }
             INFRASTORE_OK
         }
@@ -1412,24 +1264,15 @@ pub unsafe extern "C" fn infrastore_store_check_static_consistency(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let resolution = match unsafe { cstr_to_optional_period(filter_resolution) } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    let grids = match store.inner.check_static_consistency(resolution) {
-        Ok(g) => g,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_len);
+    let resolution = ffi_try!(code unsafe { cstr_to_optional_period(filter_resolution) });
+    let grids = ffi_try!(store.inner.check_static_consistency(resolution));
     let arr: Vec<Value> = grids
         .iter()
         .map(|g| {
             serde_json::json!({
                 "resolution": g.resolution.to_iso8601(),
-                "initial_timestamp_ms": datetime_to_unix_ms(g.initial_timestamp),
+                "initial_timestamp_ms": g.initial_timestamp.timestamp_millis(),
                 "length": g.length as i64,
             })
         })
@@ -1462,12 +1305,9 @@ pub unsafe extern "C" fn infrastore_store_get_resolutions(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_len);
     let ts_type = if has_time_series_type {
-        match resolve_requested_type_from_int(time_series_type) {
+        match time_series_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -1477,10 +1317,7 @@ pub unsafe extern "C" fn infrastore_store_get_resolutions(
     } else {
         None
     };
-    let resolutions = match store.inner.get_resolutions(ts_type) {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    let resolutions = ffi_try!(store.inner.get_resolutions(ts_type));
     let arr: Vec<Value> = resolutions
         .iter()
         .map(|p| Value::from(p.to_iso8601()))
@@ -1511,12 +1348,9 @@ pub unsafe extern "C" fn infrastore_store_get_intervals(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_len);
     let ts_type = if has_time_series_type {
-        match resolve_requested_type_from_int(time_series_type) {
+        match time_series_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -1526,10 +1360,7 @@ pub unsafe extern "C" fn infrastore_store_get_intervals(
     } else {
         None
     };
-    let intervals = match store.inner.get_intervals(ts_type) {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    let intervals = ffi_try!(store.inner.get_intervals(ts_type));
     let arr: Vec<Value> = intervals
         .iter()
         .map(|p| Value::from(p.to_iso8601()))
@@ -1552,10 +1383,7 @@ pub unsafe extern "C" fn infrastore_store_read_only(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_read_only.is_null() {
-        set_error("out_read_only is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_read_only);
     unsafe { *out_read_only = store.inner.read_only() };
     INFRASTORE_OK
 }
@@ -1577,10 +1405,7 @@ pub unsafe extern "C" fn infrastore_store_is_empty(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out.is_null() {
-        set_error("out is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out);
     match store.inner.is_empty() {
         Ok(empty) => {
             unsafe { *out = empty };
@@ -1607,10 +1432,7 @@ pub unsafe extern "C" fn infrastore_store_get_path(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_has_path.is_null() || out_len.is_null() {
-        set_error("out_has_path or out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_has_path, out_len);
     match store.inner.file_path() {
         Some(path) => {
             unsafe { *out_has_path = true };
@@ -1640,14 +1462,8 @@ pub unsafe extern "C" fn infrastore_store_counts_by_type(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let counts = match store.inner.counts_by_type() {
-        Ok(c) => c,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_len);
+    let counts = ffi_try!(store.inner.counts_by_type());
     let arr: Vec<Value> = counts
         .iter()
         .map(|(ts_type, n)| {
@@ -1675,10 +1491,7 @@ pub unsafe extern "C" fn infrastore_store_num_distinct_arrays(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_count.is_null() {
-        set_error("out_count is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_count);
     match store.inner.num_distinct_arrays() {
         Ok(n) => {
             unsafe { *out_count = n };
@@ -1704,13 +1517,12 @@ pub unsafe extern "C" fn infrastore_store_counts_detailed(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_components.is_null()
-        || out_supplemental_attributes.is_null()
-        || out_static_time_series.is_null()
-        || out_forecasts.is_null()
-    {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(
+        out_components,
+        out_supplemental_attributes,
+        out_static_time_series,
+        out_forecasts
+    );
     match store.inner.time_series_counts_detailed() {
         Ok(c) => {
             unsafe {
@@ -1747,10 +1559,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_ids(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_len);
     let category = match owner_category {
         0 => core_lib::OwnerCategory::Component,
         1 => core_lib::OwnerCategory::SupplementalAttribute,
@@ -1760,7 +1569,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_ids(
         }
     };
     let ts_type = if has_time_series_type {
-        match resolve_requested_type_from_int(time_series_type) {
+        match time_series_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -1770,14 +1579,8 @@ pub unsafe extern "C" fn infrastore_store_list_owner_ids(
     } else {
         None
     };
-    let resolution = match unsafe { cstr_to_optional_period(resolution) } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    let ids = match store.inner.list_owner_ids(category, ts_type, resolution) {
-        Ok(v) => v,
-        Err(e) => return map_core_error(e),
-    };
+    let resolution = ffi_try!(code unsafe { cstr_to_optional_period(resolution) });
+    let ids = ffi_try!(store.inner.list_owner_ids(category, ts_type, resolution));
     let arr: Vec<Value> = ids.iter().map(|id| Value::from(*id)).collect();
     let json = Value::Array(arr).to_string();
     unsafe { write_str_out(&json, buf, cap, out_len) };
@@ -1801,14 +1604,8 @@ pub unsafe extern "C" fn infrastore_store_static_summary(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let rows = match store.inner.static_summary() {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_len);
+    let rows = ffi_try!(store.inner.static_summary());
     let dur = |d: Option<core_lib::Period>| {
         d.map(|x| Value::from(x.to_iso8601()))
             .unwrap_or(Value::Null)
@@ -1831,7 +1628,7 @@ pub unsafe extern "C" fn infrastore_store_static_summary(
             o.insert(
                 "initial_timestamp_ms".into(),
                 r.initial_timestamp
-                    .map(datetime_to_unix_ms)
+                    .map(|t| t.timestamp_millis())
                     .map(Value::from)
                     .unwrap_or(Value::Null),
             );
@@ -1864,14 +1661,8 @@ pub unsafe extern "C" fn infrastore_store_forecast_summary(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let rows = match store.inner.forecast_summary() {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_len);
+    let rows = ffi_try!(store.inner.forecast_summary());
     let dur = |d: Option<core_lib::Period>| {
         d.map(|x| Value::from(x.to_iso8601()))
             .unwrap_or(Value::Null)
@@ -1894,7 +1685,7 @@ pub unsafe extern "C" fn infrastore_store_forecast_summary(
             o.insert(
                 "initial_timestamp_ms".into(),
                 r.initial_timestamp
-                    .map(datetime_to_unix_ms)
+                    .map(|t| t.timestamp_millis())
                     .map(Value::from)
                     .unwrap_or(Value::Null),
             );
@@ -1931,9 +1722,7 @@ pub unsafe extern "C" fn infrastore_store_get_compression(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_kind.is_null() || out_level.is_null() || out_shuffle.is_null() {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_kind, out_level, out_shuffle);
     let (kind, level, shuffle) = match store.inner.compression() {
         core_lib::Compression::None => (0u8, 0u8, false),
         core_lib::Compression::Deflate { level, shuffle } => (1u8, level, shuffle),
@@ -1964,9 +1753,7 @@ pub unsafe extern "C" fn infrastore_store_verify(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_error_count.is_null() {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_error_count);
     match store.inner.verify_integrity() {
         Ok(r) => {
             unsafe { *out_error_count = r.errors.len() as u64 };
@@ -2005,14 +1792,8 @@ pub unsafe extern "C" fn infrastore_store_compact(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let report = match store.inner.compact() {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_json, out_len);
+    let report = ffi_try!(store.inner.compact());
     let json = serde_json::json!({
         "slots_reclaimed": report.slots_reclaimed as u64,
         "datasets_dropped": report.datasets_dropped as u64,
@@ -2101,10 +1882,7 @@ pub unsafe extern "C" fn infrastore_store_in_transaction(
     out: *mut bool,
 ) -> i32 {
     clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out);
     let store = deref_handle!(ref handle);
     unsafe { *out = store.inner.in_transaction() };
     INFRASTORE_OK
@@ -2122,10 +1900,7 @@ pub unsafe extern "C" fn infrastore_store_write_buffer_bytes(
     out: *mut u64,
 ) -> i32 {
     clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out);
     let store = deref_handle!(ref handle);
     unsafe { *out = store.inner.write_buffer_bytes() as u64 };
     INFRASTORE_OK
@@ -2303,10 +2078,7 @@ pub unsafe extern "C" fn infrastore_store_get_metadata_by_id(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() || out_present.is_null() {
-        set_error("out_len or out_present is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_len, out_present);
     match store
         .inner
         .get_metadata_by_id(core_lib::TimeSeriesId(association_id))
@@ -2348,10 +2120,7 @@ pub unsafe extern "C" fn infrastore_store_association_exists(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_present.is_null() {
-        set_error("out_present is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_present);
     match store
         .inner
         .association_exists(core_lib::TimeSeriesId(association_id))
@@ -2389,13 +2158,8 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_present.is_null() {
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe { build_filter(filter) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    require_nonnull!(out_present);
+    let filter = ffi_try!(code unsafe { build_filter(filter) });
     match store.inner.has_any_time_series(filter) {
         Ok(present) => {
             unsafe { *out_present = present };
@@ -2423,16 +2187,10 @@ pub unsafe extern "C" fn infrastore_store_get_array_by_hash(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if data_hash.is_null() || out_dtype.is_null() || out_data.is_null() || out_byte_len.is_null() {
-        set_error("a pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(data_hash, out_dtype, out_data, out_byte_len);
     let mut hash = [0u8; 32];
     unsafe { ptr::copy_nonoverlapping(data_hash, hash.as_mut_ptr(), 32) };
-    let array = match store.inner.get_array_by_hash(&hash) {
-        Ok(a) => a,
-        Err(e) => return map_core_error(e),
-    };
+    let array = ffi_try!(store.inner.get_array_by_hash(&hash));
     // Hand back the raw little-endian element bytes + dtype; the caller
     // interprets them according to the requested element type.
     let dtype = array.dtype.code();
@@ -2465,23 +2223,11 @@ pub unsafe extern "C" fn infrastore_store_count_array_references(
     out_dst: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if data_hash.is_null() || out_sts.is_null() || out_dst.is_null() {
-        set_error("a pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let store = deref_handle!(ref handle, "store handle is null");
+    require_nonnull!(data_hash, out_sts, out_dst);
     let mut hash = [0u8; 32];
     unsafe { ptr::copy_nonoverlapping(data_hash, hash.as_mut_ptr(), 32) };
-    let (sts, dst) = match store.inner.count_array_references(&hash) {
-        Ok(c) => c,
-        Err(e) => return map_core_error(e),
-    };
+    let (sts, dst) = ffi_try!(store.inner.count_array_references(&hash));
     unsafe {
         *out_sts = sts as u64;
         *out_dst = dst as u64;
@@ -2503,19 +2249,6 @@ fn time_series_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
         6 => T::PersistentTimeSeries,
         _ => return None,
     })
-}
-
-/// Map a *key resolution* request's type code to a [`core_lib::TimeSeriesType`].
-/// Unlike [`requested_type_from_int`] this accepts every stored type, not just
-/// the forecasts: resolving an identity to its key is meaningful for a
-/// `SingleTimeSeries` too, and `Store::resolve_metadata` handles any type
-/// (it filters candidates by the requested type, nothing more).
-///
-/// There is no family sentinel: requesting `INFRASTORE_TYPE_DETERMINISTIC`
-/// already matches a stored `DeterministicSingleTimeSeries`, and
-/// `out_matched_type` reports which form was found.
-fn resolve_requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
-    time_series_type_from_int(i)
 }
 
 /// Map a forecast read request's `ts_type` code to a [`core_lib::TimeSeriesType`].
@@ -2631,7 +2364,7 @@ unsafe fn build_forecast_request(
     let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let features = unsafe { parse_features_json(features_json) }?;
-    let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
+    let initial_timestamp = match DateTime::from_timestamp_millis(initial_ts_unix_ms) {
         Some(d) => d,
         None => {
             set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
@@ -2760,7 +2493,7 @@ unsafe fn build_probabilistic_request(
     let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let features = unsafe { parse_features_json(features_json) }?;
-    let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
+    let initial_timestamp = match DateTime::from_timestamp_millis(initial_ts_unix_ms) {
         Some(d) => d,
         None => {
             set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
@@ -2878,13 +2611,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
-    let batch = match unsafe { batch.as_mut() } {
-        Some(b) => b,
-        None => {
-            set_error("batch handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
+    let batch = deref_handle!(mut batch, "batch handle is null");
     match unsafe {
         build_single_request(
             owner_id,
@@ -2948,13 +2675,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
-    let batch = match unsafe { batch.as_mut() } {
-        Some(b) => b,
-        None => {
-            set_error("batch handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
+    let batch = deref_handle!(mut batch, "batch handle is null");
     match unsafe {
         build_irregular_request(
             core_lib::TimeSeriesType::NonSequentialTimeSeries,
@@ -3020,13 +2741,7 @@ pub unsafe extern "C" fn infrastore_batch_add_persistent(
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
-    let batch = match unsafe { batch.as_mut() } {
-        Some(b) => b,
-        None => {
-            set_error("batch handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
+    let batch = deref_handle!(mut batch, "batch handle is null");
     match unsafe {
         build_irregular_request(
             core_lib::TimeSeriesType::PersistentTimeSeries,
@@ -3094,13 +2809,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
-    let batch = match unsafe { batch.as_mut() } {
-        Some(b) => b,
-        None => {
-            set_error("batch handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
+    let batch = deref_handle!(mut batch, "batch handle is null");
     match unsafe {
         build_forecast_request(
             owner_id,
@@ -3173,13 +2882,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     component_field: *const c_char,
 ) -> i32 {
     clear_error();
-    let batch = match unsafe { batch.as_mut() } {
-        Some(b) => b,
-        None => {
-            set_error("batch handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
+    let batch = deref_handle!(mut batch, "batch handle is null");
     match unsafe {
         build_probabilistic_request(
             owner_id,
@@ -3236,24 +2939,9 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
     out_ids: *mut *mut i64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let batch = match unsafe { batch.as_mut() } {
-        Some(b) => b,
-        None => {
-            set_error("batch handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_ids.is_null() || out_len.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let store = deref_handle!(mut handle, "store handle is null");
+    let batch = deref_handle!(mut batch, "batch handle is null");
+    require_nonnull!(out_ids, out_len);
     let items = std::mem::take(&mut batch.items);
     match store.inner.add_time_series_bulk(items) {
         Ok(added) => {
@@ -3305,13 +2993,7 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
 /// Each non-null pointer must be valid for writing one pointer.
 #[allow(clippy::too_many_arguments)]
 unsafe fn emit_descriptors(
-    application_data: Option<&str>,
-    element_type: core_lib::ElementType,
-    units: Option<&str>,
-    quantity_kind: Option<&str>,
-    unit_system: Option<core_lib::UnitSystem>,
-    time_reference: Option<&core_lib::TimeReference>,
-    component_field: Option<&str>,
+    series: &core_lib::TimeSeriesData,
     out_application_data: *mut *mut c_char,
     out_element_type: *mut *mut c_char,
     out_units: *mut *mut c_char,
@@ -3323,41 +3005,29 @@ unsafe fn emit_descriptors(
     let application_data_c = if out_application_data.is_null() {
         None
     } else {
-        match opt_attr_cstring(application_data) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
+        ffi_try!(code opt_attr_cstring(series.application_data()))
     };
     let units_c = if out_units.is_null() {
         None
     } else {
-        match opt_attr_cstring(units) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
+        ffi_try!(code opt_attr_cstring(series.units()))
     };
     let quantity_kind_c = if out_quantity_kind.is_null() {
         None
     } else {
-        match opt_attr_cstring(quantity_kind) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
+        ffi_try!(code opt_attr_cstring(series.quantity_kind()))
     };
     let component_field_c = if out_component_field.is_null() {
         None
     } else {
-        match opt_attr_cstring(component_field) {
-            Ok(c) => c,
-            Err(code) => return code,
-        }
+        ffi_try!(code opt_attr_cstring(series.component_field()))
     };
     // No fallible step: `UnitSystem::as_str` is a fixed identifier, so it can
     // never carry an interior NUL the way a user-supplied label can.
     let unit_system_c = if out_unit_system.is_null() {
         None
     } else {
-        unit_system.map(|u| owned_cstr(u.as_str()))
+        series.unit_system().map(|u| owned_cstr(u.as_str()))
     };
     // Same reasoning: every `TimeReference` spelling is either a fixed literal,
     // a formatted offset, or a zone name the core already refused unless it
@@ -3365,7 +3035,9 @@ unsafe fn emit_descriptors(
     let time_reference_c = if out_time_reference.is_null() {
         None
     } else {
-        time_reference.map(|r| owned_cstr(&r.as_storage_string()))
+        series
+            .time_reference()
+            .map(|r| owned_cstr(&r.as_storage_string()))
     };
     unsafe {
         if !out_application_data.is_null() {
@@ -3374,7 +3046,7 @@ unsafe fn emit_descriptors(
         // Unlike the optional attributes, the element type is never absent — a
         // series always carries a concrete one — so this is always a string.
         if !out_element_type.is_null() {
-            *out_element_type = owned_cstr(&element_type.to_string());
+            *out_element_type = owned_cstr(&series.element_type().to_string());
         }
         if !out_units.is_null() {
             *out_units = into_raw_or_null(units_c);
@@ -3393,22 +3065,6 @@ unsafe fn emit_descriptors(
         }
     }
     INFRASTORE_OK
-}
-
-/// The number of series held by a bulk-read result handle, or `-1` if `result`
-/// is null.
-///
-/// # Safety
-///
-/// `result` must be null or a live handle from a read call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_bulk_result_len(
-    result: *const InfraStoreBulkReadHandle,
-) -> i64 {
-    match unsafe { result.as_ref() } {
-        Some(r) => r.items.len() as i64,
-        None => -1,
-    }
 }
 
 /// Read element `index` out of a bulk-read result handle. The out parameters
@@ -3455,49 +3111,32 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
-    let result = match unsafe { result.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("bulk-read result handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
+    let result = deref_handle!(ref result, "bulk-read result handle is null");
+    require_nonnull!(
+        out_initial_ts_unix_ms,
+        out_resolution,
+        out_dtype,
+        out_shape,
+        out_shape_len,
+        out_data,
+        out_data_byte_len
+    );
+    let Some(item) = result.items.get(index as usize) else {
+        set_error("bulk-read index out of bounds");
+        return INFRASTORE_ERR_INVALID_PARAMETER;
     };
-    if out_initial_ts_unix_ms.is_null()
-        || out_resolution.is_null()
-        || out_dtype.is_null()
-        || out_shape.is_null()
-        || out_shape_len.is_null()
-        || out_data.is_null()
-        || out_data_byte_len.is_null()
-    {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let single = match result.items.get(index as usize) {
-        Some(core_lib::TimeSeriesData::SingleTimeSeries(s)) => s,
-        Some(other) => {
-            set_error(format!(
-                "bulk-read item {index} is a {}, not a SingleTimeSeries",
-                other.time_series_type().as_str()
-            ));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-        None => {
-            set_error("bulk-read index out of bounds");
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
+    let core_lib::TimeSeriesData::SingleTimeSeries(single) = item else {
+        set_error(format!(
+            "bulk-read item {index} is a {}, not a SingleTimeSeries",
+            item.time_series_type().as_str()
+        ));
+        return INFRASTORE_ERR_INVALID_PARAMETER;
     };
     // Descriptors first: the only fallible step, and it writes nothing on
     // failure, so no other handed-out buffer can be orphaned by it.
     let code = unsafe {
         emit_descriptors(
-            single.application_data.as_deref(),
-            single.element_type,
-            single.units.as_deref(),
-            single.quantity_kind.as_deref(),
-            single.unit_system,
-            single.time_reference.as_ref(),
-            single.component_field.as_deref(),
+            item,
             out_application_data,
             out_element_type,
             out_units,
@@ -3517,7 +3156,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     let (shape_ptr, shape_len) = vec_into_raw(shape);
     let (data_ptr, data_len) = vec_into_raw(single.data.bytes.clone());
     unsafe {
-        *out_initial_ts_unix_ms = datetime_to_unix_ms(single.initial_timestamp);
+        *out_initial_ts_unix_ms = single.initial_timestamp.timestamp_millis();
         *out_resolution = resolution_cstr;
         *out_dtype = dtype.code();
         *out_shape = shape_ptr;
@@ -3556,10 +3195,7 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_result.is_null() {
-        set_error("out_result pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_result);
     let count = n as usize;
     if count != 0 && ids.is_null() {
         set_error("ids pointer is null");
@@ -3575,13 +3211,11 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids(
         .copied()
         .map(core_lib::TimeSeriesId)
         .collect();
-    let items = match store
-        .inner
-        .read_by_ids(&id_slice, core_lib::ReadWindow::full())
-    {
-        Ok(d) => d,
-        Err(e) => return map_core_error(e),
-    };
+    let items = ffi_try!(
+        store
+            .inner
+            .read_by_ids(&id_slice, core_lib::ReadWindow::full())
+    );
     unsafe { *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items })) };
     INFRASTORE_OK
 }
@@ -3619,10 +3253,7 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids_range(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_result.is_null() {
-        set_error("out_result pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_result);
     let count = n as usize;
     if count != 0 && ids.is_null() {
         set_error("ids pointer is null");
@@ -3640,10 +3271,7 @@ pub unsafe extern "C" fn infrastore_store_read_by_ids_range(
     };
     let id_slice: Vec<core_lib::TimeSeriesId> =
         raw.iter().copied().map(core_lib::TimeSeriesId).collect();
-    let items = match store.inner.read_by_ids_range(&id_slice, range) {
-        Ok(d) => d,
-        Err(e) => return map_core_error(e),
-    };
+    let items = ffi_try!(store.inner.read_by_ids_range(&id_slice, range));
     unsafe { *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items })) };
     INFRASTORE_OK
 }
@@ -3699,12 +3327,9 @@ pub unsafe extern "C" fn infrastore_store_read_by_id(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_result.is_null() {
-        set_error("out_result pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_result);
     let start = if start_present {
-        match unix_ms_to_datetime(start_ms) {
+        match DateTime::from_timestamp_millis(start_ms) {
             Some(dt) => Some(dt),
             None => {
                 set_error(format!("invalid start_ms: {start_ms}"));
@@ -3725,34 +3350,22 @@ pub unsafe extern "C" fn infrastore_store_read_by_id(
             INFRASTORE_ERR_INVALID_PARAMETER
         }),
     };
-    let len = match extent(len_present, len, "len") {
-        Ok(v) => v,
-        Err(code) => return code,
-    };
-    let count = match extent(count_present, count, "count") {
-        Ok(v) => v,
-        Err(code) => return code,
-    };
+    let len = ffi_try!(code extent(len_present, len, "len"));
+    let count = ffi_try!(code extent(count_present, count, "count"));
     let window = core_lib::ReadWindow {
         start,
         zoneless: start_zoneless,
         len,
         count,
     };
-    let owner = match optional_owner(has_owner, owner_id, owner_category) {
-        Ok(owner) => owner,
-        Err(code) => return code,
-    };
+    let owner = ffi_try!(code optional_owner(has_owner, owner_id, owner_category));
     let read = match owner {
         Some(owner) => store
             .inner
             .read_by_id_for_owner(core_lib::TimeSeriesId(id), owner, window),
         None => store.inner.read_by_id(core_lib::TimeSeriesId(id), window),
     };
-    let item = match read {
-        Ok(d) => d,
-        Err(e) => return map_core_error(e),
-    };
+    let item = ffi_try!(read);
     unsafe {
         *out_result = Box::into_raw(Box::new(InfraStoreBulkReadHandle { items: vec![item] }))
     };
@@ -3778,17 +3391,8 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_name(
     out_name: *mut *mut c_char,
 ) -> i32 {
     clear_error();
-    let result = match unsafe { result.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("bulk-read result handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_name.is_null() {
-        set_error("out_name pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let result = deref_handle!(ref result, "bulk-read result handle is null");
+    require_nonnull!(out_name);
     let item = match result.items.get(index as usize) {
         Some(d) => d,
         None => {
@@ -3826,17 +3430,8 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_type(
     out_type: *mut i32,
 ) -> i32 {
     clear_error();
-    let result = match unsafe { result.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("bulk-read result handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_type.is_null() {
-        set_error("out_type pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let result = deref_handle!(ref result, "bulk-read result handle is null");
+    require_nonnull!(out_type);
     let item = match result.items.get(index as usize) {
         Some(d) => d,
         None => {
@@ -3848,130 +3443,34 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_type(
     INFRASTORE_OK
 }
 
-/// Read a `NonSequentialTimeSeries` element out of a bulk-read result. The
-/// out-params mirror `infrastore_bulk_result_get_single` except there is no
-/// `application_data` (a bulk read carries the array data, not the metadata row;
-/// fetch it per-key with `infrastore_store_get_metadata` if needed). The caller owns the
-/// `out_timestamps`, `out_shape`, and `out_data` buffers.
+/// Read an irregular static element — a `NonSequentialTimeSeries` or a
+/// `PersistentTimeSeries` — out of a bulk-read result. The two carry the same
+/// payload, so one reader serves both; ask `infrastore_bulk_result_item_type`
+/// which one a slot holds. Any other stored type is refused with
+/// `INFRASTORE_ERR_INVALID_PARAMETER`.
 ///
+/// `out_timestamps` is the timestamp vector (for a `PersistentTimeSeries`, the
+/// breakpoints: the value at index `i` is in force from `out_timestamps[i]`
+/// until the next breakpoint, and past the last one forever). The caller owns
+/// the `out_timestamps`, `out_shape`, and `out_data` buffers.
 ///
 /// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
-/// `out_unit_system`, and `out_component_field` behave as in
-/// `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
-/// them nullable to skip, freed with `infrastore_string_free`.
+/// `out_unit_system`, `out_time_reference`, and `out_component_field` behave as
+/// in `infrastore_bulk_result_get_single`: owned C strings (null when unset),
+/// any of them nullable to skip, freed with `infrastore_string_free`.
+///
 /// # Safety
 ///
-/// `result` must be a live bulk-read handle and `index` less than its length.
-/// Every output pointer must be valid for writing its indicated value. The
-/// returned buffers must each be released with the matching free function.
+/// `result` must be a live bulk-read handle, not used concurrently, and `index`
+/// less than its length. Every output pointer except the seven descriptor
+/// pointers must be valid for writing its indicated value; those seven may be
+/// null. On success `*out_timestamps` and `*out_shape` must each be released
+/// exactly once with `infrastore_buffer_free_i64` and `*out_data` with
+/// `infrastore_buffer_free_u8` (passing the matching length), and each non-null
+/// owned string exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
-    result: *const InfraStoreBulkReadHandle,
-    index: u64,
-    out_timestamps: *mut *mut i64,
-    out_timestamps_len: *mut u64,
-    out_dtype: *mut i32,
-    out_shape: *mut *mut i64,
-    out_shape_len: *mut u64,
-    out_data: *mut *mut u8,
-    out_data_byte_len: *mut u64,
-    out_application_data: *mut *mut c_char,
-    out_element_type: *mut *mut c_char,
-    out_units: *mut *mut c_char,
-    out_quantity_kind: *mut *mut c_char,
-    out_unit_system: *mut *mut c_char,
-    out_time_reference: *mut *mut c_char,
-    out_component_field: *mut *mut c_char,
-) -> i32 {
-    unsafe {
-        bulk_result_get_irregular(
-            core_lib::TimeSeriesType::NonSequentialTimeSeries,
-            result,
-            index,
-            out_timestamps,
-            out_timestamps_len,
-            out_dtype,
-            out_shape,
-            out_shape_len,
-            out_data,
-            out_data_byte_len,
-            out_application_data,
-            out_element_type,
-            out_units,
-            out_quantity_kind,
-            out_unit_system,
-            out_time_reference,
-            out_component_field,
-        )
-    }
-}
-
-/// Read a `PersistentTimeSeries` element out of a bulk-read result. The
-/// out-params, the ownership rules, and the descriptor handling are exactly
-/// those of [`infrastore_bulk_result_get_non_sequential`]; `out_timestamps` is
-/// the breakpoint vector, with the value at index `i` in force from
-/// `out_timestamps[i]` until the next breakpoint and past the last one forever.
-///
-/// # Safety
-///
-/// `result` must be a live bulk-read handle and `index` less than its length.
-/// Every output pointer must be valid for writing its indicated value. The
-/// returned buffers must each be released with the matching free function, and
-/// each non-null owned string exactly once with `infrastore_string_free`.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn infrastore_bulk_result_get_persistent(
-    result: *const InfraStoreBulkReadHandle,
-    index: u64,
-    out_timestamps: *mut *mut i64,
-    out_timestamps_len: *mut u64,
-    out_dtype: *mut i32,
-    out_shape: *mut *mut i64,
-    out_shape_len: *mut u64,
-    out_data: *mut *mut u8,
-    out_data_byte_len: *mut u64,
-    out_application_data: *mut *mut c_char,
-    out_element_type: *mut *mut c_char,
-    out_units: *mut *mut c_char,
-    out_quantity_kind: *mut *mut c_char,
-    out_unit_system: *mut *mut c_char,
-    out_time_reference: *mut *mut c_char,
-    out_component_field: *mut *mut c_char,
-) -> i32 {
-    unsafe {
-        bulk_result_get_irregular(
-            core_lib::TimeSeriesType::PersistentTimeSeries,
-            result,
-            index,
-            out_timestamps,
-            out_timestamps_len,
-            out_dtype,
-            out_shape,
-            out_shape_len,
-            out_data,
-            out_data_byte_len,
-            out_application_data,
-            out_element_type,
-            out_units,
-            out_quantity_kind,
-            out_unit_system,
-            out_time_reference,
-            out_component_field,
-        )
-    }
-}
-
-/// Shared body of the two irregular-static bulk element readers. `want` selects
-/// which stored type is accepted; the payload is identical.
-///
-/// # Safety
-///
-/// See [`infrastore_bulk_result_get_non_sequential`], whose contract this
-/// implements.
-#[allow(clippy::too_many_arguments)]
-unsafe fn bulk_result_get_irregular(
-    want: core_lib::TimeSeriesType,
+pub unsafe extern "C" fn infrastore_bulk_result_get_irregular(
     result: *const InfraStoreBulkReadHandle,
     index: u64,
     out_timestamps: *mut *mut i64,
@@ -3990,52 +3489,32 @@ unsafe fn bulk_result_get_irregular(
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
-    let result = match unsafe { result.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("bulk-read result handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_timestamps.is_null()
-        || out_timestamps_len.is_null()
-        || out_dtype.is_null()
-        || out_shape.is_null()
-        || out_shape_len.is_null()
-        || out_data.is_null()
-        || out_data_byte_len.is_null()
-    {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    // Borrowed as a tuple of the fields the two variants share, so the emit
-    // path below is written once.
-    #[allow(clippy::type_complexity)]
-    let (timestamps, array, descriptors): (
-        &[chrono::DateTime<chrono::Utc>],
-        &core_lib::TypedArray,
-        core_lib::Descriptors,
-    ) = match result.items.get(index as usize) {
-        Some(core_lib::TimeSeriesData::NonSequentialTimeSeries(s))
-            if want == core_lib::TimeSeriesType::NonSequentialTimeSeries =>
-        {
-            (&s.timestamps, &s.data, descriptors_of_irregular_nsts(s))
-        }
-        Some(core_lib::TimeSeriesData::PersistentTimeSeries(s))
-            if want == core_lib::TimeSeriesType::PersistentTimeSeries =>
-        {
-            (&s.timestamps, &s.data, descriptors_of_irregular_pts(s))
-        }
-        Some(other) => {
-            set_error(format!(
-                "bulk-read item {index} is a {}, not a {}",
-                other.time_series_type().as_str(),
-                want.as_str()
-            ));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
+    let result = deref_handle!(ref result, "bulk-read result handle is null");
+    require_nonnull!(
+        out_timestamps,
+        out_timestamps_len,
+        out_dtype,
+        out_shape,
+        out_shape_len,
+        out_data,
+        out_data_byte_len
+    );
+    let item = match result.items.get(index as usize) {
+        Some(item) => item,
         None => {
             set_error("bulk-read index out of bounds");
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let (timestamps, array) = match item {
+        core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => (&s.timestamps, &s.data),
+        core_lib::TimeSeriesData::PersistentTimeSeries(s) => (&s.timestamps, &s.data),
+        other => {
+            set_error(format!(
+                "bulk-read item {index} is a {}, not a NonSequentialTimeSeries or \
+                 PersistentTimeSeries",
+                other.time_series_type().as_str()
+            ));
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
@@ -4043,13 +3522,7 @@ unsafe fn bulk_result_get_irregular(
     // failure, so no other handed-out buffer can be orphaned by it.
     let code = unsafe {
         emit_descriptors(
-            descriptors.application_data.as_deref(),
-            descriptors.element_type,
-            descriptors.units.as_deref(),
-            descriptors.quantity_kind.as_deref(),
-            descriptors.unit_system,
-            descriptors.time_reference.as_ref(),
-            descriptors.component_field.as_deref(),
+            item,
             out_application_data,
             out_element_type,
             out_units,
@@ -4062,7 +3535,7 @@ unsafe fn bulk_result_get_irregular(
     if code != INFRASTORE_OK {
         return code;
     }
-    let timestamps: Vec<i64> = timestamps.iter().map(|t| datetime_to_unix_ms(*t)).collect();
+    let timestamps: Vec<i64> = timestamps.iter().map(|t| t.timestamp_millis()).collect();
     let (timestamps_ptr, timestamps_len) = vec_into_raw(timestamps);
     let shape: Vec<i64> = array.shape.iter().map(|&d| d as i64).collect();
     let (shape_ptr, shape_len) = vec_into_raw(shape);
@@ -4126,30 +3599,22 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
     out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
-    let result = match unsafe { result.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("bulk-read result handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_initial_ts_unix_ms.is_null()
-        || out_resolution.is_null()
-        || out_horizon.is_null()
-        || out_interval.is_null()
-        || out_count.is_null()
-        || out_scenario_count.is_null()
-        || out_ndims.is_null()
-        || out_dims.is_null()
-        || out_dtype.is_null()
-        || out_data.is_null()
-        || out_data_byte_len.is_null()
-        || out_percentiles.is_null()
-        || out_percentiles_len.is_null()
-    {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let result = deref_handle!(ref result, "bulk-read result handle is null");
+    require_nonnull!(
+        out_initial_ts_unix_ms,
+        out_resolution,
+        out_horizon,
+        out_interval,
+        out_count,
+        out_scenario_count,
+        out_ndims,
+        out_dims,
+        out_dtype,
+        out_data,
+        out_data_byte_len,
+        out_percentiles,
+        out_percentiles_len
+    );
     let data = match result.items.get(index as usize) {
         Some(
             d @ (core_lib::TimeSeriesData::Deterministic(_)
@@ -4174,13 +3639,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
     // orphaned by it.
     let code = unsafe {
         emit_descriptors(
-            data.application_data(),
-            data.element_type(),
-            data.units(),
-            data.quantity_kind(),
-            data.unit_system(),
-            data.time_reference(),
-            data.component_field(),
+            &data,
             out_application_data,
             out_element_type,
             out_units,
@@ -4291,10 +3750,7 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    if out_count.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_count);
     // `owner_category < 0` means "all categories"; an empty `resolution` means
     // "all resolutions".
     let category = match owner_category {
@@ -4306,18 +3762,9 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let resolution = match unsafe { cstr_to_optional_period(resolution) } {
-        Ok(r) => r,
-        Err(c) => return c,
-    };
-    let horizon = match unsafe { cstr_to_period(horizon) } {
-        Ok(h) => h,
-        Err(c) => return c,
-    };
-    let interval = match unsafe { cstr_to_period(interval) } {
-        Ok(i) => i,
-        Err(c) => return c,
-    };
+    let resolution = ffi_try!(code unsafe { cstr_to_optional_period(resolution) });
+    let horizon = ffi_try!(code unsafe { cstr_to_period(horizon) });
+    let interval = ffi_try!(code unsafe { cstr_to_period(interval) });
     let policy = core_lib::TransformPolicy {
         dry_run,
         normalize_single_window,
@@ -4402,7 +3849,7 @@ unsafe fn emit_forecast_data(
             let (data_ptr, byte_len) = vec_into_raw(det.data.bytes);
 
             unsafe {
-                *out_initial_ts_unix_ms = datetime_to_unix_ms(det.initial_timestamp);
+                *out_initial_ts_unix_ms = det.initial_timestamp.timestamp_millis();
                 *out_resolution = period_cstr(det.resolution);
                 *out_horizon = period_cstr(det.horizon);
                 *out_interval = period_cstr(det.interval);
@@ -4428,7 +3875,7 @@ unsafe fn emit_forecast_data(
             let (pct_ptr, pct_len) = vec_into_raw(prob.percentiles);
 
             unsafe {
-                *out_initial_ts_unix_ms = datetime_to_unix_ms(prob.initial_timestamp);
+                *out_initial_ts_unix_ms = prob.initial_timestamp.timestamp_millis();
                 *out_resolution = period_cstr(prob.resolution);
                 *out_horizon = period_cstr(prob.horizon);
                 *out_interval = period_cstr(prob.interval);
@@ -4454,7 +3901,7 @@ unsafe fn emit_forecast_data(
             let (data_ptr, byte_len) = vec_into_raw(scen.data.bytes);
 
             unsafe {
-                *out_initial_ts_unix_ms = datetime_to_unix_ms(scen.initial_timestamp);
+                *out_initial_ts_unix_ms = scen.initial_timestamp.timestamp_millis();
                 *out_resolution = period_cstr(scen.resolution);
                 *out_horizon = period_cstr(scen.horizon);
                 *out_interval = period_cstr(scen.interval);
@@ -4525,7 +3972,7 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
     o.insert(
         "initial_timestamp_ms".into(),
         m.initial_timestamp
-            .map(datetime_to_unix_ms)
+            .map(|t| t.timestamp_millis())
             .map(Value::from)
             .unwrap_or(Value::Null),
     );
@@ -4640,10 +4087,7 @@ pub unsafe extern "C" fn infrastore_store_list_metadata_by_ids(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_json, out_len);
     let count = n as usize;
     if count != 0 && ids.is_null() {
         set_error("ids pointer is null");
@@ -4656,10 +4100,7 @@ pub unsafe extern "C" fn infrastore_store_list_metadata_by_ids(
     };
     let id_slice: Vec<core_lib::TimeSeriesId> =
         raw.iter().copied().map(core_lib::TimeSeriesId).collect();
-    let rows = match store.inner.list_metadata_by_ids(&id_slice) {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    let rows = ffi_try!(store.inner.list_metadata_by_ids(&id_slice));
     let json = metadata_rows_to_json(&rows);
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
@@ -4712,18 +4153,9 @@ pub unsafe extern "C" fn infrastore_store_list_metadata(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe { build_filter(filter) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
-    let rows = match store.inner.list_metadata(filter) {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_json, out_len);
+    let filter = ffi_try!(code unsafe { build_filter(filter) });
+    let rows = ffi_try!(store.inner.list_metadata(filter));
     let json = metadata_rows_to_json(&rows);
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
@@ -4744,18 +4176,9 @@ pub unsafe extern "C" fn infrastore_store_list_names(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe { build_filter(filter) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
-    let names = match store.inner.list_names(filter) {
-        Ok(n) => n,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_json, out_len);
+    let filter = ffi_try!(code unsafe { build_filter(filter) });
+    let names = ffi_try!(store.inner.list_names(filter));
     let json = Value::Array(names.into_iter().map(Value::from).collect()).to_string();
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
@@ -4776,18 +4199,9 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe { build_filter(filter) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
-    let types = match store.inner.list_owner_types(filter) {
-        Ok(t) => t,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_json, out_len);
+    let filter = ffi_try!(code unsafe { build_filter(filter) });
+    let types = ffi_try!(store.inner.list_owner_types(filter));
     let json = Value::Array(types.into_iter().map(Value::from).collect()).to_string();
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
@@ -4814,14 +4228,8 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    if out_removed.is_null() {
-        set_error("out_removed is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe { build_filter(filter) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    require_nonnull!(out_removed);
+    let filter = ffi_try!(code unsafe { build_filter(filter) });
     match store.inner.remove_by_filter(filter) {
         Ok(n) => {
             unsafe { *out_removed = n as u64 };
@@ -4930,7 +4338,7 @@ unsafe fn build_filter(filter: *const InfraStoreFilter) -> Result<core_lib::List
         out = out.owner_category(category);
     }
     if f.has_time_series_type {
-        match resolve_requested_type_from_int(f.time_series_type) {
+        match time_series_type_from_int(f.time_series_type) {
             Some(t) => out = out.time_series_type(t),
             None => {
                 set_error(format!("invalid time_series_type {}", f.time_series_type));
@@ -4976,7 +4384,7 @@ unsafe fn build_filter(filter: *const InfraStoreFilter) -> Result<core_lib::List
         };
     }
     if f.has_initial_timestamp {
-        let Some(t) = unix_ms_to_datetime(f.initial_timestamp_ms) else {
+        let Some(t) = DateTime::from_timestamp_millis(f.initial_timestamp_ms) else {
             set_error(format!(
                 "invalid initial_timestamp_ms: {}",
                 f.initial_timestamp_ms
@@ -5073,10 +4481,7 @@ pub unsafe extern "C" fn infrastore_store_copy_time_series(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let dst_type = match unsafe { cstr_to_str(dst_owner_type) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
+    let dst_type = ffi_try!(code unsafe { cstr_to_str(dst_owner_type) });
     let renamed = if new_name.is_null() {
         None
     } else {
@@ -5346,10 +4751,7 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
     clear_error();
     let store = deref_handle!(mut handle);
     let assocs: Vec<core_lib::SupplementalAttributeAssociation> =
-        match unsafe { assoc_rows_from_json(associations_json) } {
-            Ok(v) => v,
-            Err(c) => return c,
-        };
+        ffi_try!(code unsafe { assoc_rows_from_json(associations_json) });
     match store.inner.add_supplemental_attribute_associations(assocs) {
         Ok(ids) => {
             unsafe { write_assigned_ids(ids, out_added, out_ids) };
@@ -5376,15 +4778,9 @@ pub unsafe extern "C" fn infrastore_store_has_supplemental_attribute_association
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_found.is_null() {
-        set_error("out_found is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_found);
     let filter: core_lib::SupplementalAttributeFilter =
-        match unsafe { assoc_filter_from_json(filter_json) } {
-            Ok(f) => f,
-            Err(c) => return c,
-        };
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     match store.inner.has_supplemental_attribute_association(&filter) {
         Ok(found) => {
             unsafe { *out_found = found };
@@ -5421,22 +4817,14 @@ pub unsafe extern "C" fn infrastore_store_list_supplemental_attribute_associatio
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_json, out_len);
     let filter: core_lib::SupplementalAttributeFilter =
-        match unsafe { assoc_filter_from_json(filter_json) } {
-            Ok(f) => f,
-            Err(c) => return c,
-        };
-    let rows = match store
-        .inner
-        .list_supplemental_attribute_associations(&filter)
-    {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
+    let rows = ffi_try!(
+        store
+            .inner
+            .list_supplemental_attribute_associations(&filter)
+    );
     let json = match serde_json::to_string(&rows) {
         Ok(j) => j,
         Err(e) => {
@@ -5464,15 +4852,9 @@ pub unsafe extern "C" fn infrastore_store_list_supplemental_attribute_ids(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_len);
     let filter: core_lib::SupplementalAttributeFilter =
-        match unsafe { assoc_filter_from_json(filter_json) } {
-            Ok(f) => f,
-            Err(c) => return c,
-        };
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     match store.inner.list_supplemental_attribute_ids(&filter) {
         Ok(ids) => unsafe { write_json_out(&ids, buf, cap, out_len) },
         Err(e) => map_core_error(e),
@@ -5496,15 +4878,9 @@ pub unsafe extern "C" fn infrastore_store_list_components_with_attributes(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_len);
     let filter: core_lib::SupplementalAttributeFilter =
-        match unsafe { assoc_filter_from_json(filter_json) } {
-            Ok(f) => f,
-            Err(c) => return c,
-        };
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     match store.inner.list_components_with_attributes(&filter) {
         Ok(ids) => unsafe { write_json_out(&ids, buf, cap, out_len) },
         Err(e) => map_core_error(e),
@@ -5527,10 +4903,7 @@ pub unsafe extern "C" fn infrastore_store_remove_supplemental_attribute_associat
     clear_error();
     let store = deref_handle!(mut handle);
     let filter: core_lib::SupplementalAttributeFilter =
-        match unsafe { assoc_filter_from_json(filter_json) } {
-            Ok(f) => f,
-            Err(c) => return c,
-        };
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     match store
         .inner
         .remove_supplemental_attribute_associations(&filter)
@@ -5593,15 +4966,9 @@ pub unsafe extern "C" fn infrastore_store_count_supplemental_attribute_associati
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_count.is_null() {
-        set_error("out_count is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_count);
     let filter: core_lib::SupplementalAttributeFilter =
-        match unsafe { assoc_filter_from_json(filter_json) } {
-            Ok(f) => f,
-            Err(c) => return c,
-        };
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     let counted = match kind {
         0 => store
             .inner
@@ -5637,14 +5004,8 @@ pub unsafe extern "C" fn infrastore_store_supplemental_attribute_counts_by_type(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let counts = match store.inner.supplemental_attribute_counts_by_type() {
-        Ok(c) => c,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_len);
+    let counts = ffi_try!(store.inner.supplemental_attribute_counts_by_type());
     let arr: Vec<Value> = counts
         .into_iter()
         .map(|(ty, count)| {
@@ -5675,10 +5036,7 @@ pub unsafe extern "C" fn infrastore_store_supplemental_attribute_summary(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_len);
     match store.inner.supplemental_attribute_summary() {
         Ok(rows) => unsafe { write_json_out(&rows, buf, cap, out_len) },
         Err(e) => map_core_error(e),
@@ -5761,10 +5119,7 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
     clear_error();
     let store = deref_handle!(mut handle);
     let assocs: Vec<core_lib::ParentChildAssociation> =
-        match unsafe { assoc_rows_from_json(associations_json) } {
-            Ok(v) => v,
-            Err(c) => return c,
-        };
+        ffi_try!(code unsafe { assoc_rows_from_json(associations_json) });
     match store.inner.add_parent_child_associations(assocs) {
         Ok(ids) => {
             unsafe { write_assigned_ids(ids, out_added, out_ids) };
@@ -5790,14 +5145,9 @@ pub unsafe extern "C" fn infrastore_store_has_parent_child_association(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_found.is_null() {
-        set_error("out_found is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    require_nonnull!(out_found);
+    let filter: core_lib::ParentChildFilter =
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     match store.inner.has_parent_child_association(&filter) {
         Ok(found) => {
             unsafe { *out_found = found };
@@ -5824,14 +5174,9 @@ pub unsafe extern "C" fn infrastore_store_list_parent_child_associations(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    require_nonnull!(out_len);
+    let filter: core_lib::ParentChildFilter =
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     match store.inner.list_parent_child_associations(&filter) {
         Ok(rows) => unsafe { write_json_out(&rows, buf, cap, out_len) },
         Err(e) => map_core_error(e),
@@ -5857,14 +5202,9 @@ pub unsafe extern "C" fn infrastore_store_list_parent_child_ids(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    require_nonnull!(out_len);
+    let filter: core_lib::ParentChildFilter =
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     let ids = match endpoint {
         0 => store.inner.list_parents(&filter),
         1 => store.inner.list_children(&filter),
@@ -5896,10 +5236,8 @@ pub unsafe extern "C" fn infrastore_store_remove_parent_child_associations(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    let filter: core_lib::ParentChildFilter =
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     match store.inner.remove_parent_child_associations(&filter) {
         Ok(n) => {
             if !out_removed.is_null() {
@@ -5956,14 +5294,9 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_count.is_null() {
-        set_error("out_count is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    require_nonnull!(out_count);
+    let filter: core_lib::ParentChildFilter =
+        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
     match store.inner.count_parent_child_associations(&filter) {
         Ok(n) => {
             unsafe { *out_count = n };
@@ -6002,14 +5335,8 @@ pub unsafe extern "C" fn infrastore_store_set_store_attribute(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let key = match unsafe { cstr_to_str(key) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let value = match unsafe { cstr_to_str(value) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
+    let key = ffi_try!(code unsafe { cstr_to_str(key) });
+    let value = ffi_try!(code unsafe { cstr_to_str(value) });
     match store.inner.set_store_attribute(key, value) {
         Ok(()) => INFRASTORE_OK,
         Err(e) => map_core_error(e),
@@ -6044,14 +5371,8 @@ pub unsafe extern "C" fn infrastore_store_get_store_attribute(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_value.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let key = match unsafe { cstr_to_str(key) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
+    require_nonnull!(out_value, out_len);
+    let key = ffi_try!(code unsafe { cstr_to_str(key) });
     match store.inner.get_store_attribute(key) {
         Ok(None) => {
             unsafe {
@@ -6098,14 +5419,8 @@ pub unsafe extern "C" fn infrastore_store_list_store_attributes(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let attributes = match store.inner.list_store_attributes() {
-        Ok(a) => a,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_json, out_len);
+    let attributes = ffi_try!(store.inner.list_store_attributes());
     let json = match serde_json::to_string(&attributes) {
         Ok(j) => j,
         Err(e) => {
@@ -6139,10 +5454,7 @@ pub unsafe extern "C" fn infrastore_store_remove_store_attribute(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let key = match unsafe { cstr_to_str(key) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
+    let key = ffi_try!(code unsafe { cstr_to_str(key) });
     match store.inner.remove_store_attribute(key) {
         Ok(removed) => {
             if !out_removed.is_null() {
@@ -6191,18 +5503,9 @@ pub unsafe extern "C" fn infrastore_store_export_time_series_associations_openap
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let filter = match unsafe { build_filter(filter) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
-    let json = match store.inner.export_time_series_associations_openapi(&filter) {
-        Ok(j) => j,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_json, out_len);
+    let filter = ffi_try!(code unsafe { build_filter(filter) });
+    let json = ffi_try!(store.inner.export_time_series_associations_openapi(&filter));
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
@@ -6223,17 +5526,12 @@ pub unsafe extern "C" fn infrastore_store_export_supplemental_attribute_associat
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_json.is_null() || out_len.is_null() {
-        set_error("a required pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let json = match store
-        .inner
-        .export_supplemental_attribute_associations_openapi()
-    {
-        Ok(j) => j,
-        Err(e) => return map_core_error(e),
-    };
+    require_nonnull!(out_json, out_len);
+    let json = ffi_try!(
+        store
+            .inner
+            .export_supplemental_attribute_associations_openapi()
+    );
     unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
@@ -6263,10 +5561,7 @@ pub unsafe extern "C" fn infrastore_store_import_time_series_associations_openap
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let json = match unsafe { cstr_to_str(json) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
+    let json = ffi_try!(code unsafe { cstr_to_str(json) });
     match store.inner.import_time_series_associations_openapi(json) {
         Ok(n) => {
             if !out_added.is_null() {
@@ -6295,10 +5590,7 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let json = match unsafe { cstr_to_str(json) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
+    let json = ffi_try!(code unsafe { cstr_to_str(json) });
     match store
         .inner
         .import_supplemental_attribute_associations_openapi(json)
@@ -6337,7 +5629,7 @@ pub unsafe extern "C" fn infrastore_buffer_free_u8(ptr: *mut u8, len: u64) {
     unsafe { free_raw_buffer(ptr, len) };
 }
 
-/// Free an `i64` buffer returned by `infrastore_bulk_result_get_non_sequential`.
+/// Free an `i64` buffer returned by `infrastore_bulk_result_get_irregular`.
 ///
 /// # Safety
 ///
@@ -6452,10 +5744,6 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
-fn unix_ms_to_datetime(ms: i64) -> Option<DateTime<Utc>> {
-    Utc.timestamp_millis_opt(ms).single()
-}
-
 /// Build an optional `(start, end)` time range from the FFI convention shared by
 /// the get paths: `present = false` yields `None`; otherwise both millisecond
 /// bounds are converted to UTC. Returns `Err(code)` (after setting the
@@ -6475,25 +5763,16 @@ fn build_time_range(
     if !present {
         return Ok(None);
     }
-    let start = unix_ms_to_datetime(start_ms).ok_or_else(|| {
+    let start = DateTime::from_timestamp_millis(start_ms).ok_or_else(|| {
         set_error(format!("invalid time_range_start_ms: {start_ms}"));
         INFRASTORE_ERR_INVALID_PARAMETER
     })?;
-    let end = unix_ms_to_datetime(end_ms).ok_or_else(|| {
+    let end = DateTime::from_timestamp_millis(end_ms).ok_or_else(|| {
         set_error(format!("invalid time_range_end_ms: {end_ms}"));
         INFRASTORE_ERR_INVALID_PARAMETER
     })?;
     Ok(Some(core_lib::TimeRange::spelled(start, end, zoneless)))
 }
-
-/// Unix milliseconds for a UTC datetime. Infallible: chrono's `DateTime<Utc>`
-/// range (about ±262,000 years) is far inside what an `i64` of milliseconds
-/// represents, so `timestamp_millis` cannot overflow.
-fn datetime_to_unix_ms(dt: DateTime<Utc>) -> i64 {
-    dt.timestamp_millis()
-}
-
-use chrono::TimeZone;
 
 // ---- Timestamp readers (StaticReader / ForecastReader) --------------------
 //
@@ -6602,18 +5881,9 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
     out_reader: *mut *mut InfraStoreStaticReaderHandle,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_reader.is_null() {
-        set_error("out_reader is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let ts_type = match resolve_requested_type_from_int(time_series_type) {
+    let store = deref_handle!(ref handle, "store handle is null");
+    require_nonnull!(out_reader);
+    let ts_type = match time_series_type_from_int(time_series_type) {
         Some(t) => t,
         None => {
             set_error(format!("invalid time_series_type {time_series_type}"));
@@ -6625,7 +5895,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
         Err(c) => return c,
     };
     let start = if has_window_start {
-        match unix_ms_to_datetime(window_start_ms) {
+        match DateTime::from_timestamp_millis(window_start_ms) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid window_start_ms: {window_start_ms}"));
@@ -6641,10 +5911,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
         len: has_window_length.then_some(window_length as usize),
         count: None,
     };
-    let reader = match store.inner.build_static_reader_over(filter, window) {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    let reader = ffi_try!(store.inner.build_static_reader_over(filter, window));
     unsafe {
         *out_reader = Box::into_raw(Box::new(InfraStoreStaticReaderHandle { inner: reader }))
     };
@@ -6674,19 +5941,10 @@ pub unsafe extern "C" fn infrastore_static_reader_grid(
     out_length: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_initial_ms.is_null() || out_resolution.is_null() || out_length.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_initial_ms, out_resolution, out_length);
     unsafe {
-        *out_initial_ms = datetime_to_unix_ms(reader.inner.initial_timestamp());
+        *out_initial_ms = reader.inner.initial_timestamp().timestamp_millis();
         *out_resolution = opt_period_cstr(reader.inner.resolution());
         *out_length = reader.inner.length() as u64;
     }
@@ -6718,17 +5976,8 @@ pub unsafe extern "C" fn infrastore_static_reader_time_reference(
     out_time_reference: *mut *mut c_char,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_time_reference.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_time_reference);
     unsafe {
         *out_time_reference = reader
             .inner
@@ -6759,18 +6008,13 @@ pub unsafe extern "C" fn infrastore_static_reader_timestamps(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let millis: Vec<i64> = reader.inner.timestamps().map(datetime_to_unix_ms).collect();
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_len);
+    let millis: Vec<i64> = reader
+        .inner
+        .timestamps()
+        .map(|t| t.timestamp_millis())
+        .collect();
     unsafe { write_i64_slice_out(&millis, buf, cap, out_len) };
     INFRASTORE_OK
 }
@@ -6809,10 +6053,7 @@ pub unsafe extern "C" fn infrastore_grid_timestamps(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    if out_len.is_null() {
-        set_error("out_len is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_len);
     let resolution = match unsafe { cstr_to_optional_period(resolution_iso) } {
         Ok(Some(p)) => p,
         Ok(None) => {
@@ -6821,14 +6062,14 @@ pub unsafe extern "C" fn infrastore_grid_timestamps(
         }
         Err(code) => return code,
     };
-    let Some(initial) = unix_ms_to_datetime(initial_unix_ms) else {
+    let Some(initial) = DateTime::from_timestamp_millis(initial_unix_ms) else {
         set_error("initial timestamp is out of range");
         return INFRASTORE_ERR_INVALID_PARAMETER;
     };
     let mut millis = Vec::with_capacity(length as usize);
     for k in 0..length {
         match resolution.add_to(initial, k as i64) {
-            Some(t) => millis.push(datetime_to_unix_ms(t)),
+            Some(t) => millis.push(t.timestamp_millis()),
             None => {
                 set_error(format!(
                     "timestamp at index {k} on the {res} grid is out of range",
@@ -6865,10 +6106,7 @@ pub unsafe extern "C" fn infrastore_infer_period(
     out_iso: *mut *mut c_char,
 ) -> i32 {
     clear_error();
-    if out_iso.is_null() {
-        set_error("out_iso is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_iso);
     if timestamps_unix_ms.is_null() && len > 0 {
         set_error("timestamps_unix_ms is null");
         return INFRASTORE_ERR_NULL_POINTER;
@@ -6880,7 +6118,7 @@ pub unsafe extern "C" fn infrastore_infer_period(
     };
     let mut instants = Vec::with_capacity(raw.len());
     for (k, ms) in raw.iter().enumerate() {
-        match unix_ms_to_datetime(*ms) {
+        match DateTime::from_timestamp_millis(*ms) {
             Some(t) => instants.push(t),
             None => {
                 set_error(format!(
@@ -6913,17 +6151,8 @@ pub unsafe extern "C" fn infrastore_static_reader_num_groups(
     out_n: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_n.is_null() {
-        set_error("out_n is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_n);
     unsafe { *out_n = reader.inner.groups().len() as u64 };
     INFRASTORE_OK
 }
@@ -6950,17 +6179,8 @@ pub unsafe extern "C" fn infrastore_static_reader_group_info(
     out_shape_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_dtype.is_null() || out_num_columns.is_null() || out_shape_len.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_dtype, out_num_columns, out_shape_len);
     let group = match reader.inner.groups().get(group_idx as usize) {
         Some(g) => g,
         None => {
@@ -6997,13 +6217,7 @@ pub unsafe extern "C" fn infrastore_static_reader_group_id(
     out_id: *mut i64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
+    let reader = deref_handle!(ref reader, "reader handle is null");
     let group = match reader.inner.groups().get(group_idx as usize) {
         Some(g) => g,
         None => {
@@ -7011,10 +6225,7 @@ pub unsafe extern "C" fn infrastore_static_reader_group_id(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    if out_id.is_null() {
-        set_error("out_id pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    require_nonnull!(out_id);
     let id = match group.ids().get(col_idx as usize) {
         Some(id) => *id,
         None => {
@@ -7042,13 +6253,7 @@ pub unsafe extern "C" fn infrastore_static_reader_invalidate(
     reader: *mut InfraStoreStaticReaderHandle,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_mut() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
+    let reader = deref_handle!(mut reader, "reader handle is null");
     reader.inner.invalidate();
     INFRASTORE_OK
 }
@@ -7067,21 +6272,9 @@ pub unsafe extern "C" fn infrastore_static_reader_read(
     at_unix_ms: i64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_mut() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let store = match unsafe { store.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let at = match unix_ms_to_datetime(at_unix_ms) {
+    let reader = deref_handle!(mut reader, "reader handle is null");
+    let store = deref_handle!(ref store, "store handle is null");
+    let at = match DateTime::from_timestamp_millis(at_unix_ms) {
         Some(t) => t,
         None => {
             set_error("timestamp out of range");
@@ -7110,17 +6303,8 @@ pub unsafe extern "C" fn infrastore_static_reader_group_values(
     out_byte_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_ptr.is_null() || out_byte_len.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_ptr, out_byte_len);
     let group = match reader.inner.groups().get(group_idx as usize) {
         Some(g) => g,
         None => {
@@ -7175,17 +6359,8 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
     out_reader: *mut *mut InfraStoreForecastReaderHandle,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_reader.is_null() {
-        set_error("out_reader is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let store = deref_handle!(ref handle, "store handle is null");
+    require_nonnull!(out_reader);
     let ts_type = match requested_type_from_int(time_series_type) {
         Some(t) => t,
         None => {
@@ -7197,10 +6372,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
         Ok(f) => f.time_series_type(ts_type),
         Err(c) => return c,
     };
-    let reader = match store.inner.build_forecast_reader(filter) {
-        Ok(r) => r,
-        Err(e) => return map_core_error(e),
-    };
+    let reader = ffi_try!(store.inner.build_forecast_reader(filter));
     unsafe {
         *out_reader = Box::into_raw(Box::new(InfraStoreForecastReaderHandle { inner: reader }))
     };
@@ -7221,17 +6393,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_time_reference(
     out_time_reference: *mut *mut c_char,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_time_reference.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_time_reference);
     unsafe {
         *out_time_reference = reader
             .inner
@@ -7261,23 +6424,10 @@ pub unsafe extern "C" fn infrastore_forecast_reader_timeline(
     out_count: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_initial_ms.is_null()
-        || out_resolution.is_null()
-        || out_interval.is_null()
-        || out_count.is_null()
-    {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_initial_ms, out_resolution, out_interval, out_count);
     unsafe {
-        *out_initial_ms = datetime_to_unix_ms(reader.inner.initial_timestamp());
+        *out_initial_ms = reader.inner.initial_timestamp().timestamp_millis();
         *out_resolution = period_cstr(reader.inner.resolution());
         *out_interval = period_cstr(reader.inner.interval());
         *out_count = reader.inner.count() as u64;
@@ -7296,17 +6446,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_num_entries(
     out_n: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_n.is_null() {
-        set_error("out_n is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_n);
     unsafe { *out_n = reader.inner.entries().len() as u64 };
     INFRASTORE_OK
 }
@@ -7324,17 +6465,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_num_slots(
     out_n: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_n.is_null() {
-        set_error("out_n is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_n);
     unsafe { *out_n = reader.inner.slots().len() as u64 };
     INFRASTORE_OK
 }
@@ -7353,17 +6485,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_slot(
     out_slot: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_slot.is_null() {
-        set_error("out_slot is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_slot);
     let entry = match reader.inner.entries().get(entry_idx as usize) {
         Some(e) => e,
         None => {
@@ -7394,17 +6517,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_info(
     out_shape_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_dtype.is_null() || out_shape_len.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_dtype, out_shape_len);
     if entry_idx as usize >= reader.inner.entries().len() {
         set_error(format!("entry index {entry_idx} out of bounds"));
         return INFRASTORE_ERR_INVALID_PARAMETER;
@@ -7435,17 +6549,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_id(
     out_id: *mut i64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_id.is_null() {
-        set_error("out_id pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_id);
     let entry = match reader.inner.entries().get(entry_idx as usize) {
         Some(e) => e,
         None => {
@@ -7469,13 +6574,7 @@ pub unsafe extern "C" fn infrastore_forecast_reader_invalidate(
     reader: *mut InfraStoreForecastReaderHandle,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_mut() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
+    let reader = deref_handle!(mut reader, "reader handle is null");
     reader.inner.invalidate();
     INFRASTORE_OK
 }
@@ -7494,21 +6593,9 @@ pub unsafe extern "C" fn infrastore_forecast_reader_read(
     at_unix_ms: i64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_mut() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let store = match unsafe { store.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let at = match unix_ms_to_datetime(at_unix_ms) {
+    let reader = deref_handle!(mut reader, "reader handle is null");
+    let store = deref_handle!(ref store, "store handle is null");
+    let at = match DateTime::from_timestamp_millis(at_unix_ms) {
         Some(t) => t,
         None => {
             set_error("timestamp out of range");
@@ -7537,17 +6624,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_entry_values(
     out_byte_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let reader = match unsafe { reader.as_ref() } {
-        Some(r) => r,
-        None => {
-            set_error("reader handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_ptr.is_null() || out_byte_len.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
+    let reader = deref_handle!(ref reader, "reader handle is null");
+    require_nonnull!(out_ptr, out_byte_len);
     if entry_idx as usize >= reader.inner.entries().len() {
         set_error(format!("entry index {entry_idx} out of bounds"));
         return INFRASTORE_ERR_INVALID_PARAMETER;
@@ -8071,7 +7149,7 @@ mod abi_tests {
     //! Tests that drive the C ABI the way a foreign caller does.
     //!
     //! The `reader_ffi_tests` module above constructs `InfraStoreHandle`
-    //! directly and never calls `infrastore_store_create` / `_open` / `_persist` /
+    //! directly and never calls `infrastore_store_create_*` / `_open_*` / `_persist` /
     //! `_free`, so the lifecycle exports had no coverage at all. Nor did any test
     //! assert an **error code by value** — a change that returned
     //! `INFRASTORE_ERR_INTERNAL` where a caller expects `INFRASTORE_ERR_NOT_FOUND`
@@ -8351,7 +7429,9 @@ mod abi_tests {
     fn abi_create_in_memory() -> *mut InfraStoreHandle {
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_create(ptr::null(), true, &mut store) },
+            unsafe {
+                infrastore_store_create_with_catalog(ptr::null(), true, 1, 3, true, 1, &mut store)
+            },
             INFRASTORE_OK
         );
         assert!(!store.is_null());
@@ -8359,7 +7439,7 @@ mod abi_tests {
     }
 
     /// A NonSequentialTimeSeries `application_data` far larger than any fixed buffer
-    /// round-trips exactly through `infrastore_bulk_result_get_non_sequential`, which
+    /// round-trips exactly through `infrastore_bulk_result_get_irregular`, which
     /// returns it as an owned string (the earlier caller-sized-buffer form
     /// invited silent truncation).
     #[test]
@@ -8438,7 +7518,7 @@ mod abi_tests {
         );
         assert_eq!(
             unsafe {
-                infrastore_bulk_result_get_non_sequential(
+                infrastore_bulk_result_get_irregular(
                     result,
                     0,
                     &mut ts_ptr,
@@ -8492,7 +7572,17 @@ mod abi_tests {
         // create on a real path
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_create(path_c.as_ptr(), false, &mut store) },
+            unsafe {
+                infrastore_store_create_with_catalog(
+                    path_c.as_ptr(),
+                    false,
+                    1,
+                    3,
+                    true,
+                    0,
+                    &mut store,
+                )
+            },
             INFRASTORE_OK
         );
         assert!(!store.is_null());
@@ -8547,7 +7637,7 @@ mod abi_tests {
         // reopen read-only through the ABI and read the values back
         let mut ro: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut ro) },
+            unsafe { infrastore_store_open_with_catalog(path_c.as_ptr(), true, 0, &mut ro) },
             INFRASTORE_OK
         );
         let mut read_only = false;
@@ -8692,7 +7782,7 @@ mod abi_tests {
 
         let mut reopened: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut reopened) },
+            unsafe { infrastore_store_open_with_catalog(path_c.as_ptr(), true, 0, &mut reopened) },
             INFRASTORE_OK
         );
         assert_eq!(abi_read_f64(reopened, 3, "load"), vec![1.5, 2.5, 3.5]);
@@ -8705,7 +7795,8 @@ mod abi_tests {
         let missing = dir.path().join("nope.h5");
         let path_c = CString::new(missing.to_str().unwrap()).unwrap();
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
-        let rc = unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut store) };
+        let rc =
+            unsafe { infrastore_store_open_with_catalog(path_c.as_ptr(), true, 0, &mut store) };
         assert_ne!(rc, INFRASTORE_OK);
         assert!(store.is_null(), "no handle may be produced on failure");
         assert!(
@@ -8759,7 +7850,17 @@ mod abi_tests {
         );
         // create with a null out pointer
         assert_eq!(
-            unsafe { infrastore_store_create(ptr::null(), true, ptr::null_mut()) },
+            unsafe {
+                infrastore_store_create_with_catalog(
+                    ptr::null(),
+                    true,
+                    1,
+                    3,
+                    true,
+                    1,
+                    ptr::null_mut(),
+                )
+            },
             INFRASTORE_ERR_NULL_POINTER
         );
         // probe-style store op with a null out_len
@@ -9506,7 +8607,17 @@ mod abi_tests {
 
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_create(path_c.as_ptr(), false, &mut store) },
+            unsafe {
+                infrastore_store_create_with_catalog(
+                    path_c.as_ptr(),
+                    false,
+                    1,
+                    3,
+                    true,
+                    0,
+                    &mut store,
+                )
+            },
             INFRASTORE_OK
         );
         let _key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
@@ -9534,7 +8645,7 @@ mod abi_tests {
         // READ_ONLY: every write through a read-only handle.
         let mut ro: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut ro) },
+            unsafe { infrastore_store_open_with_catalog(path_c.as_ptr(), true, 0, &mut ro) },
             INFRASTORE_OK
         );
         let (rc, k) = abi_try_add(ro, 2, "new", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
@@ -10036,7 +9147,17 @@ mod abi_tests {
         let path_c = CString::new(path.to_str().unwrap()).unwrap();
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_create(path_c.as_ptr(), false, &mut store) },
+            unsafe {
+                infrastore_store_create_with_catalog(
+                    path_c.as_ptr(),
+                    false,
+                    1,
+                    3,
+                    true,
+                    0,
+                    &mut store,
+                )
+            },
             INFRASTORE_OK,
             "create failed: {}",
             last_error()
@@ -10080,7 +9201,17 @@ mod abi_tests {
 
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_create(path_c.as_ptr(), false, &mut store) },
+            unsafe {
+                infrastore_store_create_with_catalog(
+                    path_c.as_ptr(),
+                    false,
+                    1,
+                    3,
+                    true,
+                    0,
+                    &mut store,
+                )
+            },
             INFRASTORE_ERR_STORE_EXISTS
         );
         assert!(
@@ -10129,7 +9260,7 @@ mod abi_tests {
             INFRASTORE_ERR_NULL_POINTER
         );
         // A null path is a null pointer, not invalid UTF-8. Unlike
-        // `infrastore_store_create`, neither of these takes an optional path:
+        // `infrastore_store_create_with_catalog`, neither of these takes an optional path:
         // there is no in-memory form of replacing or copying an artifact.
         assert_eq!(
             unsafe { infrastore_store_create_replacing(ptr::null(), 1, 3, true, 0, &mut out) },
@@ -10245,7 +9376,7 @@ mod abi_tests {
         // catalog stamped to match it.
         let mut reopened: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut reopened) },
+            unsafe { infrastore_store_open_with_catalog(path_c.as_ptr(), true, 0, &mut reopened) },
             INFRASTORE_OK,
             "reopen failed: {}",
             last_error()
@@ -10269,7 +9400,7 @@ mod abi_tests {
 
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
         assert_eq!(
-            unsafe { infrastore_store_open(path_c.as_ptr(), false, &mut store) },
+            unsafe { infrastore_store_open_with_catalog(path_c.as_ptr(), false, 0, &mut store) },
             INFRASTORE_ERR_MISMATCHED_ARTIFACT
         );
         assert!(store.is_null());
@@ -10371,7 +9502,7 @@ mod abi_tests {
             "read_by_ids failed: {}",
             last_error()
         );
-        assert_eq!(unsafe { infrastore_bulk_result_len(result) }, 4);
+        assert_eq!(unsafe { (*result).items.len() }, 4);
         let names: Vec<String> = (0..4).map(|i| abi_bulk_item_name(result, i)).collect();
         assert_eq!(names, vec!["c", "a", "c", "b"]);
         let firsts: Vec<f64> = (0..4).map(|i| abi_bulk_first_value(result, i)).collect();
@@ -10394,7 +9525,7 @@ mod abi_tests {
             unsafe { infrastore_store_read_by_ids(store, ptr::null(), 0, &mut empty) },
             INFRASTORE_OK
         );
-        assert_eq!(unsafe { infrastore_bulk_result_len(empty) }, 0);
+        assert_eq!(unsafe { (*empty).items.len() }, 0);
         unsafe { infrastore_bulk_result_free(empty) };
 
         assert_eq!(
@@ -10435,7 +9566,7 @@ mod abi_tests {
             },
             INFRASTORE_OK
         );
-        assert_eq!(unsafe { infrastore_bulk_result_len(result) }, 1);
+        assert_eq!(unsafe { (*result).items.len() }, 1);
         unsafe { infrastore_bulk_result_free(result) };
 
         let mut refused: *mut InfraStoreBulkReadHandle = ptr::null_mut();

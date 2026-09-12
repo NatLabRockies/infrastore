@@ -276,47 +276,10 @@ int32_t infrastore_store_init_logging(const char *filter);
 void infrastore_string_free(char *s);
 
 /**
- * Create a time-series store and return an owning handle through `out`.
- *
- * # Safety
- *
- * When non-null, `path` must point to a valid, null-terminated UTF-8 string.
- */
-int32_t infrastore_store_create(const char *path, bool in_memory, struct InfraStore **out);
-
-/**
- * Create a store with an explicit compression policy.
- *
- * `compression_kind` selects the filter: `0` = none (uncompressed), `1` =
- * DEFLATE at `deflate_level` (0–9) with byte `shuffle` when non-zero. Any
- * other `compression_kind` is rejected. The policy is ignored for in-memory
- * stores and persisted so later appends reuse it. Equivalent to
- * [`infrastore_store_create`] with `compression_kind = 1`, level 3, shuffle on.
- *
- * # Safety
- *
- * When non-null, `path` must point to a valid, null-terminated UTF-8 string.
- */
-int32_t infrastore_store_create_with_compression(const char *path,
-                                                 bool in_memory,
-                                                 uint8_t compression_kind,
-                                                 uint8_t deflate_level,
-                                                 bool shuffle,
-                                                 struct InfraStore **out);
-
-/**
- * Open an existing time-series store and return an owning handle through `out`.
- *
- * # Safety
- *
- * Standard: see the crate-level ABI conventions.
- */
-int32_t infrastore_store_open(const char *path, bool read_only, struct InfraStore **out);
-
-/**
  * Create a store, choosing where the SQLite catalog lives.
  *
- * Like `infrastore_store_create_with_compression`, but `catalog_mode` selects the catalog's
+ * `compression_kind` selects the array filter: `0` = none, `1` = DEFLATE at `deflate_level` (0–9)
+ * with byte `shuffle`; `1`, `3`, `true` is the default policy. `catalog_mode` selects the catalog's
  * placement: `0` attaches it to `<path>.sqlite`, where every commit is durable; `1` holds it in
  * memory, where nothing survives a crash and only `infrastore_store_persist` writes it out.
  * Arrays stream to the HDF5 file either way. `in_memory=true` admits only `catalog_mode=1`.
@@ -381,7 +344,7 @@ int32_t infrastore_store_open_copy(const char *src,
 /**
  * Open an existing store, choosing where the SQLite catalog lives.
  *
- * Like `infrastore_store_open`, but `catalog_mode=1` reads `<path>.sqlite` into memory and leaves
+ * `catalog_mode=0` attaches `<path>.sqlite`; `catalog_mode=1` reads it into memory and leaves
  * the file alone; later mutations reach disk only through `infrastore_store_persist`. The HDF5
  * half is still opened in place, so a caller that means to leave the original untouched until an
  * explicit save must open a copy.
@@ -401,10 +364,10 @@ int32_t infrastore_store_open_with_catalog(const char *path,
  * The way in to a store shipped as arrays plus an OpenAPI document: the returned handle holds
  * every array and no rows, ready for `infrastore_store_import_time_series_associations_openapi`
  * and its supplemental-attribute counterpart to replay them. The fresh catalog inherits the array
- * file's own generation stamp, so a later `infrastore_store_open` sees a coherent pair.
+ * file's own generation stamp, so a later `infrastore_store_open_with_catalog` sees a coherent pair.
  *
  * Refuses (`INFRASTORE_ERR_STORE_EXISTS`) when `<path>.sqlite` is already there — that store wants
- * `infrastore_store_open`. Never read-only.
+ * `infrastore_store_open_with_catalog`. Never read-only.
  *
  * # Safety
  *
@@ -424,7 +387,7 @@ int32_t infrastore_store_open_without_catalog(const char *path,
 int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *out);
 
 /**
- * Release a store handle returned by `infrastore_store_create` or `infrastore_store_open`.
+ * Release a store handle returned by any `infrastore_store_create_*` / `infrastore_store_open_*`.
  *
  * # Safety
  *
@@ -1209,16 +1172,6 @@ int32_t infrastore_store_add_batch(struct InfraStore *handle,
                                    int64_t **out_ids);
 
 /**
- * The number of series held by a bulk-read result handle, or `-1` if `result`
- * is null.
- *
- * # Safety
- *
- * `result` must be null or a live handle from a read call.
- */
-int64_t infrastore_bulk_result_len(const struct InfraStoreBulkReadHandle *result);
-
-/**
  * Read element `index` out of a bulk-read result handle. The out parameters
  * follow the usual convention: the caller owns the `out_resolution` string and
  * the `out_shape` / `out_data` buffers and must release them with
@@ -1401,70 +1354,48 @@ int32_t infrastore_bulk_result_item_type(const struct InfraStoreBulkReadHandle *
                                          int32_t *out_type);
 
 /**
- * Read a `NonSequentialTimeSeries` element out of a bulk-read result. The
- * out-params mirror `infrastore_bulk_result_get_single` except there is no
- * `application_data` (a bulk read carries the array data, not the metadata row;
- * fetch it per-key with `infrastore_store_get_metadata` if needed). The caller owns the
- * `out_timestamps`, `out_shape`, and `out_data` buffers.
+ * Read an irregular static element — a `NonSequentialTimeSeries` or a
+ * `PersistentTimeSeries` — out of a bulk-read result. The two carry the same
+ * payload, so one reader serves both; ask `infrastore_bulk_result_item_type`
+ * which one a slot holds. Any other stored type is refused with
+ * `INFRASTORE_ERR_INVALID_PARAMETER`.
  *
+ * `out_timestamps` is the timestamp vector (for a `PersistentTimeSeries`, the
+ * breakpoints: the value at index `i` is in force from `out_timestamps[i]`
+ * until the next breakpoint, and past the last one forever). The caller owns
+ * the `out_timestamps`, `out_shape`, and `out_data` buffers.
  *
  * `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
- * `out_unit_system`, and `out_component_field` behave as in
- * `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
- * them nullable to skip, freed with `infrastore_string_free`.
- * # Safety
- *
- * `result` must be a live bulk-read handle and `index` less than its length.
- * Every output pointer must be valid for writing its indicated value. The
- * returned buffers must each be released with the matching free function.
- */
-int32_t infrastore_bulk_result_get_non_sequential(const struct InfraStoreBulkReadHandle *result,
-                                                  uint64_t index,
-                                                  int64_t **out_timestamps,
-                                                  uint64_t *out_timestamps_len,
-                                                  int32_t *out_dtype,
-                                                  int64_t **out_shape,
-                                                  uint64_t *out_shape_len,
-                                                  uint8_t **out_data,
-                                                  uint64_t *out_data_byte_len,
-                                                  char **out_application_data,
-                                                  char **out_element_type,
-                                                  char **out_units,
-                                                  char **out_quantity_kind,
-                                                  char **out_unit_system,
-                                                  char **out_time_reference,
-                                                  char **out_component_field);
-
-/**
- * Read a `PersistentTimeSeries` element out of a bulk-read result. The
- * out-params, the ownership rules, and the descriptor handling are exactly
- * those of [`infrastore_bulk_result_get_non_sequential`]; `out_timestamps` is
- * the breakpoint vector, with the value at index `i` in force from
- * `out_timestamps[i]` until the next breakpoint and past the last one forever.
+ * `out_unit_system`, `out_time_reference`, and `out_component_field` behave as
+ * in `infrastore_bulk_result_get_single`: owned C strings (null when unset),
+ * any of them nullable to skip, freed with `infrastore_string_free`.
  *
  * # Safety
  *
- * `result` must be a live bulk-read handle and `index` less than its length.
- * Every output pointer must be valid for writing its indicated value. The
- * returned buffers must each be released with the matching free function, and
- * each non-null owned string exactly once with `infrastore_string_free`.
+ * `result` must be a live bulk-read handle, not used concurrently, and `index`
+ * less than its length. Every output pointer except the seven descriptor
+ * pointers must be valid for writing its indicated value; those seven may be
+ * null. On success `*out_timestamps` and `*out_shape` must each be released
+ * exactly once with `infrastore_buffer_free_i64` and `*out_data` with
+ * `infrastore_buffer_free_u8` (passing the matching length), and each non-null
+ * owned string exactly once with `infrastore_string_free`.
  */
-int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHandle *result,
-                                              uint64_t index,
-                                              int64_t **out_timestamps,
-                                              uint64_t *out_timestamps_len,
-                                              int32_t *out_dtype,
-                                              int64_t **out_shape,
-                                              uint64_t *out_shape_len,
-                                              uint8_t **out_data,
-                                              uint64_t *out_data_byte_len,
-                                              char **out_application_data,
-                                              char **out_element_type,
-                                              char **out_units,
-                                              char **out_quantity_kind,
-                                              char **out_unit_system,
-                                              char **out_time_reference,
-                                              char **out_component_field);
+int32_t infrastore_bulk_result_get_irregular(const struct InfraStoreBulkReadHandle *result,
+                                             uint64_t index,
+                                             int64_t **out_timestamps,
+                                             uint64_t *out_timestamps_len,
+                                             int32_t *out_dtype,
+                                             int64_t **out_shape,
+                                             uint64_t *out_shape_len,
+                                             uint8_t **out_data,
+                                             uint64_t *out_data_byte_len,
+                                             char **out_application_data,
+                                             char **out_element_type,
+                                             char **out_units,
+                                             char **out_quantity_kind,
+                                             char **out_unit_system,
+                                             char **out_time_reference,
+                                             char **out_component_field);
 
 /**
  * Read a forecast element (`Deterministic`, `Probabilistic`, or `Scenarios`)
@@ -2269,7 +2200,7 @@ void infrastore_buffer_free_f64(double *ptr, uint64_t len);
 void infrastore_buffer_free_u8(uint8_t *ptr, uint64_t len);
 
 /**
- * Free an `i64` buffer returned by `infrastore_bulk_result_get_non_sequential`.
+ * Free an `i64` buffer returned by `infrastore_bulk_result_get_irregular`.
  *
  * # Safety
  *

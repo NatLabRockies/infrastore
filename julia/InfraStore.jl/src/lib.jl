@@ -13,16 +13,6 @@
 
 const _LIB_REF = Ref{String}("")
 
-function _library_filename()
-    return if Sys.iswindows()
-        "infrastore_ffi.dll"
-    elseif Sys.isapple()
-        "libinfrastore_ffi.dylib"
-    else
-        "libinfrastore_ffi.so"
-    end
-end
-
 """
 Path to the `libinfrastore_ffi` cdylib. Override with the
 `INFRASTORE_LIB` environment variable (development builds); otherwise the
@@ -34,7 +24,8 @@ function lib_path()
     end
     p = get(ENV, "INFRASTORE_LIB", "")
     if isempty(p)
-        p = joinpath(artifact"libinfrastore_ffi", "lib", _library_filename())
+        filename = (Sys.iswindows() ? "" : "lib") * "infrastore_ffi." * dlext
+        p = joinpath(artifact"libinfrastore_ffi", "lib", filename)
     end
     isfile(p) || error(
         "Could not locate libinfrastore_ffi at $(p). Set the INFRASTORE_LIB " *
@@ -561,42 +552,30 @@ function _last_error_message()
     return String(buf[1:n])
 end
 
+const _ERROR_BY_CODE = Dict{Int32, Type}(
+    INFRASTORE_ERR_NOT_FOUND => NotFoundError,
+    INFRASTORE_ERR_DUPLICATE => DuplicateTimeSeriesError,
+    INFRASTORE_ERR_DUPLICATE_ASSOCIATION => DuplicateAssociationError,
+    INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID => DuplicateAssociationIdError,
+    INFRASTORE_ERR_INVALID_PARAMETER => InvalidParameterError,
+    INFRASTORE_ERR_INVALID_UTF8 => InvalidParameterError,
+    INFRASTORE_ERR_NULL_POINTER => InvalidParameterError,
+    INFRASTORE_ERR_INTEGRITY => IntegrityError,
+    INFRASTORE_ERR_READ_ONLY => ReadOnlyStoreError,
+    INFRASTORE_ERR_INCOMPATIBLE_FORMAT => IncompatibleFormatError,
+    INFRASTORE_ERR_IO => IOError,
+    INFRASTORE_ERR_STORE_EXISTS => StoreExistsError,
+    INFRASTORE_ERR_MISMATCHED_ARTIFACT => MismatchedArtifactError,
+    INFRASTORE_ERR_OWNER_MISMATCH => OwnerMismatchError,
+    INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED => CatalogMigrationRequiredError,
+    INFRASTORE_ERR_CATALOG_TOO_NEW => CatalogTooNewError,
+)
+
 function _check(code::Int32)
     code == INFRASTORE_OK && return nothing
     msg = _last_error_message()
-    if code == INFRASTORE_ERR_NOT_FOUND
-        throw(NotFoundError(msg))
-    elseif code == INFRASTORE_ERR_DUPLICATE
-        throw(DuplicateTimeSeriesError(msg))
-    elseif code == INFRASTORE_ERR_DUPLICATE_ASSOCIATION
-        throw(DuplicateAssociationError(msg))
-    elseif code == INFRASTORE_ERR_DUPLICATE_ASSOCIATION_ID
-        throw(DuplicateAssociationIdError(msg))
-    elseif code == INFRASTORE_ERR_INVALID_PARAMETER ||
-        code == INFRASTORE_ERR_INVALID_UTF8 ||
-        code == INFRASTORE_ERR_NULL_POINTER
-        throw(InvalidParameterError(msg))
-    elseif code == INFRASTORE_ERR_INTEGRITY
-        throw(IntegrityError(msg))
-    elseif code == INFRASTORE_ERR_READ_ONLY
-        throw(ReadOnlyStoreError(msg))
-    elseif code == INFRASTORE_ERR_INCOMPATIBLE_FORMAT
-        throw(IncompatibleFormatError(msg))
-    elseif code == INFRASTORE_ERR_IO
-        throw(IOError(msg))
-    elseif code == INFRASTORE_ERR_STORE_EXISTS
-        throw(StoreExistsError(msg))
-    elseif code == INFRASTORE_ERR_MISMATCHED_ARTIFACT
-        throw(MismatchedArtifactError(msg))
-    elseif code == INFRASTORE_ERR_OWNER_MISMATCH
-        throw(OwnerMismatchError(msg))
-    elseif code == INFRASTORE_ERR_CATALOG_MIGRATION_REQUIRED
-        throw(CatalogMigrationRequiredError(msg))
-    elseif code == INFRASTORE_ERR_CATALOG_TOO_NEW
-        throw(CatalogTooNewError(msg))
-    else
-        throw(GenericError(msg, code))
-    end
+    E = get(_ERROR_BY_CODE, code, nothing)
+    return throw(E === nothing ? GenericError(msg, code) : E(msg))
 end
 
 # ---- Fixed-size and catalog-sized string returns ----------------------------
