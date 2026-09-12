@@ -17,7 +17,7 @@ use crate::metadata::{
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
     ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
-    MemoryBackend, PackGroup, StorageBackend, check_dtype, slice_rows, write_window_block,
+    MemoryBackend, PackGroup, StorageBackend, check_dtype, slice_axis, write_window_block,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::element_type::ElementType;
@@ -259,15 +259,6 @@ impl ReadWindow {
     pub fn from(start: chrono::DateTime<chrono::Utc>) -> Self {
         Self {
             start: Some(start),
-            ..Self::default()
-        }
-    }
-
-    /// A start written as a wall clock, for a [`TimeReference::Zoneless`] series.
-    pub fn from_zoneless(start: chrono::DateTime<chrono::Utc>) -> Self {
-        Self {
-            start: Some(start),
-            zoneless: true,
             ..Self::default()
         }
     }
@@ -2078,7 +2069,7 @@ impl Store {
     fn get_slice(&self, hash: &[u8; 32], dtype: Dtype, range: Range<usize>) -> Result<TypedArray> {
         if let Some(array) = self.write_buffer.get(hash) {
             check_dtype(hash, array.dtype, dtype)?;
-            return slice_rows(array, range);
+            return slice_axis(array, 0, range);
         }
         self.backend.get_slice(hash, dtype, range)
     }
@@ -2118,7 +2109,7 @@ impl Store {
     ) -> Result<()> {
         if let Some(array) = self.write_buffer.get(hash) {
             check_dtype(hash, array.dtype, dtype)?;
-            let slice = slice_rows(array, start..start + len)?;
+            let slice = slice_axis(array, 0, start..start + len)?;
             out.clear();
             out.extend_from_slice(&slice.bytes);
             return Ok(());
@@ -2452,7 +2443,7 @@ impl Store {
             // would write. Each is staged as it is accepted, so a failure
             // part-way leaves the earlier ones for `settle` to unwind.
             for (item, part) in items.iter().zip(&parts) {
-                if self.put_array(&part.hash, request_array(item), part.group, part.layout)? {
+                if self.put_array(&part.hash, item.data.array(), part.group, part.layout)? {
                     staged.arrays.push(part.hash);
                 }
             }
@@ -2471,7 +2462,7 @@ impl Store {
             let mut pools: HashMap<PoolKey, Vec<usize>> = HashMap::new();
             let mut seen: HashSet<[u8; 32]> = HashSet::new();
             for (i, (item, part)) in items.iter().zip(&parts).enumerate() {
-                let array = request_array(item);
+                let array = item.data.array();
                 if !seen.insert(part.hash) {
                     continue;
                 }
@@ -2487,7 +2478,7 @@ impl Store {
             for (pool, idxs) in &pools {
                 let hashes: Vec<[u8; 32]> = idxs.iter().map(|&i| parts[i].hash).collect();
                 let arrays: Vec<&TypedArray> =
-                    idxs.iter().map(|&i| request_array(&items[i])).collect();
+                    idxs.iter().map(|&i| items[i].data.array()).collect();
                 let written = put_block(&mut *self.backend, &hashes, &arrays, pool.3)?;
                 staged.arrays.extend(
                     hashes
@@ -3271,7 +3262,7 @@ impl Store {
                 let windowed = if w0 == 0 && w1 == count {
                     arr
                 } else {
-                    slice_count_axis(&arr, 1, w0, w1)
+                    slice_axis(&arr, 1, w0..w1)?
                 };
                 let det = Deterministic::new(
                     window_initial,
@@ -3306,7 +3297,7 @@ impl Store {
                 let windowed = if w0 == 0 && w1 == count {
                     arr
                 } else {
-                    slice_count_axis(&arr, 2, w0, w1)
+                    slice_axis(&arr, 2, w0..w1)?
                 };
                 let prob = Probabilistic::new(
                     window_initial,
@@ -3345,7 +3336,7 @@ impl Store {
                 let windowed = if w0 == 0 && w1 == count {
                     arr
                 } else {
-                    slice_count_axis(&arr, 2, w0, w1)
+                    slice_axis(&arr, 2, w0..w1)?
                 };
                 let scen = Scenarios::new(
                     window_initial,
@@ -5896,182 +5887,129 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     let element_type = resolve_element_type(item)?;
     validate_time_reference(&item.data)?;
     validate_data(&item.data)?;
-    let (hash, group, layout, meta) = match &item.data {
-        TimeSeriesData::SingleTimeSeries(single) => {
-            let hash = array_hash(&single.data);
-            (
-                hash,
-                PackGroup::Regular(single.resolution),
-                array_layout_for(TimeSeriesType::SingleTimeSeries),
-                TimeSeriesMetadata {
-                    owner_id: item.owner_id,
-                    owner_type: item.owner_type.clone(),
-                    owner_category: item.owner_category,
-                    time_series_type: TimeSeriesType::SingleTimeSeries,
-                    name: single.name.clone(),
-                    data_hash: hash,
-                    initial_timestamp: Some(single.initial_timestamp),
-                    resolution: Some(single.resolution),
-                    length: Some(single.length),
-                    horizon: None,
-                    interval: None,
-                    count: None,
-                    timestamps: None,
-                    features: item.features.clone(),
-                    units: item.data.units().map(str::to_owned),
-                    quantity_kind: item.data.quantity_kind().map(str::to_owned),
-                    unit_system: item.data.unit_system(),
-                    time_reference: item.data.time_reference().cloned(),
-                    component_field: item.data.component_field().map(str::to_owned),
-                    percentiles: None,
-                    element_type,
-                    element_shape: single.data.element_shape().to_vec(),
-                    application_data: item.data.application_data().map(str::to_owned),
-                    id: None,
-                },
-            )
-        }
-        TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
-            let hash = array_hash(&non_sequential.data);
-            (
-                hash,
-                // An irregular series has no resolution to pool by; its cohort
-                // is every series on the same explicit time axis, which the
-                // catalog already content-addresses.
-                PackGroup::Irregular(crate::hash::timestamps_hash(&non_sequential.timestamps)),
-                array_layout_for(TimeSeriesType::NonSequentialTimeSeries),
-                TimeSeriesMetadata {
-                    owner_id: item.owner_id,
-                    owner_type: item.owner_type.clone(),
-                    owner_category: item.owner_category,
-                    time_series_type: TimeSeriesType::NonSequentialTimeSeries,
-                    name: non_sequential.name.clone(),
-                    data_hash: hash,
-                    initial_timestamp: None,
-                    resolution: None,
-                    length: Some(non_sequential.length),
-                    horizon: None,
-                    interval: None,
-                    count: None,
-                    timestamps: Some(non_sequential.timestamps.clone()),
-                    features: item.features.clone(),
-                    units: item.data.units().map(str::to_owned),
-                    quantity_kind: item.data.quantity_kind().map(str::to_owned),
-                    unit_system: item.data.unit_system(),
-                    time_reference: item.data.time_reference().cloned(),
-                    component_field: item.data.component_field().map(str::to_owned),
-                    percentiles: None,
-                    element_type,
-                    element_shape: non_sequential.data.element_shape().to_vec(),
-                    application_data: item.data.application_data().map(str::to_owned),
-                    id: None,
-                },
-            )
-        }
-        TimeSeriesData::PersistentTimeSeries(persistent) => {
-            let hash = array_hash(&persistent.data);
-            (
-                hash,
-                // The same pooling as an irregular series, and deliberately so:
-                // `PackGroup` is keyed by the time axis alone, so a persistent
-                // series and a non-sequential one on the same breakpoints share
-                // one `nsts_…` dataset and one stored array. Nothing about the
-                // storage layer knows the difference between them — the
-                // difference is entirely in how a read resolves an instant.
-                PackGroup::Irregular(crate::hash::timestamps_hash(&persistent.timestamps)),
-                array_layout_for(TimeSeriesType::PersistentTimeSeries),
-                TimeSeriesMetadata {
-                    owner_id: item.owner_id,
-                    owner_type: item.owner_type.clone(),
-                    owner_category: item.owner_category,
-                    time_series_type: TimeSeriesType::PersistentTimeSeries,
-                    name: persistent.name.clone(),
-                    data_hash: hash,
-                    initial_timestamp: None,
-                    resolution: None,
-                    length: Some(persistent.length),
-                    horizon: None,
-                    interval: None,
-                    count: None,
-                    timestamps: Some(persistent.timestamps.clone()),
-                    features: item.features.clone(),
-                    units: item.data.units().map(str::to_owned),
-                    quantity_kind: item.data.quantity_kind().map(str::to_owned),
-                    unit_system: item.data.unit_system(),
-                    time_reference: item.data.time_reference().cloned(),
-                    component_field: item.data.component_field().map(str::to_owned),
-                    percentiles: None,
-                    element_type,
-                    element_shape: persistent.data.element_shape().to_vec(),
-                    application_data: item.data.application_data().map(str::to_owned),
-                    id: None,
-                },
-            )
-        }
-        // Dense forecast types are stored as standalone arrays in their
-        // native shape. `DeterministicSingleTimeSeries` is not added
-        // directly; it is derived from a stored `SingleTimeSeries` via
+    let data = &item.data;
+    let array = data.array();
+    let time_series_type = data.time_series_type();
+    let hash = array_hash(array);
+    // The fields every type fills the same way; each arm below adds its axis.
+    let base = TimeSeriesMetadata {
+        owner_id: item.owner_id,
+        owner_type: item.owner_type.clone(),
+        owner_category: item.owner_category,
+        time_series_type,
+        name: data.name().to_owned(),
+        data_hash: hash,
+        initial_timestamp: None,
+        resolution: None,
+        length: Some(array.length()),
+        horizon: None,
+        interval: None,
+        count: None,
+        timestamps: None,
+        features: item.features.clone(),
+        units: data.units().map(str::to_owned),
+        quantity_kind: data.quantity_kind().map(str::to_owned),
+        unit_system: data.unit_system(),
+        time_reference: data.time_reference().cloned(),
+        component_field: data.component_field().map(str::to_owned),
+        percentiles: None,
+        element_type,
+        element_shape: array.element_shape().to_vec(),
+        application_data: data.application_data().map(str::to_owned),
+        id: None,
+    };
+    // A dense forecast's geometry. Forecasts are stored as standalone arrays
+    // in their native shape.
+    let forecast = |initial: chrono::DateTime<chrono::Utc>,
+                    resolution: Period,
+                    horizon: Period,
+                    interval: Period,
+                    count: usize,
+                    base: TimeSeriesMetadata| TimeSeriesMetadata {
+        initial_timestamp: Some(initial),
+        resolution: Some(resolution),
+        horizon: Some(horizon),
+        interval: Some(interval),
+        count: Some(count),
+        ..base
+    };
+    let (group, meta) = match data {
+        TimeSeriesData::SingleTimeSeries(single) => (
+            PackGroup::Regular(single.resolution),
+            TimeSeriesMetadata {
+                initial_timestamp: Some(single.initial_timestamp),
+                resolution: Some(single.resolution),
+                ..base
+            },
+        ),
+        TimeSeriesData::NonSequentialTimeSeries(non_sequential) => (
+            // An irregular series has no resolution to pool by; its cohort
+            // is every series on the same explicit time axis, which the
+            // catalog already content-addresses.
+            PackGroup::Irregular(crate::hash::timestamps_hash(&non_sequential.timestamps)),
+            TimeSeriesMetadata {
+                timestamps: Some(non_sequential.timestamps.clone()),
+                ..base
+            },
+        ),
+        TimeSeriesData::PersistentTimeSeries(persistent) => (
+            // The same pooling as an irregular series, and deliberately so:
+            // `PackGroup` is keyed by the time axis alone, so a persistent
+            // series and a non-sequential one on the same breakpoints share
+            // one `nsts_…` dataset and one stored array. Nothing about the
+            // storage layer knows the difference between them — the
+            // difference is entirely in how a read resolves an instant.
+            PackGroup::Irregular(crate::hash::timestamps_hash(&persistent.timestamps)),
+            TimeSeriesMetadata {
+                timestamps: Some(persistent.timestamps.clone()),
+                ..base
+            },
+        ),
+        // `DeterministicSingleTimeSeries` is not added directly; it is
+        // derived from a stored `SingleTimeSeries` via
         // [`Store::transform_single_time_series`].
         TimeSeriesData::Deterministic(det) => {
             validate_deterministic(det)?;
             (
-                array_hash(&det.data),
                 PackGroup::Regular(det.resolution),
-                array_layout_for(TimeSeriesType::Deterministic),
-                forecast_metadata(
-                    item,
-                    TimeSeriesType::Deterministic,
-                    &det.name,
+                forecast(
                     det.initial_timestamp,
                     det.resolution,
                     det.horizon,
                     det.interval,
                     det.count,
-                    &det.data,
-                    element_type,
-                    None,
+                    base,
                 ),
             )
         }
         TimeSeriesData::Probabilistic(prob) => {
             validate_probabilistic(prob)?;
             (
-                array_hash(&prob.data),
                 PackGroup::Regular(prob.resolution),
-                array_layout_for(TimeSeriesType::Probabilistic),
-                forecast_metadata(
-                    item,
-                    TimeSeriesType::Probabilistic,
-                    &prob.name,
+                forecast(
                     prob.initial_timestamp,
                     prob.resolution,
                     prob.horizon,
                     prob.interval,
                     prob.count,
-                    &prob.data,
-                    element_type,
-                    Some(prob.percentiles.clone()),
+                    TimeSeriesMetadata {
+                        percentiles: Some(prob.percentiles.clone()),
+                        ..base
+                    },
                 ),
             )
         }
         TimeSeriesData::Scenarios(scen) => {
             validate_scenarios(scen)?;
             (
-                array_hash(&scen.data),
                 PackGroup::Regular(scen.resolution),
-                array_layout_for(TimeSeriesType::Scenarios),
-                forecast_metadata(
-                    item,
-                    TimeSeriesType::Scenarios,
-                    &scen.name,
+                forecast(
                     scen.initial_timestamp,
                     scen.resolution,
                     scen.horizon,
                     scen.interval,
                     scen.count,
-                    &scen.data,
-                    element_type,
-                    None,
+                    base,
                 ),
             )
         }
@@ -6079,7 +6017,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     Ok(RequestParts {
         hash,
         group,
-        layout,
+        layout: array_layout_for(time_series_type),
         meta,
     })
 }
@@ -6182,11 +6120,6 @@ impl Rows<'_> {
             Rows::PerColumn(indices) => indices[i],
         }
     }
-}
-
-/// The value array backing a request, regardless of time-series type.
-fn request_array(item: &AddRequest) -> &TypedArray {
-    data_array(&item.data)
 }
 
 /// The catalog row for a `DeterministicSingleTimeSeries` view of `src`, as
@@ -6488,7 +6421,7 @@ fn is_calendar_scale(period: Period) -> bool {
 /// rule, so an artifact written before it keeps reading back exactly.
 fn validate_data(data: &TimeSeriesData) -> Result<()> {
     let invalid = TimeSeriesError::InvalidParameter;
-    validate_array_geometry(data_array(data), data.time_series_type())?;
+    validate_array_geometry(data.array(), data.time_series_type())?;
     match data {
         TimeSeriesData::SingleTimeSeries(single) => validate_single(single),
         TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
@@ -6548,18 +6481,6 @@ fn validate_array_geometry(array: &TypedArray, ts_type: TimeSeriesType) -> Resul
         )));
     }
     Ok(())
-}
-
-/// The array a [`TimeSeriesData`] carries, whatever its type.
-fn data_array(data: &TimeSeriesData) -> &TypedArray {
-    match data {
-        TimeSeriesData::SingleTimeSeries(single) => &single.data,
-        TimeSeriesData::NonSequentialTimeSeries(non_sequential) => &non_sequential.data,
-        TimeSeriesData::Deterministic(det) => &det.data,
-        TimeSeriesData::Probabilistic(prob) => &prob.data,
-        TimeSeriesData::Scenarios(scen) => &scen.data,
-        TimeSeriesData::PersistentTimeSeries(persistent) => &persistent.data,
-    }
 }
 
 /// [`crate::timestamps::require_millisecond_precision`] as a
@@ -6717,52 +6638,6 @@ fn validate_scenarios(scen: &Scenarios) -> Result<()> {
     .map_err(as_invalid_parameter)
 }
 
-/// Build the metadata row for a dense forecast (`Deterministic` /
-/// `Probabilistic` / `Scenarios`) added via [`Store::add_time_series_bulk`].
-/// The array is stored standalone in its native shape; `percentiles` is `Some`
-/// only for `Probabilistic`.
-#[allow(clippy::too_many_arguments)]
-fn forecast_metadata(
-    item: &AddRequest,
-    time_series_type: TimeSeriesType,
-    name: &str,
-    initial_timestamp: chrono::DateTime<chrono::Utc>,
-    resolution: Period,
-    horizon: Period,
-    interval: Period,
-    count: usize,
-    data: &TypedArray,
-    element_type: ElementType,
-    percentiles: Option<Vec<f64>>,
-) -> TimeSeriesMetadata {
-    TimeSeriesMetadata {
-        owner_id: item.owner_id,
-        owner_type: item.owner_type.clone(),
-        owner_category: item.owner_category,
-        time_series_type,
-        name: name.to_owned(),
-        data_hash: array_hash(data),
-        initial_timestamp: Some(initial_timestamp),
-        resolution: Some(resolution),
-        length: Some(data.length()),
-        horizon: Some(horizon),
-        interval: Some(interval),
-        count: Some(count),
-        timestamps: None,
-        features: item.features.clone(),
-        units: item.data.units().map(str::to_owned),
-        quantity_kind: item.data.quantity_kind().map(str::to_owned),
-        unit_system: item.data.unit_system(),
-        time_reference: item.data.time_reference().cloned(),
-        component_field: item.data.component_field().map(str::to_owned),
-        percentiles,
-        element_type,
-        element_shape: data.element_shape().to_vec(),
-        application_data: item.data.application_data().map(str::to_owned),
-        id: None,
-    }
-}
-
 /// The element type a request writes — the one the series carries, which a
 /// constructor resolved to plain scalars of the array's dtype unless the caller
 /// declared otherwise.
@@ -6774,7 +6649,7 @@ fn forecast_metadata(
 fn resolve_element_type(item: &AddRequest) -> Result<ElementType> {
     let declared = item.data.element_type();
     declared.validate_array(
-        request_array(item),
+        item.data.array(),
         item.data.time_series_type().leading_dims(),
     )?;
     Ok(declared)
@@ -7006,51 +6881,6 @@ fn repack_temp_path(data_path: &Path, tag: &str) -> PathBuf {
 // ---------------------------------------------------------------------------
 // Forecast read-path helpers
 // ---------------------------------------------------------------------------
-
-/// Slice a contiguous range `[w0, w1)` along `axis` of a row-major array.
-///
-/// This is a strided gather: axis `a` is not necessarily the leading axis, so
-/// the bytes for each "outer" block are not contiguous in the source buffer.
-///
-/// - `outer = product(shape[0..axis])` — number of outer blocks.
-/// - `inner_bytes = product(shape[axis+1..]) * dtype.size()` — bytes per
-///   element in the axis-stride.
-/// - For each outer block `o`, the source bytes for windows `[w0, w1)` live at
-///   `o * axis_len * inner_bytes + w0 * inner_bytes .. + w1 * inner_bytes`.
-///
-/// The returned array has the same dtype and all the same shape dims except
-/// `shape[axis]` which becomes `w1 - w0`.
-pub(crate) fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usize) -> TypedArray {
-    assert!(
-        axis < arr.shape.len(),
-        "axis {axis} out of bounds for shape {:?}",
-        arr.shape
-    );
-    assert!(w0 <= w1, "w0 ({w0}) must be <= w1 ({w1})");
-    let axis_len = arr.shape[axis];
-    assert!(w1 <= axis_len, "w1 ({w1}) > axis_len ({axis_len})");
-
-    let outer: usize = arr.shape[..axis].iter().product();
-    let inner_bytes: usize = arr.shape[axis + 1..].iter().product::<usize>() * arr.dtype.size();
-    let window_bytes = (w1 - w0) * inner_bytes;
-
-    let mut out_bytes = Vec::with_capacity(outer * window_bytes);
-    for o in 0..outer {
-        let block_start = o * axis_len * inner_bytes;
-        let src_start = block_start + w0 * inner_bytes;
-        let src_end = block_start + w1 * inner_bytes;
-        out_bytes.extend_from_slice(&arr.bytes[src_start..src_end]);
-    }
-
-    let mut new_shape = arr.shape.clone();
-    new_shape[axis] = w1 - w0;
-
-    TypedArray {
-        dtype: arr.dtype,
-        shape: new_shape,
-        bytes: out_bytes,
-    }
-}
 
 /// Refuse a slice whose instants a re-anchored grid would not reproduce.
 ///
@@ -7322,7 +7152,7 @@ fn validate_forecast_shape(arr: &TypedArray, expected_prefix: &[usize], label: &
 }
 
 #[cfg(test)]
-mod slice_count_axis_tests {
+mod slice_axis_tests {
     use super::*;
 
     fn f64_arr(shape: Vec<usize>, vals: &[f64]) -> TypedArray {
@@ -7334,7 +7164,7 @@ mod slice_count_axis_tests {
         // Shape [4]: axis 0 = leading axis, equivalent to leading-axis slicing.
         // vals = [10, 20, 30, 40] (f64).
         let arr = f64_arr(vec![4], &[10.0, 20.0, 30.0, 40.0]);
-        let sliced = slice_count_axis(&arr, 0, 1, 3);
+        let sliced = slice_axis(&arr, 0, 1..3).unwrap();
         assert_eq!(sliced.shape, vec![2]);
         assert_eq!(sliced.to_f64_vec().unwrap(), vec![20.0, 30.0]);
     }
@@ -7352,7 +7182,7 @@ mod slice_count_axis_tests {
         let arr = f64_arr(vec![2, 4, 1], &vals);
 
         // Select windows w=1..3 along axis 1.
-        let sliced = slice_count_axis(&arr, 1, 1, 3);
+        let sliced = slice_axis(&arr, 1, 1..3).unwrap();
         assert_eq!(sliced.shape, vec![2, 2, 1]);
 
         // Expected: s=0, w=1: [10.0], s=0, w=2: [20.0], s=1, w=1: [110.0], s=1, w=2: [120.0]
@@ -7374,7 +7204,7 @@ mod slice_count_axis_tests {
         let arr = f64_arr(vec![2, 2, 3], &vals);
 
         // Select windows w=0..2 (first two) along axis 2.
-        let sliced = slice_count_axis(&arr, 2, 0, 2);
+        let sliced = slice_axis(&arr, 2, 0..2).unwrap();
         assert_eq!(sliced.shape, vec![2, 2, 2]);
 
         // p=0, s=0: [0, 10]; p=0, s=1: [100, 110]; p=1, s=0: [1000, 1010]; p=1, s=1: [1100, 1110]
@@ -7387,7 +7217,7 @@ mod slice_count_axis_tests {
         // Slicing the full range should return identical bytes.
         let vals: Vec<f64> = (0..12).map(|i| i as f64).collect();
         let arr = f64_arr(vec![3, 4], &vals);
-        let sliced = slice_count_axis(&arr, 1, 0, 4);
+        let sliced = slice_axis(&arr, 1, 0..4).unwrap();
         assert_eq!(sliced.shape, arr.shape);
         assert_eq!(sliced.bytes, arr.bytes);
     }
@@ -7395,7 +7225,7 @@ mod slice_count_axis_tests {
     #[test]
     fn empty_range() {
         let arr = f64_arr(vec![2, 4], &[0.0; 8]);
-        let sliced = slice_count_axis(&arr, 1, 2, 2);
+        let sliced = slice_axis(&arr, 1, 2..2).unwrap();
         assert_eq!(sliced.shape, vec![2, 0]);
         assert!(sliced.bytes.is_empty());
     }

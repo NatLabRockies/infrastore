@@ -15,23 +15,25 @@ use serde::{Deserialize, Serialize};
 /// `Ord` follows declaration order, which is also code order. It carries no
 /// meaning beyond giving layout-grouping code a stable, allocation-free sort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(i32)]
 pub enum Dtype {
-    F64,
-    F32,
-    I64,
-    I32,
-    U64,
-    Bool,
-    I16,
-    I8,
-    U32,
-    U16,
-    U8,
+    F64 = 0,
+    F32 = 1,
+    I64 = 2,
+    I32 = 3,
+    U64 = 4,
+    Bool = 5,
+    I16 = 6,
+    I8 = 7,
+    U32 = 8,
+    U16 = 9,
+    U8 = 10,
 }
 
 impl Dtype {
-    /// Every supported dtype, in code order. Handy for exhaustive tests and for
-    /// rendering the accepted vocabulary in an error message.
+    /// Every supported dtype, in code order — [`Self::from_code`] indexes it.
+    /// Handy for exhaustive tests and for rendering the accepted vocabulary in
+    /// an error message.
     pub const ALL: &'static [Dtype] = &[
         Dtype::F64,
         Dtype::F32,
@@ -47,36 +49,11 @@ impl Dtype {
     ];
 
     pub fn code(self) -> i32 {
-        match self {
-            Dtype::F64 => 0,
-            Dtype::F32 => 1,
-            Dtype::I64 => 2,
-            Dtype::I32 => 3,
-            Dtype::U64 => 4,
-            Dtype::Bool => 5,
-            Dtype::I16 => 6,
-            Dtype::I8 => 7,
-            Dtype::U32 => 8,
-            Dtype::U16 => 9,
-            Dtype::U8 => 10,
-        }
+        self as i32
     }
 
     pub fn from_code(code: i32) -> Option<Self> {
-        Some(match code {
-            0 => Dtype::F64,
-            1 => Dtype::F32,
-            2 => Dtype::I64,
-            3 => Dtype::I32,
-            4 => Dtype::U64,
-            5 => Dtype::Bool,
-            6 => Dtype::I16,
-            7 => Dtype::I8,
-            8 => Dtype::U32,
-            9 => Dtype::U16,
-            10 => Dtype::U8,
-            _ => return None,
-        })
+        Self::ALL.get(usize::try_from(code).ok()?).copied()
     }
 
     pub fn as_str(self) -> &'static str {
@@ -96,20 +73,7 @@ impl Dtype {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "f64" => Dtype::F64,
-            "f32" => Dtype::F32,
-            "i64" => Dtype::I64,
-            "i32" => Dtype::I32,
-            "u64" => Dtype::U64,
-            "bool" => Dtype::Bool,
-            "i16" => Dtype::I16,
-            "i8" => Dtype::I8,
-            "u32" => Dtype::U32,
-            "u16" => Dtype::U16,
-            "u8" => Dtype::U8,
-            _ => return None,
-        })
+        Self::ALL.iter().copied().find(|d| d.as_str() == s)
     }
 
     /// Byte width of one element.
@@ -120,10 +84,6 @@ impl Dtype {
             Dtype::I16 | Dtype::U16 => 2,
             Dtype::Bool | Dtype::I8 | Dtype::U8 => 1,
         }
-    }
-
-    pub fn is_float(self) -> bool {
-        matches!(self, Dtype::F64 | Dtype::F32)
     }
 }
 
@@ -396,6 +356,18 @@ impl Element for bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dtype_codes_and_names_round_trip() {
+        for (i, &d) in Dtype::ALL.iter().enumerate() {
+            assert_eq!(d.code(), i as i32);
+            assert_eq!(Dtype::from_code(d.code()), Some(d));
+            assert_eq!(Dtype::parse(d.as_str()), Some(d));
+        }
+        assert_eq!(Dtype::from_code(-1), None);
+        assert_eq!(Dtype::from_code(Dtype::ALL.len() as i32), None);
+        assert_eq!(Dtype::parse("f16"), None);
+    }
 
     #[test]
     fn typed_round_trip_every_dtype() {

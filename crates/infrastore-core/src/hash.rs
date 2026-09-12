@@ -48,10 +48,7 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
         }
     }
 
-    let digest = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
+    hasher.finalize().into()
 }
 
 /// Feed `f64` bytes to `hasher` with every NaN collapsed to one canonical bit
@@ -147,10 +144,7 @@ pub fn features_hash(features: &Features) -> [u8; 32] {
         }
     }
 
-    let digest = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
+    hasher.finalize().into()
 }
 
 /// Compute the canonical content hash for an explicit timestamp vector.
@@ -180,10 +174,7 @@ pub fn timestamps_hash(timestamps: &[DateTime<Utc>]) -> [u8; 32] {
         bytes.extend_from_slice(&millis.to_le_bytes());
     }
     hasher.update(&bytes);
-    let digest = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    out
+    hasher.finalize().into()
 }
 
 /// Hex-encode a 32-byte hash for storage in TEXT columns / HDF5 hash datasets.
@@ -311,9 +302,7 @@ mod tests {
             }
             _ => hasher.update(&data.bytes),
         }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&hasher.finalize());
-        out
+        hasher.finalize().into()
     }
 
     #[test]

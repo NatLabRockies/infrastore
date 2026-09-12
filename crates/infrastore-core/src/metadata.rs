@@ -1620,10 +1620,6 @@ impl MetadataStore {
         vectors: Option<&dyn StorageBackend>,
     ) -> Result<(Vec<IdentifiedRow>, Vec<[u8; 32]>)> {
         let (where_clause, params_vec) = filter.to_sql();
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
-            .iter()
-            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
-            .collect();
 
         let sql = format!(
             "SELECT features_hash, owner_id, owner_type, owner_category, time_series_type, name,
@@ -1635,7 +1631,7 @@ impl MetadataStore {
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows: Vec<([u8; 32], MetaRow)> = stmt
-            .query_map(param_refs.as_slice(), parse_meta_row)?
+            .query_map(rusqlite::params_from_iter(&params_vec), parse_meta_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         // Hydrate timestamp vectors the same way features are hydrated below,
@@ -1701,7 +1697,7 @@ impl MetadataStore {
         );
         let mut feat_stmt = self.conn.prepare_cached(&feat_sql)?;
         let mut by_hash: HashMap<[u8; 32], Features> = HashMap::new();
-        let mut feat_rows = feat_stmt.query(param_refs.as_slice())?;
+        let mut feat_rows = feat_stmt.query(rusqlite::params_from_iter(&params_vec))?;
         while let Some(row) = feat_rows.next()? {
             let hash = bytes_to_hash32(&row.get::<_, Vec<u8>>(0)?).ok_or_else(|| {
                 TimeSeriesError::IntegrityError("features_hash is not 32 bytes".into())
@@ -1873,14 +1869,10 @@ impl MetadataStore {
             return self.exists_feature_subset(filter, required);
         }
         let (where_clause, params_vec) = filter.to_sql();
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
-            .iter()
-            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
-            .collect();
         let sql = format!("SELECT 1 FROM time_series_associations {where_clause} LIMIT 1");
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let found: Option<i64> = stmt
-            .query_row(param_refs.as_slice(), |r| r.get(0))
+            .query_row(rusqlite::params_from_iter(&params_vec), |r| r.get(0))
             .optional()?;
         Ok(found.is_some())
     }
@@ -1913,13 +1905,9 @@ impl MetadataStore {
             params_vec.push(param);
         }
         sql.push_str(" LIMIT 1");
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
-            .iter()
-            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
-            .collect();
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let found: Option<i64> = stmt
-            .query_row(param_refs.as_slice(), |r| r.get(0))
+            .query_row(rusqlite::params_from_iter(&params_vec), |r| r.get(0))
             .optional()?;
         Ok(found.is_some())
     }
@@ -2020,14 +2008,12 @@ impl MetadataStore {
             );
         }
         sql.push_str(" ORDER BY resolution ASC");
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
-            .iter()
-            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
-            .collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
+            .query_map(rusqlite::params_from_iter(&params_vec), |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows.into_iter().map(|s| iso_to_period(&s)).collect()
     }
@@ -2054,14 +2040,12 @@ impl MetadataStore {
             );
         }
         sql.push_str(" ORDER BY interval ASC");
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
-            .iter()
-            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
-            .collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
+            .query_map(rusqlite::params_from_iter(&params_vec), |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows.into_iter().map(|s| iso_to_period(&s)).collect()
     }
@@ -2454,12 +2438,10 @@ impl MetadataStore {
             sql.push_str(" AND resolution = ?");
             params_vec.push(Box::new(period_to_iso(res)));
         }
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
-            .iter()
-            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
-            .collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |r| r.get::<_, i64>(0))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(&params_vec), |r| {
+            r.get::<_, i64>(0)
+        })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -2489,7 +2471,6 @@ impl MetadataStore {
             return Ok(Vec::new());
         }
         let (where_clause, params) = filter.to_sql(table);
-        let param_refs = to_param_refs(&params);
         // Ordered by rowid so a bulk export/import round trip preserves the
         // order the caller inserted in.
         let sql = format!(
@@ -2497,7 +2478,7 @@ impl MetadataStore {
             table.left_id, table.left_type, table.right_id, table.right_type, table.name
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |r| {
+        let rows = stmt.query_map(rusqlite::params_from_iter(&params), |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -2509,11 +2490,10 @@ impl MetadataStore {
             return Ok(false);
         }
         let (where_clause, params) = filter.to_sql(table);
-        let param_refs = to_param_refs(&params);
         let sql = format!("SELECT 1 FROM {} {where_clause} LIMIT 1", table.name);
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let found: Option<i64> = stmt
-            .query_row(param_refs.as_slice(), |r| r.get(0))
+            .query_row(rusqlite::params_from_iter(&params), |r| r.get(0))
             .optional()?;
         Ok(found.is_some())
     }
@@ -2529,14 +2509,13 @@ impl MetadataStore {
             return Ok(Vec::new());
         }
         let (where_clause, params) = filter.to_sql(table);
-        let param_refs = to_param_refs(&params);
         let id_col = table.id_column(endpoint);
         let sql = format!(
             "SELECT DISTINCT {id_col} FROM {} {where_clause} ORDER BY {id_col}",
             table.name
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), |r| r.get::<_, i64>(0))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(&params), |r| r.get::<_, i64>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -2553,10 +2532,9 @@ impl MetadataStore {
             return Ok(0);
         }
         let (where_clause, params) = filter.to_sql(table);
-        let param_refs = to_param_refs(&params);
         let sql = format!("SELECT {projection} FROM {} {where_clause}", table.name);
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        Ok(stmt.query_row(param_refs.as_slice(), |r| r.get(0))?)
+        Ok(stmt.query_row(rusqlite::params_from_iter(&params), |r| r.get(0))?)
     }
 
     /// Row counts grouped by the type label at `endpoint`, ordered by type.
@@ -2660,9 +2638,8 @@ impl MetadataStore {
 
     fn assoc_delete(tx: &Connection, table: AssocTable, filter: &EndpointFilter) -> Result<usize> {
         let (where_clause, params) = filter.to_sql(table);
-        let param_refs = to_param_refs(&params);
         let sql = format!("DELETE FROM {} {where_clause}", table.name);
-        Ok(tx.execute(&sql, param_refs.as_slice())?)
+        Ok(tx.execute(&sql, rusqlite::params_from_iter(&params))?)
     }
 
     // ---- Supplemental-attribute associations ------------------------------
@@ -3067,14 +3044,6 @@ impl MetadataStore {
     }
 }
 
-/// Borrow a boxed parameter list as rusqlite's slice-of-trait-objects form.
-fn to_param_refs(params: &[Box<dyn rusqlite::ToSql>]) -> Vec<&dyn rusqlite::ToSql> {
-    params
-        .iter()
-        .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
-        .collect()
-}
-
 /// Render storage codes as a comma-separated SQL `IN` list. The inputs are
 /// `i64`s produced by [`TimeSeriesType`], never caller text.
 fn code_list(codes: &[i64]) -> String {
@@ -3245,13 +3214,7 @@ fn is_subset(required: &Features, actual: &Features) -> bool {
 }
 
 fn bytes_to_hash32(bytes: &[u8]) -> Option<[u8; 32]> {
-    if bytes.len() == 32 {
-        let mut h = [0u8; 32];
-        h.copy_from_slice(bytes);
-        Some(h)
-    } else {
-        None
-    }
+    bytes.try_into().ok()
 }
 
 /// Helper to run a `SELECT data_hash` query and collect raw bytes, isolating

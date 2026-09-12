@@ -215,39 +215,48 @@ macro_rules! le_bytes {
     }};
 }
 
+/// Evaluate `$body` with `$t` aliased to the Rust element type of `$dtype`, one
+/// monomorphized arm per dtype. `Bool` is stored as `u8`; the `bool =>` form
+/// gives it its own arm where a byte buffer needs no conversion.
+macro_rules! with_dtype {
+    ($dtype:expr, $t:ident => $body:expr) => {
+        with_dtype!($dtype, bool => { type $t = u8; $body }, $t => $body)
+    };
+    ($dtype:expr, bool => $bool:expr, $t:ident => $body:expr) => {
+        match $dtype {
+            Dtype::F64 => { type $t = f64; $body }
+            Dtype::F32 => { type $t = f32; $body }
+            Dtype::I64 => { type $t = i64; $body }
+            Dtype::I32 => { type $t = i32; $body }
+            Dtype::I16 => { type $t = i16; $body }
+            Dtype::I8 => { type $t = i8; $body }
+            Dtype::U64 => { type $t = u64; $body }
+            Dtype::U32 => { type $t = u32; $body }
+            Dtype::U16 => { type $t = u16; $body }
+            Dtype::U8 => { type $t = u8; $body }
+            Dtype::Bool => $bool,
+        }
+    };
+}
+
 /// Read the hyperslab `ranges` of `ds` into a little-endian buffer. libhdf5
 /// converts from the file's byte order on the way out.
 fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result<Vec<u8>> {
     let s = sel(ranges);
-    macro_rules! rd {
-        ($t:ty) => {{
-            let a = ds.read_slice::<$t, _, ndarray::IxDyn>(s).map_err(map_h5)?;
-            match a.as_slice() {
-                // A hyperslab read is standard-layout, so this is the path taken.
-                Some(values) => le_bytes!(values, $t),
-                None => a.iter().flat_map(|v| v.to_le_bytes()).collect(),
-            }
-        }};
-    }
-    Ok(match dtype {
-        Dtype::F64 => rd!(f64),
-        Dtype::F32 => rd!(f32),
-        Dtype::I64 => rd!(i64),
-        Dtype::I32 => rd!(i32),
-        Dtype::I16 => rd!(i16),
-        Dtype::I8 => rd!(i8),
-        Dtype::U64 => rd!(u64),
-        Dtype::U32 => rd!(u32),
-        Dtype::U16 => rd!(u16),
-        Dtype::U8 => rd!(u8),
-        Dtype::Bool => {
-            let a = ds.read_slice::<u8, _, ndarray::IxDyn>(s).map_err(map_h5)?;
-            match a.as_slice() {
-                Some(values) => values.to_vec(),
-                None => a.iter().copied().collect(),
-            }
+    Ok(with_dtype!(dtype, bool => {
+        let a = ds.read_slice::<u8, _, ndarray::IxDyn>(s).map_err(map_h5)?;
+        match a.as_slice() {
+            Some(values) => values.to_vec(),
+            None => a.iter().copied().collect(),
         }
-    })
+    }, T => {
+        let a = ds.read_slice::<T, _, ndarray::IxDyn>(s).map_err(map_h5)?;
+        match a.as_slice() {
+            // A hyperslab read is standard-layout, so this is the path taken.
+            Some(values) => le_bytes!(values, T),
+            None => a.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        }
+    }))
 }
 
 /// The dtype a dataset is physically stored as, or `None` for a type this crate
@@ -257,35 +266,11 @@ fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result
 /// map to `Dtype::U8` and the caller treats the pair as one physical type.
 fn stored_dtype(ds: &h5::Dataset) -> Option<Dtype> {
     let dt = ds.dtype().ok()?;
-    for candidate in [
-        Dtype::F64,
-        Dtype::F32,
-        Dtype::I64,
-        Dtype::I32,
-        Dtype::I16,
-        Dtype::I8,
-        Dtype::U64,
-        Dtype::U32,
-        Dtype::U16,
-        Dtype::U8,
-    ] {
-        let matches = match candidate {
-            Dtype::F64 => dt.is::<f64>(),
-            Dtype::F32 => dt.is::<f32>(),
-            Dtype::I64 => dt.is::<i64>(),
-            Dtype::I32 => dt.is::<i32>(),
-            Dtype::I16 => dt.is::<i16>(),
-            Dtype::I8 => dt.is::<i8>(),
-            Dtype::U64 => dt.is::<u64>(),
-            Dtype::U32 => dt.is::<u32>(),
-            Dtype::U16 => dt.is::<u16>(),
-            Dtype::U8 | Dtype::Bool => dt.is::<u8>(),
-        };
-        if matches {
-            return Some(candidate);
-        }
-    }
-    None
+    Dtype::ALL
+        .iter()
+        .copied()
+        .filter(|&d| d != Dtype::Bool)
+        .find(|&d| with_dtype!(d, T => dt.is::<T>()))
 }
 
 /// Assert a standalone dataset holds what the catalog claims, as the packed
@@ -310,25 +295,12 @@ fn check_standalone_dtype(ds: &h5::Dataset, hash: &[u8; 32], requested: Dtype) -
 /// Read the whole dataset into a row-major, little-endian buffer. libhdf5
 /// converts from the file's byte order on the way out.
 fn read_all(ds: &h5::Dataset, dtype: Dtype) -> Result<Vec<u8>> {
-    macro_rules! rd {
-        ($t:ty) => {{
-            let v = ds.read_raw::<$t>().map_err(map_h5)?;
-            le_bytes!(&v, $t)
-        }};
-    }
-    Ok(match dtype {
-        Dtype::F64 => rd!(f64),
-        Dtype::F32 => rd!(f32),
-        Dtype::I64 => rd!(i64),
-        Dtype::I32 => rd!(i32),
-        Dtype::I16 => rd!(i16),
-        Dtype::I8 => rd!(i8),
-        Dtype::U64 => rd!(u64),
-        Dtype::U32 => rd!(u32),
-        Dtype::U16 => rd!(u16),
-        Dtype::U8 => rd!(u8),
-        Dtype::Bool => ds.read_raw::<u8>().map_err(map_h5)?,
-    })
+    Ok(
+        with_dtype!(dtype, bool => ds.read_raw::<u8>().map_err(map_h5)?, T => {
+            let v = ds.read_raw::<T>().map_err(map_h5)?;
+            le_bytes!(&v, T)
+        }),
+    )
 }
 
 /// Write a little-endian `bytes` buffer (logical shape `shape`) into the
@@ -343,55 +315,24 @@ fn write_sel(
 ) -> Result<()> {
     let s = sel(ranges);
     let dyn_shape = ndarray::IxDyn(shape);
-    macro_rules! wr {
-        ($t:ty, $n:expr) => {{
-            let v = le_values!(bytes, $t, $n);
-            let view = ndarray::ArrayViewD::from_shape(dyn_shape, v.as_ref())
-                .map_err(|e| TimeSeriesError::IntegrityError(format!("shape error: {e}")))?;
-            ds.write_slice(view, s).map_err(map_h5)
-        }};
-    }
-    match dtype {
-        Dtype::F64 => wr!(f64, 8),
-        Dtype::F32 => wr!(f32, 4),
-        Dtype::I64 => wr!(i64, 8),
-        Dtype::I32 => wr!(i32, 4),
-        Dtype::I16 => wr!(i16, 2),
-        Dtype::I8 => wr!(i8, 1),
-        Dtype::U64 => wr!(u64, 8),
-        Dtype::U32 => wr!(u32, 4),
-        Dtype::U16 => wr!(u16, 2),
-        Dtype::U8 => wr!(u8, 1),
-        Dtype::Bool => {
-            let view = ndarray::ArrayViewD::from_shape(dyn_shape, bytes)
-                .map_err(|e| TimeSeriesError::IntegrityError(format!("shape error: {e}")))?;
-            ds.write_slice(view, s).map_err(map_h5)
-        }
-    }
+    let shape_err = |e| TimeSeriesError::IntegrityError(format!("shape error: {e}"));
+    with_dtype!(dtype, bool => {
+        let view = ndarray::ArrayViewD::from_shape(dyn_shape, bytes).map_err(shape_err)?;
+        ds.write_slice(view, s).map_err(map_h5)
+    }, T => {
+        let v = le_values!(bytes, T, size_of::<T>());
+        let view = ndarray::ArrayViewD::from_shape(dyn_shape, v.as_ref()).map_err(shape_err)?;
+        ds.write_slice(view, s).map_err(map_h5)
+    })
 }
 
 /// Write a little-endian `bytes` buffer as the whole content of `ds`. The file
 /// keeps its own byte order; libhdf5 converts on the way in.
 fn write_all(ds: &h5::Dataset, dtype: Dtype, bytes: &[u8]) -> Result<()> {
-    macro_rules! wr {
-        ($t:ty, $n:expr) => {{
-            let v = le_values!(bytes, $t, $n);
-            ds.write_raw(v.as_ref()).map_err(map_h5)
-        }};
-    }
-    match dtype {
-        Dtype::F64 => wr!(f64, 8),
-        Dtype::F32 => wr!(f32, 4),
-        Dtype::I64 => wr!(i64, 8),
-        Dtype::I32 => wr!(i32, 4),
-        Dtype::I16 => wr!(i16, 2),
-        Dtype::I8 => wr!(i8, 1),
-        Dtype::U64 => wr!(u64, 8),
-        Dtype::U32 => wr!(u32, 4),
-        Dtype::U16 => wr!(u16, 2),
-        Dtype::U8 => wr!(u8, 1),
-        Dtype::Bool => ds.write_raw(bytes).map_err(map_h5),
-    }
+    with_dtype!(dtype, bool => ds.write_raw(bytes).map_err(map_h5), T => {
+        let v = le_values!(bytes, T, size_of::<T>());
+        ds.write_raw(v.as_ref()).map_err(map_h5)
+    })
 }
 
 /// Fill a dataset that was just created, unlinking it if the write fails.
@@ -433,44 +374,26 @@ fn create_ds(
     compression: Compression,
 ) -> Result<h5::Dataset> {
     let nbytes: usize = shape.iter().product::<usize>() * dtype.size();
-    macro_rules! mk {
-        ($t:ty) => {{
-            let b = group.new_dataset::<$t>().shape(shape.to_vec());
-            match chunks {
-                Some(c) => {
-                    let b = b.chunk(c.to_vec());
-                    match compression {
-                        Compression::Deflate { level, shuffle } => {
-                            let b = if shuffle { b.shuffle() } else { b };
-                            b.deflate(level).create(name)
-                        }
-                        Compression::None => b.create(name),
+    let created = with_dtype!(dtype, T => {
+        let b = group.new_dataset::<T>().shape(shape.to_vec());
+        match chunks {
+            Some(c) => {
+                let b = b.chunk(c.to_vec());
+                match compression {
+                    Compression::Deflate { level, shuffle } => {
+                        let b = if shuffle { b.shuffle() } else { b };
+                        b.deflate(level).create(name)
                     }
-                }
-                None => {
-                    if nbytes > 0 && nbytes <= COMPACT_MAX_BYTES {
-                        b.layout(h5::dataset::Layout::Compact).create(name)
-                    } else {
-                        b.create(name)
-                    }
+                    Compression::None => b.create(name),
                 }
             }
+            None if nbytes > 0 && nbytes <= COMPACT_MAX_BYTES => {
+                b.layout(h5::dataset::Layout::Compact).create(name)
+            }
+            None => b.create(name),
         }
-        .map_err(map_h5)};
-    }
-    match dtype {
-        Dtype::F64 => mk!(f64),
-        Dtype::F32 => mk!(f32),
-        Dtype::I64 => mk!(i64),
-        Dtype::I32 => mk!(i32),
-        Dtype::I16 => mk!(i16),
-        Dtype::I8 => mk!(i8),
-        Dtype::U64 => mk!(u64),
-        Dtype::U32 => mk!(u32),
-        Dtype::U16 => mk!(u16),
-        Dtype::U8 => mk!(u8),
-        Dtype::Bool => mk!(u8),
-    }
+    });
+    created.map_err(map_h5)
 }
 
 fn write_str_attr(file: &h5::File, name: &str, value: &str) -> Result<()> {
