@@ -2371,10 +2371,9 @@ pub unsafe extern "C" fn infrastore_store_association_exists(
 /// per-component loops.
 ///
 /// Set `features_exact` to compare `features_json` as the row's whole feature
-/// set: that is a content-hash comparison and stays on an index, where the
-/// default subset match cannot be answered from one and falls back to a full
-/// listing internally. A hot loop testing a complete feature set wants the
-/// exact form.
+/// set: that is one content-hash comparison, where the default subset match
+/// adds an indexed probe per requested feature. Neither hydrates a row, but a
+/// hot loop testing a complete feature set wants the exact form.
 ///
 /// # Safety
 ///

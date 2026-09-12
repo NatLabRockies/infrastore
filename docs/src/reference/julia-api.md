@@ -854,7 +854,7 @@ build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
                     window_start=nothing, window_length=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, name_glob=nothing,
-                    features=Dict(), component_field=nothing,
+                    features=Dict(), features_exact=false, component_field=nothing,
                     initial_timestamp=nothing, length=nothing) -> StaticReader
 
 static_grid(reader)       -> StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
@@ -953,7 +953,7 @@ forecasts must share one window timeline (`initial_timestamp` + `interval` + `co
 ```julia
 build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
-                      name_glob=nothing, features=Dict(),
+                      name_glob=nothing, features=Dict(), features_exact=false,
                       component_field=nothing) -> ForecastReader
 
 forecast_timeline(reader)  -> ForecastTimeline

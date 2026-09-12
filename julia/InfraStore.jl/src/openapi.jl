@@ -14,7 +14,7 @@
     export_time_series_associations_openapi(store; owner_id=nothing,
         owner_category=nothing, time_series_type=nothing, name=nothing,
         resolution=nothing, interval=nothing, features=nothing,
-        component_field=nothing) -> String
+        features_exact=false, component_field=nothing) -> String
 
 Export `time_series_associations` matching the filter (the same filter
 keywords as [`list_metadata`](@ref)) as a sorted OpenAPI-row JSON array.

@@ -229,10 +229,9 @@ An existence probe stays attribute-addressed: it is answered off the catalog ind
 hydrating a row, so routing it through an id lookup would cost more than the question. There is one
 of them, taking the [filter record](#the-filter-record) every other filter-taking export takes.
 
-Set `features_exact` to compare `features_json` as the row's whole feature set — that is a
-content-hash comparison and stays on an index. The default subset match cannot be answered from one
-and falls back to a full listing internally, so a hot loop testing a complete feature set wants the
-exact form.
+Set `features_exact` to compare `features_json` as the row's whole feature set — that is a single
+content-hash comparison. The default subset match adds an indexed probe per requested feature.
+Neither hydrates a row, but a hot loop testing a complete feature set wants the exact form.
 
 ```c
 /* True iff any association matches the filter. A NULL filter matches everything. */

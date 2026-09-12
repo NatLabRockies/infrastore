@@ -1947,13 +1947,14 @@ pub trait StorageBackend: Send + Sync {
 
 ## Hashing
 
-In the `hash` module (`infrastore_core::hash`). `array_hash` and `hash_hex` are also re-exported at
-the crate root; `features_hash` is only reachable through the module.
+In the `hash` module (`infrastore_core::hash`). `array_hash`, `hash_hex`, and `hash_from_hex` are
+also re-exported at the crate root; `features_hash` is only reachable through the module.
 
 ```rust
 pub fn array_hash(data: &TypedArray) -> [u8; 32];   // domain: dtype tag + shape + typed bytes
 pub fn features_hash(features: &Features) -> [u8; 32];
 pub fn hash_hex(hash: &[u8; 32]) -> String;
+pub fn hash_from_hex(s: &str) -> Option<[u8; 32]>;  // inverse; None unless exactly 64 hex digits
 ```
 
 These define the cross-language content-addressing contract; see
