@@ -888,7 +888,7 @@ are partitioned into <code>(dtype, element_shape)</code> groups, and each group'
                     window_start=nothing, window_length=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, name_glob=nothing,
-                    features=Dict(), component_field=nothing,
+                    features=Dict(), features_exact=false, component_field=nothing,
                     initial_timestamp=nothing, length=nothing) -&gt; StaticReader
 
 static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
@@ -967,7 +967,7 @@ forecasts must share one window timeline (<code>initial_timestamp</code> + <code
 <code>InvalidParameterError</code>.</p>
 <pre><code class="language-julia">build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
-                      name_glob=nothing, features=Dict(),
+                      name_glob=nothing, features=Dict(), features_exact=false,
                       component_field=nothing) -&gt; ForecastReader
 
 forecast_timeline(reader)  -&gt; ForecastTimeline
@@ -1064,7 +1064,7 @@ close!(store) -&gt; Nothing
 </code></pre>
 <pre><code class="language-julia">list_metadata(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
               name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
-              features=nothing, component_field=nothing,
+              features=nothing, features_exact=false, component_field=nothing,
               zoneless=nothing) -&gt; Vector{TimeSeriesMetadata}
 </code></pre>
 <p><code>list_metadata</code> is the package's one <strong>identify</strong> entry point: it returns a full
@@ -1095,15 +1095,16 @@ instants. The constructive remedy when a bulk read or a reader refuses a selecti
 </ul>
 <pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
                     name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
-                    features=Dict(), component_field=nothing) -&gt; Bool
+                    features=Dict(), features_exact=false, component_field=nothing) -&gt; Bool
 </code></pre>
 <p><code>has_any_time_series</code> is the existence probe over the same filters: true iff <code>list_metadata</code> with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
-marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a <strong>subset</strong> match
-here, unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content
-hash. A <code>features</code> filter still stays on indexes: the requested set is probed as an exact set by
-hash first (one covering seek when the caller passes the complete feature set), with an indexed
-per-feature fallback for genuinely partial lists.</p>
+marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a <strong>subset</strong> match by
+default, unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by
+content hash — and which are this function with <code>features_exact=true</code>. A subset <code>features</code> filter
+still stays on indexes: the requested set is probed as an exact set by hash first (one covering seek
+when the caller passes the complete feature set), with an indexed per-feature fallback for genuinely
+partial lists.</p>
 <p>The two matching rules are the thing to keep straight when a parent package resolves user queries:
 the exact-identity <code>has_time_series</code> forms must be given the <strong>complete</strong> feature map or they miss,
 while the list/filter forms accept a partial one and may return several rows — deciding what more

@@ -2930,9 +2930,9 @@ Release (see <a href="explanation/../guides/julia.html#install">Integrate with J
 <p>The model was shaped to drop into InfrastructureSystems.jl: owners are identified by integer
 component identifiers (<code>i64</code>), owner categories map to <code>Component</code> / <code>SupplementalAttribute</code>, and
 features accept string values so InfrastructureSystems.jl's feature dictionaries round-trip
-unchanged. The FFI exposes attribute-based accessors (<code>infrastore_store_has_by_attrs</code>,
-<code>infrastore_store_remove_by_ids</code>), a whole-record metadata read
-(<code>infrastore_store_get_metadata_by_key</code>, reachable from attributes through
+unchanged. The FFI exposes an attribute-based existence probe (<code>infrastore_store_has_any_by_filter</code>)
+and removal (<code>infrastore_store_remove_by_ids</code>), a whole-record metadata read
+(<code>infrastore_store_get_metadata_by_id</code>, reachable from attributes through
 <code>infrastore_store_list_metadata</code>), and a hash-based array fetch
 (<code>infrastore_store_get_array_by_hash</code>) so an InfrastructureSystems.jl-side store can keep its own
 key objects and reach the array layer directly.</p>
@@ -3069,16 +3069,16 @@ the API speaks.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use std::path::Path;
-use infrastore_core::{create_store, open_store};
+use infrastore_core::Store;
 
 // In-memory (tests, scratch work): no filesystem I/O.
-let mut store = create_store(None, true)?;
+let mut store = Store::create(None, true)?;
 
 // On disk: writes system.h5 and system.h5.sqlite.
-let mut store = create_store(Some(Path::new("system.h5")), false)?;
+let mut store = Store::create(Some(Path::new("system.h5")), false)?;
 
 // Reopen later, read-only.
-let store = open_store(Path::new("system.h5"), /* read_only */ true)?;
+let store = Store::open(Path::new("system.h5"), /* read_only */ true)?;
 <span class="boring">}</span></code></pre></pre>
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -3627,10 +3627,10 @@ assert_eq!(updated, 1);
 <p><code>persist_to</code> writes the whole store to a new path — both halves of the artifact, <code>path</code> and
 <code>&lt;path&gt;.sqlite</code>, overwriting anything already there. It works for an on-disk store (it flushes and
 copies the pair) <em>and</em> for an in-memory store, which is how you materialize a scratch store built
-with <code>create_store(None, true)</code>:</p>
+with <code>Store::create(None, true)</code>:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>let mut store = create_store(None, true)?;   // in-memory
+</span>let mut store = Store::create(None, true)?;   // in-memory
 // ... add series ...
 store.persist_to(Path::new("system.h5"))?;   // writes system.h5 + system.h5.sqlite
 <span class="boring">}</span></code></pre></pre>
@@ -6963,10 +6963,9 @@ the selection past it.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="element-types"><a class="header" href="#element-types">Element Types</a></h1>
 <p>Every stored array carries an <strong><code>element_type</code></strong>: what its elements mean, and — for the composite
 kinds — how one timestep's values are laid out across the array's trailing dimensions.</p>
-<p>It is a first-class, store-owned concept, not a binding convention. A Julia <code>PiecewiseLinearData</code>, a
-Python list of <code>{"x": …, "y": …}</code> dicts, and a TypeScript <code>{x, y}[]</code> are all <code>piecewise_linear</code>
-here, so a consumer written in any of those languages can decode an array without knowing which
-language wrote it.</p>
+<p>It is a first-class, store-owned concept, not a binding convention. A Julia <code>PiecewiseLinearData</code>
+and a Python list of <code>{"x": …, "y": …}</code> dicts are both <code>piecewise_linear</code> here, so a consumer
+written in either language can decode an array without knowing which language wrote it.</p>
 <p><code>element_type</code> <strong>replaces</strong> a separate physical <code>dtype</code> column: the dtype of the stored bytes is
 derived from it. <code>TypedArray</code> still carries a <code>dtype</code>, because it describes bytes; the element type
 lives on the association metadata and on the write API, where interpretation belongs.</p>
@@ -7067,10 +7066,6 @@ and without it those are refused, naming the remedy. The one series no declarati
 empty <code>tuple(N,f64)</code>, whose arity lives in rows it does not have.</p>
 </li>
 <li>
-<p><strong>TypeScript</strong> — <code>@infrastore/codec</code>, which decodes a gRPC response's <code>value_bytes</code> + <code>shape</code> +
-<code>element_type</code> directly into plottable values.</p>
-</li>
-<li>
 <p><strong>Julia</strong> — <code>InfraStore.encode_element_values</code> / <code>decode_element_values</code>, over the value types
 <code>LinearFunction</code>, <code>QuadraticFunction</code>, <code>PiecewiseLinear</code> and <code>PiecewiseStep</code>. Decode takes a
 <code>types</code> keyword, so a consumer with its own domain types — InfrastructureSystems.jl's
@@ -7096,10 +7091,11 @@ directions extend differently, because they start from different things:</p>
 "numbers to store as they are", and it answers by asking whether those three methods exist — so
 opting a type in is exactly defining them, with nothing to register.</p>
 <p><code>conformance/element_type_vectors.json</code> at the repo root pins encoded bytes against expected decoded
-values for every element type, static and forecast. It is generated from <code>infrastore-core</code>'s
-<code>codec::conformance</code> vectors and read by every binding's codec tests, so all four implementations
-are held to one definition of the encodings rather than to each other. Regenerate it with:</p>
-<pre><code class="language-bash">UPDATE_CONFORMANCE_VECTORS=1 cargo test -p infrastore-core conformance
+values for every element type, static and forecast. It is generated by <code>infrastore-core</code>'s
+<code>tests/element_type_conformance.rs</code> and read by the Python and Julia codec tests, so every
+implementation is held to one definition of the encodings rather than to each other. Regenerate it
+with:</p>
+<pre><code class="language-bash">UPDATE_CONFORMANCE_VECTORS=1 cargo test -p infrastore-core --test element_type_conformance
 </code></pre>
 <p>A binding may reject what it cannot represent — the grammar allows <code>tuple(4,i32)</code>, which the Julia
 binding does not map — but the store accepts the full grammar. A binding's <em>codec</em> is the other way
@@ -7114,7 +7110,7 @@ offsets array instead of zero padding) can land behind this boundary without tou
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use infrastore_core::{
-    create_store, open_store, Store, BulkAdd, TimeSeriesId, KeyIdentity,
+    Store, BulkAdd, TimeSeriesId, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, Period,
@@ -7141,42 +7137,49 @@ always <code>Period</code>. Instants (<code>DateTime&lt;Utc&gt;</code>) remain c
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub fn create_store(path: Option&lt;&amp;Path&gt;, in_memory: bool) -&gt; Result&lt;Store&gt;
-pub fn create_store_with_compression(
-    path: Option&lt;&amp;Path&gt;,
-    in_memory: bool,
-    compression: Compression,
-) -&gt; Result&lt;Store&gt;
-pub fn create_store_replacing(
-    path: &amp;Path,
-    compression: Compression,
-    catalog: CatalogMode,
-) -&gt; Result&lt;Store&gt;
-pub fn open_store(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
-pub fn open_store_copy(src: &amp;Path, dest: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
-pub fn open_store_without_catalog(path: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+</span>impl Store {
+    pub fn create(path: Option&lt;&amp;Path&gt;, in_memory: bool) -&gt; Result&lt;Store&gt;
+    pub fn create_with_compression(
+        path: Option&lt;&amp;Path&gt;,
+        in_memory: bool,
+        compression: Compression,
+    ) -&gt; Result&lt;Store&gt;
+    pub fn create_with_catalog(
+        path: Option&lt;&amp;Path&gt;,
+        in_memory: bool,
+        compression: Compression,
+        catalog: CatalogMode,
+    ) -&gt; Result&lt;Store&gt;
+    pub fn create_replacing(
+        path: &amp;Path,
+        compression: Compression,
+        catalog: CatalogMode,
+    ) -&gt; Result&lt;Store&gt;
+    pub fn open(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
+    pub fn open_with_catalog(path: &amp;Path, read_only: bool, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+    pub fn open_copy(src: &amp;Path, dest: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+    pub fn open_without_catalog(path: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+}
 <span class="boring">}</span></code></pre></pre>
 <ul>
-<li><code>create_store(None, true)</code> — in-memory store, no filesystem I/O.</li>
-<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata). <strong>Fails
+<li><code>Store::create(None, true)</code> — in-memory store, no filesystem I/O.</li>
+<li><code>Store::create(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata). <strong>Fails
 with <a href="reference/rust-api.html#errors"><code>StoreExists</code></a> if either half is already there</strong>; see
 <a href="reference/../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a> for why
 creating over an existing store is refused rather than allowed to truncate it.</li>
-<li><code>create_store_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
-<li><code>create_store_replacing(...)</code> — discards any artifact already at <code>path</code>, both halves plus the
+<li><code>Store::create_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
+<li><code>Store::create_replacing(...)</code> — discards any artifact already at <code>path</code>, both halves plus the
 catalog's <code>-wal</code>/<code>-shm</code> sidecars, then creates. Destructive and not atomic: an interrupted call
 can leave neither the old store nor the new one.</li>
-<li><code>open_store(path, read_only)</code> — opens an existing pair. <code>read_only = true</code> rejects all writes.</li>
-<li><code>open_store_copy(src, dest, catalog)</code> — copies both halves to <code>dest</code> and opens the copy
+<li><code>Store::open(path, read_only)</code> — opens an existing pair. <code>read_only = true</code> rejects all writes.</li>
+<li><code>Store::open_copy(src, dest, catalog)</code> — copies both halves to <code>dest</code> and opens the copy
 read-write, leaving <code>src</code> untouched. The safe way to load a store you intend to change: mutating
 an artifact in place is unrecoverable if interrupted, since HDF5 has no journal.</li>
-<li><code>open_store_without_catalog(path, catalog)</code> — opens the array half of an artifact whose catalog is
-<strong>absent</strong> and mints an empty one, returning a writable store that holds every array and no rows.
-The way in to a store shipped as arrays plus an OpenAPI document; see
+<li><code>Store::open_without_catalog(path, catalog)</code> — opens the array half of an artifact whose catalog
+is <strong>absent</strong> and mints an empty one, returning a writable store that holds every array and no
+rows. The way in to a store shipped as arrays plus an OpenAPI document; see
 <a href="reference/rust-api.html#restoring-a-catalog-from-a-document">restoring a catalog from a document</a>.</li>
 </ul>
-<p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::create_replacing</code> / <code>Store::open</code> /
-<code>Store::open_copy</code> / <code>Store::open_without_catalog</code> are the inherent-method equivalents.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub enum Compression {
@@ -7184,7 +7187,7 @@ The way in to a store shipped as arrays plus an OpenAPI document; see
     Deflate { level: u8, shuffle: bool }, // level 0–9
 }
 <span class="boring">}</span></code></pre></pre>
-<p><code>create_store</code> uses <code>Compression::default()</code> (DEFLATE level 3 + shuffle). The policy is persisted
+<p><code>Store::create</code> uses <code>Compression::default()</code> (DEFLATE level 3 + shuffle). The policy is persisted
 and restored when the store is reopened for appends, applies only to on-disk stores, and never
 changes how data is read back — see the <a href="reference/../explanation/storage-model.html">storage model</a>.</p>
 <h2 id="store"><a class="header" href="#store"><code>Store</code></a></h2>
@@ -8827,7 +8830,7 @@ pub enum TimeSeriesError {
     /// legal; exactly one stamped is not. `"none"` renders a missing stamp.
     MismatchedArtifact { h5: String, sqlite: String },
     /// A store already exists where one was about to be created. See
-    /// [`create_store`](#constructors).
+    /// [`Store::create`](#constructors).
     StoreExists { path: String },
     /// The artifact is already open in this process, in any mode. One handle
     /// per artifact per process; drop it before opening another. Surfaces as
@@ -8913,13 +8916,14 @@ crate root — import it (and the backends) from the <code>storage</code> module
 }
 <span class="boring">}</span></code></pre></pre>
 <h2 id="hashing"><a class="header" href="#hashing">Hashing</a></h2>
-<p>In the <code>hash</code> module (<code>infrastore_core::hash</code>). <code>array_hash</code> and <code>hash_hex</code> are also re-exported at
-the crate root; <code>features_hash</code> is only reachable through the module.</p>
+<p>In the <code>hash</code> module (<code>infrastore_core::hash</code>). <code>array_hash</code>, <code>hash_hex</code>, and <code>hash_from_hex</code> are
+also re-exported at the crate root; <code>features_hash</code> is only reachable through the module.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub fn array_hash(data: &amp;TypedArray) -&gt; [u8; 32];   // domain: dtype tag + shape + typed bytes
 pub fn features_hash(features: &amp;Features) -&gt; [u8; 32];
 pub fn hash_hex(hash: &amp;[u8; 32]) -&gt; String;
+pub fn hash_from_hex(s: &amp;str) -&gt; Option&lt;[u8; 32]&gt;;  // inverse; None unless exactly 64 hex digits
 <span class="boring">}</span></code></pre></pre>
 <p>These define the cross-language content-addressing contract; see
 <a href="reference/../explanation/content-addressing.html">Content Addressing</a>.</p>
@@ -9214,6 +9218,7 @@ def list_metadata(
     resolution: timedelta | str | None = None,
     interval: timedelta | str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
+    features_exact: bool = False,          # `features` as the whole set, not a subset
 ) -&gt; list[dict]: ...
 # `component_field` selects every series that varies that field on its owner. A
 # series that declares none matches no value, so it cannot select those rows.
@@ -9869,6 +9874,7 @@ for forecasts. Both share the lifecycle: build → inspect the layout once → <
     initial_timestamp: datetime | None = None,        # select one grid, dropping
     length: int | None = None,                        # the series not on it
     features: dict[str, int | float | bool | str] | None = None,
+    features_exact: bool = False,          # `features` as the whole set, not a subset
 ) -&gt; StaticReader: ...
 def static_read(self, reader: StaticReader, when: datetime) -&gt; None: ...
 
@@ -9884,6 +9890,7 @@ def build_forecast_reader(
     name_glob: str | None = None,
     component_field: str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
+    features_exact: bool = False,          # `features` as the whole set, not a subset
 ) -&gt; ForecastReader: ...
 def forecast_read(self, reader: ForecastReader, when: datetime) -&gt; None: ...
 </code></pre>
@@ -10229,7 +10236,7 @@ directly.</p>
 <pre><code class="language-python">def export_time_series_associations_openapi(
     self, *, owner_id=None, owner_category=None, owner_type=None,
     time_series_type=None, name=None, name_glob=None, component_field=None,
-    resolution=None, interval=None, features=None,
+    resolution=None, interval=None, features=None, features_exact=False,
 ) -&gt; str: ...
 def import_time_series_associations_openapi(self, json: str) -&gt; int: ...
 def export_supplemental_attribute_associations_openapi(self) -&gt; str: ...
@@ -11034,7 +11041,7 @@ are partitioned into <code>(dtype, element_shape)</code> groups, and each group'
                     window_start=nothing, window_length=nothing,
                     time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, name_glob=nothing,
-                    features=Dict(), component_field=nothing,
+                    features=Dict(), features_exact=false, component_field=nothing,
                     initial_timestamp=nothing, length=nothing) -&gt; StaticReader
 
 static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
@@ -11113,7 +11120,7 @@ forecasts must share one window timeline (<code>initial_timestamp</code> + <code
 <code>InvalidParameterError</code>.</p>
 <pre><code class="language-julia">build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
-                      name_glob=nothing, features=Dict(),
+                      name_glob=nothing, features=Dict(), features_exact=false,
                       component_field=nothing) -&gt; ForecastReader
 
 forecast_timeline(reader)  -&gt; ForecastTimeline
@@ -11210,7 +11217,7 @@ close!(store) -&gt; Nothing
 </code></pre>
 <pre><code class="language-julia">list_metadata(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
               name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
-              features=nothing, component_field=nothing,
+              features=nothing, features_exact=false, component_field=nothing,
               zoneless=nothing) -&gt; Vector{TimeSeriesMetadata}
 </code></pre>
 <p><code>list_metadata</code> is the package's one <strong>identify</strong> entry point: it returns a full
@@ -11241,15 +11248,16 @@ instants. The constructive remedy when a bulk read or a reader refuses a selecti
 </ul>
 <pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
                     name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
-                    features=Dict(), component_field=nothing) -&gt; Bool
+                    features=Dict(), features_exact=false, component_field=nothing) -&gt; Bool
 </code></pre>
 <p><code>has_any_time_series</code> is the existence probe over the same filters: true iff <code>list_metadata</code> with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
-marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a <strong>subset</strong> match
-here, unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content
-hash. A <code>features</code> filter still stays on indexes: the requested set is probed as an exact set by
-hash first (one covering seek when the caller passes the complete feature set), with an indexed
-per-feature fallback for genuinely partial lists.</p>
+marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a <strong>subset</strong> match by
+default, unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by
+content hash — and which are this function with <code>features_exact=true</code>. A subset <code>features</code> filter
+still stays on indexes: the requested set is probed as an exact set by hash first (one covering seek
+when the caller passes the complete feature set), with an indexed per-feature fallback for genuinely
+partial lists.</p>
 <p>The two matching rules are the thing to keep straight when a parent package resolves user queries:
 the exact-identity <code>has_time_series</code> forms must be given the <strong>complete</strong> feature map or they miss,
 while the list/filter forms accept a partial one and may return several rows — deciding what more
@@ -11789,10 +11797,16 @@ void    infrastore_buffer_free_u64(uint64_t *ptr, uint64_t len);
 </code></pre>
 <h2 id="singletimeseries-3"><a class="header" href="#singletimeseries-3">SingleTimeSeries</a></h2>
 <p><strong>There is no key on this ABI.</strong> A series is addressed by its catalog association <code>id</code>, an <code>int64_t</code>
-that every write reports through <code>out_id</code> and that <code>infrastore_store_list_metadata</code> carries on every
-row. Reads take that id and come back through the shared bulk-result handle, so one decoding path
-serves the single and bulk reads alike; see <a href="reference/c-abi.html#bulk-reads">Bulk Reads</a>.</p>
-<pre><code class="language-c">int32_t infrastore_store_add_single(struct InfraStore *handle,
+that every write reports through <code>infrastore_store_add_batch</code>'s <code>out_ids</code> and that
+<code>infrastore_store_list_metadata</code> carries on every row. Reads take that id and come back through the
+shared bulk-result handle, so one decoding path serves the single and bulk reads alike; see
+<a href="reference/c-abi.html#bulk-reads">Bulk Reads</a>.</p>
+<p><strong>Writes go through a batch.</strong> There is one write path on this ABI: build a batch with
+<code>infrastore_batch_new</code>, append to it, then commit it with <code>infrastore_store_add_batch</code>, which hands
+back one id per item in batch order. A single add is a one-item batch, which costs one extra call
+and keeps a second, near-identical set of per-type entry points off the surface. See
+<a href="reference/c-abi.html#batch-writes">Batch Writes</a>.</p>
+<pre><code class="language-c">int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                             int64_t owner_id, const char *owner_type,
                             int32_t owner_category,           /* 0=Component, 1=SupplementalAttribute */
                             const char *name,
@@ -11806,8 +11820,7 @@ serves the single and bulk reads alike; see <a href="reference/c-abi.html#bulk-r
                             const char *quantity_kind,        /* optional */
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                            const char *component_field,      /* optional: e.g. "max_active_power" */
-                            int64_t *out_id);                 /* optional (NULL skips): the id filed under */
+                            const char *component_field);     /* optional: e.g. "max_active_power" */
 
 /* All-or-nothing removal by catalog association id: an id naming no row returns
    INFRASTORE_ERR_NOT_FOUND and removes nothing. A repeated id is removed, and
@@ -11828,7 +11841,7 @@ int32_t infrastore_store_association_exists(const struct InfraStore *handle,
                              int64_t association_id, bool *out_present);
 </code></pre>
 <h2 id="nonsequentialtimeseries-3"><a class="header" href="#nonsequentialtimeseries-3">NonSequentialTimeSeries</a></h2>
-<p><code>infrastore_store_add_non_sequential</code> takes an explicit <code>int64_t</code> Unix-millisecond timestamp array
+<p><code>infrastore_batch_add_non_sequential</code> takes an explicit <code>int64_t</code> Unix-millisecond timestamp array
 alongside the typed data buffer. It is read like every other type — by id, through
 <code>infrastore_store_read_by_id</code> and then <code>infrastore_bulk_result_get_non_sequential</code>, which returns
 owned timestamp, shape, and raw-byte buffers (free with <code>infrastore_buffer_free_i64</code>,
@@ -11839,7 +11852,7 @@ N-dimensional per-step element shape). <code>out_application_data</code> is the 
 payload, returned as an owned C string of its full length (NULL when unset; free with
 <code>infrastore_string_free</code>). Earlier revisions copied it into a caller-sized buffer, which invited
 silent truncation.</p>
-<pre><code class="language-c">int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
+<pre><code class="language-c">int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                     int64_t owner_id, const char *owner_type,
                                     int32_t owner_category, const char *name,
                                     const int64_t *timestamps_unix_ms, uint64_t timestamps_len,
@@ -11850,17 +11863,14 @@ silent truncation.</p>
                                     const char *units,
                                     const char *quantity_kind, const char *unit_system,
                                     const char *time_reference,
-                                    const char *component_field,
-                                    int64_t *out_id);                 /* optional (NULL skips) */
+                                    const char *component_field);
 </code></pre>
 <h2 id="persistenttimeseries-3"><a class="header" href="#persistenttimeseries-3">PersistentTimeSeries</a></h2>
-<p><code>infrastore_store_add_persistent</code> takes <strong>exactly</strong> the argument list of
-<code>infrastore_store_add_non_sequential</code> above — the same <code>int64_t</code> Unix-millisecond vector, the same
-owned buffers, the same ownership and free rules, the same optional <code>out_id</code>. The two types carry
-the same payload; <code>timestamps</code> is the breakpoint vector, and what differs is what a read <em>between</em>
-those instants means.</p>
-<pre><code class="language-c">int32_t infrastore_store_add_persistent(struct InfraStore *handle, /* ...as add_non_sequential... */);
-int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch, /* ...sans handle/out_id... */);
+<p><code>infrastore_batch_add_persistent</code> takes <strong>exactly</strong> the argument list of
+<code>infrastore_batch_add_non_sequential</code> above — the same <code>int64_t</code> Unix-millisecond vector, the same
+owned buffers, the same ownership and free rules. The two types carry the same payload; <code>timestamps</code>
+is the breakpoint vector, and what differs is what a read <em>between</em> those instants means.</p>
+<pre><code class="language-c">int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch, /* ...as add_non_sequential... */);
 int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHandle *result, uint64_t index, /* ...as _non_sequential... */);
 </code></pre>
 <p>It is read like every other type — by id, through <code>infrastore_store_read_by_id</code> /
@@ -11875,32 +11885,14 @@ value at the caller's start.</p>
 <a href="reference/../explanation/time-series-types.html#persistenttimeseries">time-series types</a>.</p>
 <h2 id="attribute-based-existence"><a class="header" href="#attribute-based-existence">Attribute-Based Existence</a></h2>
 <p>An existence probe stays attribute-addressed: it is answered off the catalog indexes without
-hydrating a row, so routing it through an id lookup would cost more than the question. A
-<code>NULL</code>/empty <code>resolution</code> means unset.</p>
-<pre><code class="language-c">int32_t infrastore_store_has_by_attrs(const struct InfraStore *handle,
-                              int64_t owner_id, int32_t owner_category, const char *name,
-                              const char *resolution, const char *features_json, bool *out_present);
-
-/* Name-less existence query: true iff owner_id has any series, optionally
-   filtered to a single ts_type (use_type selects whether ts_type applies). */
-int32_t infrastore_store_has_for_owner(const struct InfraStore *handle,
-                               int64_t owner_id, int32_t owner_category,
-                               int32_t ts_type, bool use_type, bool *out_present);
-
-/* Filter-based existence probe: true iff any association matches the filter —
-   the same all-optional, independent predicates as infrastore_store_list_metadata
-   (features_json is a subset match), answered off the catalog indexes without
-   hydrating rows — except a non-empty features_json, whose subset match falls
-   back to a full listing internally. Distinct from infrastore_store_has_typed,
-   which matches one exact identity (feature set compared by content hash)
-   and stays on the index path. */
+hydrating a row, so routing it through an id lookup would cost more than the question. There is one
+of them, taking the <a href="reference/c-abi.html#the-filter-record">filter record</a> every other filter-taking export takes.</p>
+<p>Set <code>features_exact</code> to compare <code>features_json</code> as the row's whole feature set — that is a single
+content-hash comparison. The default subset match adds an indexed probe per requested feature.
+Neither hydrates a row, but a hot loop testing a complete feature set wants the exact form.</p>
+<pre><code class="language-c">/* True iff any association matches the filter. A NULL filter matches everything. */
 int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
-                                   bool has_owner, int64_t owner_id,
-                                   bool has_owner_category, int32_t owner_category,
-                                   bool has_time_series_type, int32_t time_series_type,
-                                   const char *name, const char *name_glob,  /* GLOB pattern; NULL = unset */
-                                   const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
-                                   const char *features_json, const char *component_field, int32_t zoneless,
+                                   const struct InfraStoreFilter *filter,
                                    bool *out_present);
 
 int32_t infrastore_store_get_array_by_hash(const struct InfraStore *handle, const uint8_t *data_hash,
@@ -11951,20 +11943,19 @@ discriminant — <code>0 = SingleTimeSeries</code>, <code>1 = NonSequentialTimeS
 <code>6 = PersistentTimeSeries</code>. The ABI keeps its own mapping, deliberately identical to the storage
 codes. As a filter it is read per <a href="reference/c-abi.html#type-filters">Type filters</a> below. Forecast values are
 dtype-generic raw little-endian byte buffers with explicit dimensions — the same <code>element_type</code>,
-<code>ndims</code>, <code>dims_ptr</code>, <code>data_ptr</code>, <code>data_byte_len</code> convention as the static add functions (see the
+<code>ndims</code>, <code>dims_ptr</code>, <code>data_ptr</code>, <code>data_byte_len</code> convention as the static batch adds (see the
 <a href="reference/../explanation/time-series-types.html#forecasts">data model</a> for the conventional shapes); the store
 records the windowing parameters in metadata and does not interpret the layout. A
 <code>DeterministicSingleTimeSeries</code> (<code>3</code>) is read like any other forecast but cannot be written through
-<code>infrastore_store_add_forecast</code> — it is derived via <code>infrastore_store_transform_single_time_series</code>.</p>
-<p>The C ABI keeps these per-type add functions as low-level transport (the higher-level bindings layer
-the generic <code>add_time_series</code> over them). <code>infrastore_store_add_forecast</code> accepts only <code>ts_type</code>
-<code>2 = Deterministic</code> or <code>5 = Scenarios</code>; <code>infrastore_store_add_probabilistic</code> adds the percentile
-vector for <code>Probabilistic</code>. <code>DeterministicSingleTimeSeries</code> (<code>3</code>) is <strong>not</strong> addable through
-<code>infrastore_store_add_forecast</code> — it errors and directs you to
+<code>infrastore_batch_add_forecast</code> — it is derived via <code>infrastore_store_transform_single_time_series</code>.</p>
+<p>Forecast writes go through a batch like every other write. <code>infrastore_batch_add_forecast</code> accepts
+only <code>ts_type</code> <code>2 = Deterministic</code> or <code>5 = Scenarios</code>; <code>infrastore_batch_add_probabilistic</code> adds the
+percentile vector for <code>Probabilistic</code>. <code>DeterministicSingleTimeSeries</code> (<code>3</code>) is <strong>not</strong> addable
+through <code>infrastore_batch_add_forecast</code> — it errors and directs you to
 <code>infrastore_store_transform_single_time_series</code>, which derives a <code>DeterministicSingleTimeSeries</code>
 from every stored <code>SingleTimeSeries</code> (sharing the backing array) and writes the number transformed
 to <code>*out_count</code>:</p>
-<pre><code class="language-c">int32_t infrastore_store_add_forecast(struct InfraStore *handle,
+<pre><code class="language-c">int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                               int64_t owner_id, const char *owner_type, int32_t owner_category,
                               const char *name, int32_t ts_type,
                               int64_t initial_ts_unix_ms,
@@ -11977,11 +11968,10 @@ to <code>*out_count</code>:</p>
                               const char *features_json, const char *units,
                               const char *quantity_kind,        /* optional */
                               const char *unit_system,          /* optional: "natural_units" | "component_base" */
-                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                              const char *component_field,      /* optional: e.g. "max_active_power" */
-                              int64_t *out_id);                 /* optional (NULL skips) */
+                              const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
+                              const char *component_field);     /* optional: e.g. "max_active_power" */
 
-int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
+int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                    int64_t owner_id, const char *owner_type,
                                    int32_t owner_category, const char *name,
                                    int64_t initial_ts_unix_ms,
@@ -11989,15 +11979,14 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    uint64_t count,
                                    const double *percentiles_ptr, uint64_t percentiles_len,
                                    const char *element_type,
-                              uint64_t ndims, const uint64_t *dims_ptr,
+                                   uint64_t ndims, const uint64_t *dims_ptr,
                                    const uint8_t *data_ptr, uint64_t data_byte_len,
                                    const char *application_data,     /* optional */
                                    const char *features_json, const char *units,
                                    const char *quantity_kind,        /* optional */
                                    const char *unit_system,          /* optional: "natural_units" | "component_base" */
-                            const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                                   const char *component_field,      /* optional: e.g. "max_active_power" */
-                                   int64_t *out_id);                 /* optional (NULL skips) */
+                                   const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
+                                   const char *component_field);     /* optional: e.g. "max_active_power" */
 
 int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                               const char *horizon, const char *interval,  /* ISO-8601 */
@@ -12062,13 +12051,6 @@ ISO-8601 strings with <code>infrastore_string_free</code>.</p>
 <p>Forecast metadata is read with the same <code>infrastore_store_get_metadata_by_id</code> as everything else.
 The returned row carries the windowing parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>), the content
 hash, and the <code>percentiles</code> of a <code>Probabilistic</code>, without decoding the array.</p>
-<pre><code class="language-c">int32_t infrastore_store_has_typed(const struct InfraStore *handle,
-                           int64_t owner_id, int32_t owner_category, const char *name,
-                           int32_t ts_type,
-                           const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
-                           const char *features_json,
-                           bool *out_present);
-</code></pre>
 <p><code>infrastore_store_copy_time_series</code> copies one association onto another owner (optionally under a
 new name). Arrays are content-addressed, so only a new association row is written — no array data is
 duplicated, and the stored type is preserved (a <code>DeterministicSingleTimeSeries</code> stays one rather
@@ -12134,13 +12116,7 @@ groups; each group's values are one dense <code>[num_columns, *element_shape]</c
 column <code>j</code> is the key from <code>infrastore_static_reader_group_key(reader, group_idx, j, …)</code>.</p>
 <pre><code class="language-c">int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                      int32_t time_series_type,
-                                     bool has_owner, int64_t owner_id,
-                                     bool has_owner_category, int32_t owner_category,
-                                     const char *name, const char *name_glob,
-                                     const char *resolution,
-                                     const char *features_json, const char *component_field, int32_t zoneless,
-                                     bool has_initial_timestamp, int64_t initial_timestamp_ms,
-                                     bool has_length, uint64_t length,
+                                     const struct InfraStoreFilter *filter,
                                      bool has_window_start, int64_t window_start_ms,
                                      bool window_start_zoneless,
                                      bool has_window_length, uint64_t window_length,
@@ -12179,15 +12155,17 @@ would move the dates. <code>window_start_zoneless</code> carries how the caller 
 convention as the ranged reads' bounds: the wire form is Unix milliseconds either way, and the flag
 is what tells a wall clock from an instant. The window belongs to <code>SingleTimeSeries</code> alone, and
 <code>has_window_length</code> without <code>has_window_start</code> is an error.</p>
-<p><code>has_initial_timestamp</code> / <code>has_length</code> are something else: the <strong>grid filter</strong>, which every
-filter-taking export now carries (<code>infrastore_store_list_metadata</code>, <code>list_names</code>,
-<code>list_owner_types</code>, <code>has_any_by_filter</code>, <code>remove_by_filter</code>,
-<code>export_time_series_associations_openapi</code>, and both reader builders). They match only the series
-already on that grid, so the ones that are not never become columns — where a window sweeps a named
-span across whatever matched. Use the window when the ragged series should all take part, the filter
-when they should not; they compose. The filter carries no spelling flag because it selects rather
-than reads: a grid no row is on is an empty result, not an error.</p>
-<p><code>time_series_type</code> picks the three shapes a reader can take. For <code>SingleTimeSeries</code> (<code>0</code>),
+<p>The filter record's <code>has_initial_timestamp</code> / <code>has_length</code> are something else: the <strong>grid filter</strong>,
+which every filter-taking export carries. They match only the series already on that grid, so the
+ones that are not never become columns — where a window sweeps a named span across whatever matched.
+Use the window when the ragged series should all take part, the filter when they should not; they
+compose. The filter carries no spelling flag because it selects rather than reads: a grid no row is
+on is an empty result, not an error.</p>
+<p><code>time_series_type</code> is the reader's own argument rather than the filter's — a reader is built for one
+type, so a record that also sets <code>has_time_series_type</code> must name the same type or the build is
+<code>INFRASTORE_ERR_INVALID_PARAMETER</code> — and picks the three shapes a reader can take. The rest of the
+record is <code>infrastore_store_list_metadata</code>'s in full; a static series stores no <code>interval</code>, so a
+filter that sets one matches nothing on a static reader. For <code>SingleTimeSeries</code> (<code>0</code>), the filter's
 <code>resolution</code> must be a non-empty ISO-8601 period — one resolution per reader — and all matched
 series must share one grid (<code>initial_timestamp</code> + <code>length</code>). For <code>NonSequentialTimeSeries</code> (<code>1</code>),
 <code>resolution</code> must be <strong>null</strong> (an irregular series has none) and all matched series must instead
@@ -12217,12 +12195,8 @@ terms.</p>
 timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>). Each entry's window is a little-endian buffer
 of its <code>*_entry_info</code> shape.</p>
 <pre><code class="language-c">int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
-                                       bool has_owner, int64_t owner_id,
-                                       bool has_owner_category, int32_t owner_category,
                                        int32_t time_series_type,
-                                       const char *name, const char *name_glob,
-                                       const char *resolution,
-                                       const char *features_json, const char *component_field, int32_t zoneless,
+                                       const struct InfraStoreFilter *filter,
                                        struct InfraStoreForecastReaderHandle **out_reader);
 
 int32_t infrastore_forecast_reader_timeline(const struct InfraStoreForecastReaderHandle *reader,
@@ -12263,21 +12237,24 @@ timestamp. <code>infrastore_forecast_reader_num_slots</code> is that physical re
 <code>infrastore_forecast_reader_entry_slot</code> gives the 0-based slot backing each entry (entries that
 share data report the same slot) — group entries by slot to also decode each unique window only
 once.</p>
-<h2 id="bulk-adds-1"><a class="header" href="#bulk-adds-1">Bulk Adds</a></h2>
+<h2 id="batch-writes"><a class="header" href="#batch-writes">Batch Writes</a></h2>
+<p><strong>A batch is the only write path on this ABI.</strong> There are no per-type store-level add functions: a
+single add is a one-item batch, which costs one extra call and keeps a second, near-identical set of
+entry points off the surface.</p>
 <p>A batch accumulates add requests client-side (no store I/O); <code>infrastore_store_add_batch</code> commits
 them all in <strong>one</strong> metadata transaction, which is much faster than per-item adds when ingesting
 many series. It is also the fast HDF5 write path: same-shaped <code>SingleTimeSeries</code> are packed into
 batch-sized datasets so the timestamp-major chunks are filled whole rather than a column at a time.
-The <code>infrastore_batch_add_*</code> functions take the same arguments as their <code>infrastore_store_add_*</code>
-counterparts minus the store handle and <code>out_id</code>; data buffers are copied into the batch, so they
-only need to stay valid for the call. The submit is all-or-nothing and drains the batch in either
-case (on error nothing was committed and the batch is left empty). On success the caller owns the id
-array and frees it with <code>infrastore_buffer_free_i64(*out_ids, *out_len)</code>. The batch handle itself is
-reusable after submit and must eventually be released with <code>infrastore_batch_free</code>.</p>
+Data buffers are copied into the batch, so they only need to stay valid for the
+<code>infrastore_batch_add_*</code> call. The submit is all-or-nothing and drains the batch in either case (on
+error nothing was committed and the batch is left empty). On success <code>*out_ids</code> holds one id per
+item, in batch order; the caller owns that array and frees it with
+<code>infrastore_buffer_free_i64(*out_ids, *out_len)</code>. The batch handle itself is reusable after submit
+and must eventually be released with <code>infrastore_batch_free</code>.</p>
 <pre><code class="language-c">struct InfraStoreBatch *infrastore_batch_new(void);
 void            infrastore_batch_free(struct InfraStoreBatch *batch);
 
-int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch, /* infrastore_store_add_single args sans handle/out_id */ ...);
+int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch, ...);
 int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch, ...);
 int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch, ...);
 int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch, ...);       /* 2=Deterministic, 5=Scenarios */
@@ -12444,24 +12421,46 @@ int32_t infrastore_store_replace_owner(struct InfraStore *handle,
    — the address every read and removal takes). A row carries no
    timestamp vector: an irregular series' time axis is the one part of a row that
    costs a read per row, so a listing omits it and a caller that needs it reads
-   the series. The filters are independent; with none set the whole store is
-   listed. `interval` (ISO-8601; NULL = unset) matches forecasts only — static
-   rows carry no interval. `name_glob` (NULL = unset) is a SQLite GLOB pattern
-   over the name (`*`/`?`, case-sensitive) and is ANDed with `name` rather than
-   replacing it. `component_field` (NULL = unset) matches the owning
-   component's field exactly and case-sensitively; a row that declares none
-   matches no value. The JSON comes back as an *owned* allocation through
-   out_json (free with infrastore_string_free), with out_len its byte length —
-   NOT probe-then-fetch, because a listing's size scales with the catalog and
-   probing would run the query and serialize the rows twice. */
+   the series. See the filter record below; a NULL filter lists the whole store.
+   The JSON comes back as an *owned* allocation through out_json (free with
+   infrastore_string_free), with out_len its byte length — NOT probe-then-fetch,
+   because a listing's size scales with the catalog and probing would run the
+   query and serialize the rows twice. */
 int32_t infrastore_store_list_metadata(const struct InfraStore *handle,
-                           bool has_owner, int64_t owner_id,
-                           bool has_owner_category, int32_t owner_category,
-                           bool has_time_series_type, int32_t time_series_type,
-                           const char *name, const char *name_glob,
-                           const char *resolution, const char *interval,
-                           const char *features_json, const char *component_field, int32_t zoneless,
+                           const struct InfraStoreFilter *filter,
                            char **out_json, uint64_t *out_len);
+</code></pre>
+<h3 id="the-filter-record"><a class="header" href="#the-filter-record">The filter record</a></h3>
+<p>Every filter-taking export — <code>infrastore_store_list_metadata</code>, <code>list_names</code>, <code>list_owner_types</code>,
+<code>has_any_by_filter</code>, <code>remove_by_filter</code>, <code>export_time_series_associations_openapi</code>, and both reader
+builders — takes the catalog filter as one <code>const struct InfraStoreFilter *</code> rather than as
+positional arguments.</p>
+<p><strong>A NULL pointer, and equally an all-zero record, is the empty filter: it matches everything.</strong> So a
+caller writes <code>InfraStoreFilter f = {0};</code> and sets only the fields it cares about. The predicates
+are independent and ANDed. The record borrows its strings — they must outlive the call, and nothing
+in it is freed.</p>
+<p><strong>The layout is part of the ABI.</strong> The record buys one filter parser and no churn across the eight
+call sites when a predicate is added; it does not make the ABI forward-compatible. A caller compiled
+against an older header allocates the older <code>sizeof(InfraStoreFilter)</code>, so appending a field is a
+breaking change like any other — rebuild against the regenerated header.</p>
+<pre><code class="language-c">typedef struct InfraStoreFilter {
+  bool has_owner_id;         int64_t owner_id;
+  bool has_owner_category;   int32_t owner_category;   /* 0=Component, 1=SupplementalAttribute */
+  bool has_time_series_type; int32_t time_series_type;
+  const char *name;             /* NULL = unset */
+  const char *name_glob;        /* SQLite GLOB over the name (`*`/`?`, case-sensitive), ANDed
+                                   with `name` rather than replacing it */
+  const char *resolution;       /* ISO-8601 */
+  const char *interval;         /* ISO-8601; matches forecasts only — static rows carry none */
+  const char *features_json;    /* JSON object; int, float, bool or string values */
+  bool features_exact;          /* compare `features_json` as the row's whole feature set
+                                   (content hash) rather than a subset it must contain;
+                                   with `features_json` NULL, only feature-less rows match */
+  const char *component_field;  /* exact, case-sensitive; a row declaring none matches no value */
+  bool has_zoneless;         bool zoneless;            /* which timestamp-spelling group */
+  bool has_initial_timestamp; int64_t initial_timestamp_ms;
+  bool has_length;           uint64_t length;
+} InfraStoreFilter;
 </code></pre>
 <p>Every row carries the hex <code>data_hash</code> of the array it resolves to, and rows that share a stored
 array share it — so grouping a listing by <code>data_hash</code> discovers which time series share their
@@ -12709,17 +12708,12 @@ convention.</p>
 <pre><code class="language-c">/* Export time_series_associations matching the filter as a sorted OpenAPI-row
    JSON array. Each row's uri and data_hash are the hex-encoded content hash
    the store already has for that row -- never a caller-supplied locator.
-   Filters match infrastore_store_list_metadata. Returns the JSON through out_json
-   as an OWNED allocation, freed with infrastore_string_free.
+   Takes the same filter record as infrastore_store_list_metadata. Returns the
+   JSON through out_json as an OWNED allocation, freed with infrastore_string_free.
    PersistentTimeSeries rows are omitted -- the wire contract has no schema for
    the type -- and a filter naming it is INFRASTORE_ERR_INVALID_PARAMETER. */
 int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
-                                                          bool has_owner, int64_t owner_id,
-                                                          bool has_owner_category, int32_t owner_category,
-                                                          bool has_time_series_type, int32_t time_series_type,
-                                                          const char *name, const char *resolution,
-                                                          const char *interval, const char *features_json,
-                                                          const char *component_field, int32_t zoneless,
+                                                          const struct InfraStoreFilter *filter,
                                                           char **out_json, uint64_t *out_len);
 
 /* Bulk-ingest a JSON array of time-series association OpenAPI rows in one

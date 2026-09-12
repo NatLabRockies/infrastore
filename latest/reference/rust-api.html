@@ -189,7 +189,7 @@
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use infrastore_core::{
-    create_store, open_store, Store, BulkAdd, TimeSeriesId, KeyIdentity,
+    Store, BulkAdd, TimeSeriesId, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, PersistentTimeSeries,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, Period,
@@ -216,42 +216,49 @@ always <code>Period</code>. Instants (<code>DateTime&lt;Utc&gt;</code>) remain c
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub fn create_store(path: Option&lt;&amp;Path&gt;, in_memory: bool) -&gt; Result&lt;Store&gt;
-pub fn create_store_with_compression(
-    path: Option&lt;&amp;Path&gt;,
-    in_memory: bool,
-    compression: Compression,
-) -&gt; Result&lt;Store&gt;
-pub fn create_store_replacing(
-    path: &amp;Path,
-    compression: Compression,
-    catalog: CatalogMode,
-) -&gt; Result&lt;Store&gt;
-pub fn open_store(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
-pub fn open_store_copy(src: &amp;Path, dest: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
-pub fn open_store_without_catalog(path: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+</span>impl Store {
+    pub fn create(path: Option&lt;&amp;Path&gt;, in_memory: bool) -&gt; Result&lt;Store&gt;
+    pub fn create_with_compression(
+        path: Option&lt;&amp;Path&gt;,
+        in_memory: bool,
+        compression: Compression,
+    ) -&gt; Result&lt;Store&gt;
+    pub fn create_with_catalog(
+        path: Option&lt;&amp;Path&gt;,
+        in_memory: bool,
+        compression: Compression,
+        catalog: CatalogMode,
+    ) -&gt; Result&lt;Store&gt;
+    pub fn create_replacing(
+        path: &amp;Path,
+        compression: Compression,
+        catalog: CatalogMode,
+    ) -&gt; Result&lt;Store&gt;
+    pub fn open(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
+    pub fn open_with_catalog(path: &amp;Path, read_only: bool, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+    pub fn open_copy(src: &amp;Path, dest: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+    pub fn open_without_catalog(path: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
+}
 <span class="boring">}</span></code></pre></pre>
 <ul>
-<li><code>create_store(None, true)</code> — in-memory store, no filesystem I/O.</li>
-<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata). <strong>Fails
+<li><code>Store::create(None, true)</code> — in-memory store, no filesystem I/O.</li>
+<li><code>Store::create(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata). <strong>Fails
 with <a href="#errors"><code>StoreExists</code></a> if either half is already there</strong>; see
 <a href="../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a> for why
 creating over an existing store is refused rather than allowed to truncate it.</li>
-<li><code>create_store_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
-<li><code>create_store_replacing(...)</code> — discards any artifact already at <code>path</code>, both halves plus the
+<li><code>Store::create_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
+<li><code>Store::create_replacing(...)</code> — discards any artifact already at <code>path</code>, both halves plus the
 catalog's <code>-wal</code>/<code>-shm</code> sidecars, then creates. Destructive and not atomic: an interrupted call
 can leave neither the old store nor the new one.</li>
-<li><code>open_store(path, read_only)</code> — opens an existing pair. <code>read_only = true</code> rejects all writes.</li>
-<li><code>open_store_copy(src, dest, catalog)</code> — copies both halves to <code>dest</code> and opens the copy
+<li><code>Store::open(path, read_only)</code> — opens an existing pair. <code>read_only = true</code> rejects all writes.</li>
+<li><code>Store::open_copy(src, dest, catalog)</code> — copies both halves to <code>dest</code> and opens the copy
 read-write, leaving <code>src</code> untouched. The safe way to load a store you intend to change: mutating
 an artifact in place is unrecoverable if interrupted, since HDF5 has no journal.</li>
-<li><code>open_store_without_catalog(path, catalog)</code> — opens the array half of an artifact whose catalog is
-<strong>absent</strong> and mints an empty one, returning a writable store that holds every array and no rows.
-The way in to a store shipped as arrays plus an OpenAPI document; see
+<li><code>Store::open_without_catalog(path, catalog)</code> — opens the array half of an artifact whose catalog
+is <strong>absent</strong> and mints an empty one, returning a writable store that holds every array and no
+rows. The way in to a store shipped as arrays plus an OpenAPI document; see
 <a href="#restoring-a-catalog-from-a-document">restoring a catalog from a document</a>.</li>
 </ul>
-<p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::create_replacing</code> / <code>Store::open</code> /
-<code>Store::open_copy</code> / <code>Store::open_without_catalog</code> are the inherent-method equivalents.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub enum Compression {
@@ -259,7 +266,7 @@ The way in to a store shipped as arrays plus an OpenAPI document; see
     Deflate { level: u8, shuffle: bool }, // level 0–9
 }
 <span class="boring">}</span></code></pre></pre>
-<p><code>create_store</code> uses <code>Compression::default()</code> (DEFLATE level 3 + shuffle). The policy is persisted
+<p><code>Store::create</code> uses <code>Compression::default()</code> (DEFLATE level 3 + shuffle). The policy is persisted
 and restored when the store is reopened for appends, applies only to on-disk stores, and never
 changes how data is read back — see the <a href="../explanation/storage-model.html">storage model</a>.</p>
 <h2 id="store"><a class="header" href="#store"><code>Store</code></a></h2>
@@ -1902,7 +1909,7 @@ pub enum TimeSeriesError {
     /// legal; exactly one stamped is not. `"none"` renders a missing stamp.
     MismatchedArtifact { h5: String, sqlite: String },
     /// A store already exists where one was about to be created. See
-    /// [`create_store`](#constructors).
+    /// [`Store::create`](#constructors).
     StoreExists { path: String },
     /// The artifact is already open in this process, in any mode. One handle
     /// per artifact per process; drop it before opening another. Surfaces as
@@ -1988,13 +1995,14 @@ crate root — import it (and the backends) from the <code>storage</code> module
 }
 <span class="boring">}</span></code></pre></pre>
 <h2 id="hashing"><a class="header" href="#hashing">Hashing</a></h2>
-<p>In the <code>hash</code> module (<code>infrastore_core::hash</code>). <code>array_hash</code> and <code>hash_hex</code> are also re-exported at
-the crate root; <code>features_hash</code> is only reachable through the module.</p>
+<p>In the <code>hash</code> module (<code>infrastore_core::hash</code>). <code>array_hash</code>, <code>hash_hex</code>, and <code>hash_from_hex</code> are
+also re-exported at the crate root; <code>features_hash</code> is only reachable through the module.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub fn array_hash(data: &amp;TypedArray) -&gt; [u8; 32];   // domain: dtype tag + shape + typed bytes
 pub fn features_hash(features: &amp;Features) -&gt; [u8; 32];
 pub fn hash_hex(hash: &amp;[u8; 32]) -&gt; String;
+pub fn hash_from_hex(s: &amp;str) -&gt; Option&lt;[u8; 32]&gt;;  // inverse; None unless exactly 64 hex digits
 <span class="boring">}</span></code></pre></pre>
 <p>These define the cross-language content-addressing contract; see
 <a href="../explanation/content-addressing.html">Content Addressing</a>.</p>

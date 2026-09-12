@@ -271,9 +271,9 @@ Release (see <a href="../guides/julia.html#install">Integrate with Julia</a>). S
 <p>The model was shaped to drop into InfrastructureSystems.jl: owners are identified by integer
 component identifiers (<code>i64</code>), owner categories map to <code>Component</code> / <code>SupplementalAttribute</code>, and
 features accept string values so InfrastructureSystems.jl's feature dictionaries round-trip
-unchanged. The FFI exposes attribute-based accessors (<code>infrastore_store_has_by_attrs</code>,
-<code>infrastore_store_remove_by_ids</code>), a whole-record metadata read
-(<code>infrastore_store_get_metadata_by_key</code>, reachable from attributes through
+unchanged. The FFI exposes an attribute-based existence probe (<code>infrastore_store_has_any_by_filter</code>)
+and removal (<code>infrastore_store_remove_by_ids</code>), a whole-record metadata read
+(<code>infrastore_store_get_metadata_by_id</code>, reachable from attributes through
 <code>infrastore_store_list_metadata</code>), and a hash-based array fetch
 (<code>infrastore_store_get_array_by_hash</code>) so an InfrastructureSystems.jl-side store can keep its own
 key objects and reach the array layer directly.</p>
