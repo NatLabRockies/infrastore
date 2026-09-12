@@ -10,37 +10,14 @@ whose data is still present.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import numpy as np
 import pytest
 
 from infrastore import (
     InvalidParameterError,
-    OwnerCategory,
     ReadOnlyStoreError,
-    SingleTimeSeries,
     Store,
 )
-
-
-def series(base: float) -> SingleTimeSeries:
-    """A length-8 hourly series offset by ``base``, so equal bases share an array."""
-    return SingleTimeSeries(
-        initial_timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        resolution=timedelta(hours=1),
-        data=np.arange(8, dtype=float) + base,
-        name="load",
-    )
-
-
-def add(store: Store, owner_id: int, base: float):
-    return store.add_time_series(
-        owner_id=owner_id,
-        owner_type="Generator",
-        owner_category=OwnerCategory.Component,
-        time_series=series(base),
-    )
+from conftest import add
 
 
 def test_rollback_undoes_a_mixed_add_and_remove_span():

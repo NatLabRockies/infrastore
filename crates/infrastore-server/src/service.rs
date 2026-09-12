@@ -5,15 +5,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use infrastore_core::{
-    ListFilter, OwnerCategory, Period, Store, TimeRange, TimeSeriesError, TimeSeriesId,
-    TimeSeriesType,
+    ListFilter, Store, TimeRange, TimeSeriesError, TimeSeriesId, TimeSeriesType,
 };
-
-/// Parse an ISO-8601 period from a request, mapping failures to an
-/// `invalid_argument` status.
-fn parse_period(s: &str) -> Result<Period, Status> {
-    Period::from_iso8601(s).map_err(|e| Status::invalid_argument(e.to_string()))
-}
 
 /// Build a [`ListFilter`] from a `ListMetadataReq`, mapping bad enums / periods to
 /// `invalid_argument`. Shared by `ListTimeSeries` and `ListKeys`.
@@ -23,17 +16,13 @@ fn filter_from_list_req(req: ListMetadataReq) -> Result<ListFilter, Status> {
         filter = filter.owner_id(id);
     }
     if let Some(c) = req.owner_category {
-        let pb_c = pb::OwnerCategory::try_from(c)
-            .map_err(|_| Status::invalid_argument(format!("unknown owner_category {c}")))?;
-        filter = filter.owner_category(OwnerCategory::from(pb_c));
+        filter = filter.owner_category(owner_category_from_i32(c).map_err(map_convert_err)?);
     }
     if let Some(t) = req.owner_type {
         filter = filter.owner_type(t);
     }
     if let Some(t) = req.time_series_type {
-        let pb_t = pb::TimeSeriesType::try_from(t)
-            .map_err(|_| Status::invalid_argument(format!("unknown time_series_type {t}")))?;
-        filter = filter.time_series_type(TimeSeriesType::from(pb_t));
+        filter = filter.time_series_type(ts_type_from_i32(t).map_err(map_convert_err)?);
     }
     if let Some(name) = req.name {
         filter = filter.name(name);
@@ -45,10 +34,10 @@ fn filter_from_list_req(req: ListMetadataReq) -> Result<ListFilter, Status> {
         filter = filter.zoneless(zoneless);
     }
     if let Some(iso) = req.resolution {
-        filter = filter.resolution(parse_period(&iso)?);
+        filter = filter.resolution(period_from_iso(&iso).map_err(map_convert_err)?);
     }
     if let Some(iso) = req.interval {
-        filter = filter.interval(parse_period(&iso)?);
+        filter = filter.interval(period_from_iso(&iso).map_err(map_convert_err)?);
     }
     if let Some(f) = req.features {
         filter = filter.features(features_from_pb(f).map_err(map_convert_err)?);
@@ -90,8 +79,9 @@ fn parse_time_range(
     }
 }
 use infrastore_proto::convert::{
-    features_from_pb, forecast_summary_row_to_pb, metadata_to_pb, requested_type_from_pb,
-    static_summary_row_to_pb, time_series_data_to_read_resp,
+    features_from_pb, forecast_summary_row_to_pb, metadata_to_pb, opt_period,
+    owner_category_from_i32, period_from_iso, static_summary_row_to_pb,
+    time_series_data_to_read_resp, ts_type_from_i32,
 };
 use infrastore_proto::pb::{
     self, AssociationExistsReq, AssociationExistsResp, CheckStaticConsistencyReq,
@@ -162,9 +152,6 @@ fn map_err(e: TimeSeriesError) -> Status {
         TimeSeriesError::IntegrityError(m) => Status::data_loss(m),
         TimeSeriesError::ReadOnlyStore => Status::failed_precondition("store is read-only"),
         TimeSeriesError::ConnectionError(m) => Status::unavailable(m),
-        TimeSeriesError::IncompatibleForecast => {
-            Status::failed_precondition("incompatible forecast")
-        }
         e @ TimeSeriesError::IncompatibleFormat { .. } => {
             Status::failed_precondition(e.to_string())
         }
@@ -179,6 +166,10 @@ fn map_err(e: TimeSeriesError) -> Status {
 
 fn map_convert_err(e: infrastore_proto::convert::ConvertError) -> Status {
     Status::invalid_argument(e.to_string())
+}
+
+fn opt_ts_type(t: Option<i32>) -> Result<Option<TimeSeriesType>, Status> {
+    t.map(ts_type_from_i32).transpose().map_err(map_convert_err)
 }
 
 #[tonic::async_trait]
@@ -261,14 +252,7 @@ impl CatalogStoreSvc for CatalogStoreService {
         request: Request<GetResolutionsReq>,
     ) -> Result<Response<GetResolutionsResp>, Status> {
         let req = request.into_inner();
-        let ts_type = match req.time_series_type {
-            Some(t) => Some(TimeSeriesType::from(
-                pb::TimeSeriesType::try_from(t).map_err(|_| {
-                    Status::invalid_argument(format!("unknown time_series_type {t}"))
-                })?,
-            )),
-            None => None,
-        };
+        let ts_type = opt_ts_type(req.time_series_type)?;
         let store = self.store.lock().await;
         let durations = store.get_resolutions(ts_type).map_err(map_err)?;
         Ok(Response::new(GetResolutionsResp {
@@ -294,8 +278,8 @@ impl CatalogStoreSvc for CatalogStoreService {
         request: Request<GetForecastParametersReq>,
     ) -> Result<Response<GetForecastParametersResp>, Status> {
         let req = request.into_inner();
-        let resolution = req.resolution.as_deref().map(parse_period).transpose()?;
-        let interval = req.interval.as_deref().map(parse_period).transpose()?;
+        let resolution = opt_period(req.resolution.as_deref()).map_err(map_convert_err)?;
+        let interval = opt_period(req.interval.as_deref()).map_err(map_convert_err)?;
         let store = self.store.lock().await;
         let params = store
             .get_forecast_parameters(resolution, interval)
@@ -314,21 +298,15 @@ impl CatalogStoreSvc for CatalogStoreService {
         request: Request<HasAnyTimeSeriesReq>,
     ) -> Result<Response<HasAnyTimeSeriesResp>, Status> {
         let req = request.into_inner();
-        let owner_category = pb::OwnerCategory::try_from(req.owner_category)
-            .map_err(|_| {
-                Status::invalid_argument(format!("unknown owner_category {}", req.owner_category))
-            })
-            .map(OwnerCategory::from)?;
+        let owner_category =
+            owner_category_from_i32(req.owner_category).map_err(map_convert_err)?;
         let filter = infrastore_core::ListFilter {
             owner_id: Some(req.owner_id),
             owner_category: Some(owner_category),
             name: Some(req.name),
-            time_series_type: req
-                .time_series_type
-                .map(|t| requested_type_from_pb(t).map_err(map_convert_err))
-                .transpose()?,
-            resolution: req.resolution.as_deref().map(parse_period).transpose()?,
-            interval: req.interval.as_deref().map(parse_period).transpose()?,
+            time_series_type: opt_ts_type(req.time_series_type)?,
+            resolution: opt_period(req.resolution.as_deref()).map_err(map_convert_err)?,
+            interval: opt_period(req.interval.as_deref()).map_err(map_convert_err)?,
             features: Some(
                 features_from_pb(pb::Features {
                     entries: req.features,
@@ -434,20 +412,9 @@ impl CatalogStoreSvc for CatalogStoreService {
         request: Request<ListOwnerIdsReq>,
     ) -> Result<Response<ListOwnerIdsResp>, Status> {
         let req = request.into_inner();
-        let category = pb::OwnerCategory::try_from(req.owner_category)
-            .map_err(|_| {
-                Status::invalid_argument(format!("unknown owner_category {}", req.owner_category))
-            })
-            .map(OwnerCategory::from)?;
-        let ts_type = match req.time_series_type {
-            Some(t) => Some(TimeSeriesType::from(
-                pb::TimeSeriesType::try_from(t).map_err(|_| {
-                    Status::invalid_argument(format!("unknown time_series_type {t}"))
-                })?,
-            )),
-            None => None,
-        };
-        let resolution = req.resolution.as_deref().map(parse_period).transpose()?;
+        let category = owner_category_from_i32(req.owner_category).map_err(map_convert_err)?;
+        let ts_type = opt_ts_type(req.time_series_type)?;
+        let resolution = opt_period(req.resolution.as_deref()).map_err(map_convert_err)?;
         let store = self.store.lock().await;
         let ids = store
             .list_owner_ids(category, ts_type, resolution)
@@ -460,14 +427,7 @@ impl CatalogStoreSvc for CatalogStoreService {
         request: Request<GetIntervalsReq>,
     ) -> Result<Response<GetIntervalsResp>, Status> {
         let req = request.into_inner();
-        let ts_type = match req.time_series_type {
-            Some(t) => Some(TimeSeriesType::from(
-                pb::TimeSeriesType::try_from(t).map_err(|_| {
-                    Status::invalid_argument(format!("unknown time_series_type {t}"))
-                })?,
-            )),
-            None => None,
-        };
+        let ts_type = opt_ts_type(req.time_series_type)?;
         let store = self.store.lock().await;
         let intervals = store.get_intervals(ts_type).map_err(map_err)?;
         Ok(Response::new(GetIntervalsResp {
@@ -501,12 +461,8 @@ impl CatalogStoreSvc for CatalogStoreService {
         &self,
         request: Request<CheckStaticConsistencyReq>,
     ) -> Result<Response<CheckStaticConsistencyResp>, Status> {
-        let resolution = request
-            .into_inner()
-            .resolution
-            .as_deref()
-            .map(parse_period)
-            .transpose()?;
+        let resolution =
+            opt_period(request.into_inner().resolution.as_deref()).map_err(map_convert_err)?;
         let store = self.store.lock().await;
         let rows = store
             .check_static_consistency(resolution)

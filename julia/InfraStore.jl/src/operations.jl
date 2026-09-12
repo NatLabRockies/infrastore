@@ -568,9 +568,11 @@ function _bulk_single(
     end
 end
 
-# Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (carrying
-# `application_data` / `element_type` / `units`, as `_bulk_single` does).
-function _bulk_non_sequential(
+# Reconstruct one NonSequentialTimeSeries or PersistentTimeSeries (`T`) from a
+# bulk-read result slot (carrying `application_data` / `element_type` / `units`,
+# as `_bulk_single` does). The two types share one payload and one C reader.
+function _bulk_irregular(
+    T::Type{<:Union{NonSequentialTimeSeries, PersistentTimeSeries}},
     result::Ptr{Cvoid}, idx::Integer, name::AbstractString, raw::Bool,
     types::NamedTuple,
 )
@@ -589,7 +591,7 @@ function _bulk_non_sequential(
     out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
     out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
-        @ccall libinfrastore.infrastore_bulk_result_get_non_sequential(
+        @ccall libinfrastore.infrastore_bulk_result_get_irregular(
             result::Ptr{Cvoid},
             UInt64(idx)::UInt64,
             out_ts::Ref{Ptr{Int64}},
@@ -614,79 +616,7 @@ function _bulk_non_sequential(
         bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
         raw_data = _decode_array(bytes, out_dtype[], dims)
         element_type = _peek_cstr(out_element_type[])
-        return NonSequentialTimeSeries(
-            _from_unix_ms.(ts_ms), _read_values(raw_data, element_type, raw, types), name;
-            application_data=_peek_cstr(out_application_data[]),
-            element_type=element_type,
-            units=_peek_cstr(out_units[]),
-            quantity_kind=_peek_cstr(out_quantity_kind[]),
-            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
-            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
-            component_field=_peek_cstr(out_component_field[]),
-        )
-    finally
-        _free_i64(out_ts[], out_ts_len[])
-        _free_i64(out_shape[], out_shape_len[])
-        _free_u8(out_data[], out_data_len[])
-        _free_cstr(out_application_data[])
-        _free_cstr(out_element_type[])
-        _free_cstr(out_units[])
-        _free_cstr(out_quantity_kind[])
-        _free_cstr(out_unit_system[])
-        _free_cstr(out_time_reference[])
-        _free_cstr(out_component_field[])
-    end
-end
-
-# Reconstruct one PersistentTimeSeries from a bulk-read result slot. Identical
-# to `_bulk_non_sequential` above -- the two types have the same payload (carrying
-# `application_data` / `element_type` / `units`, as `_bulk_single` does), and the
-# same element-type decoding applies.
-function _bulk_persistent(
-    result::Ptr{Cvoid}, idx::Integer, name::AbstractString, raw::Bool,
-    types::NamedTuple,
-)
-    out_ts = Ref{Ptr{Int64}}(C_NULL)
-    out_ts_len = Ref{UInt64}(0)
-    out_dtype = Ref{Int32}(0)
-    out_shape = Ref{Ptr{Int64}}(C_NULL)
-    out_shape_len = Ref{UInt64}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL)
-    out_data_len = Ref{UInt64}(0)
-    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
-    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
-    out_units = Ref{Ptr{Cchar}}(C_NULL)
-    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
-    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
-    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
-    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
-    _check(
-        @ccall libinfrastore.infrastore_bulk_result_get_persistent(
-            result::Ptr{Cvoid},
-            UInt64(idx)::UInt64,
-            out_ts::Ref{Ptr{Int64}},
-            out_ts_len::Ref{UInt64},
-            out_dtype::Ref{Int32},
-            out_shape::Ref{Ptr{Int64}},
-            out_shape_len::Ref{UInt64},
-            out_data::Ref{Ptr{UInt8}},
-            out_data_len::Ref{UInt64},
-            out_application_data::Ref{Ptr{Cchar}},
-            out_element_type::Ref{Ptr{Cchar}},
-            out_units::Ref{Ptr{Cchar}},
-            out_quantity_kind::Ref{Ptr{Cchar}},
-            out_unit_system::Ref{Ptr{Cchar}},
-            out_time_reference::Ref{Ptr{Cchar}},
-            out_component_field::Ref{Ptr{Cchar}},
-        )::Int32
-    )
-    try
-        ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
-        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
-        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-        raw_data = _decode_array(bytes, out_dtype[], dims)
-        element_type = _peek_cstr(out_element_type[])
-        return PersistentTimeSeries(
+        return T(
             _from_unix_ms.(ts_ms), _read_values(raw_data, element_type, raw, types), name;
             application_data=_peek_cstr(out_application_data[]),
             element_type=element_type,
@@ -864,9 +794,9 @@ function _decode_bulk_result(
             out[i] = if t == INFRASTORE_TYPE_SINGLE
                 _bulk_single(result, i - 1, name, raw, types)
             elseif t == INFRASTORE_TYPE_NON_SEQUENTIAL
-                _bulk_non_sequential(result, i - 1, name, raw, types)
+                _bulk_irregular(NonSequentialTimeSeries, result, i - 1, name, raw, types)
             elseif t == INFRASTORE_TYPE_PERSISTENT
-                _bulk_persistent(result, i - 1, name, raw, types)
+                _bulk_irregular(PersistentTimeSeries, result, i - 1, name, raw, types)
             else
                 _bulk_forecast(result, i - 1, t, name, raw, types)
             end

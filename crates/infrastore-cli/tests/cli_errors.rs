@@ -1972,7 +1972,7 @@ fn verify_exits_one_on_a_corrupt_store() {
 
 #[test]
 fn verify_catches_a_catalog_that_points_at_a_missing_array() {
-    // This was FINDING F3 (TEST_COVERAGE_PLAN.md §9): `verify_integrity` used to
+    // `verify_integrity` used to
     // inspect only the HDF5 half, so a `data_hash` corrupted in the SQLite
     // catalog was invisible even though every read of that key failed. Verify is
     // now driven from the catalog — the only place an array's element typing is

@@ -11,7 +11,7 @@
 //! the project already uses for the same values.
 
 use infrastore_core::{
-    ElementType, FeatureValue, Features, OwnerCategory, TimeReference, TimeSeriesType, UnitSystem,
+    ElementType, Features, OwnerCategory, TimeReference, TimeSeriesType, UnitSystem,
 };
 
 /// Which of the six types the rows describe. Present on every file, and the one
@@ -122,19 +122,7 @@ pub fn encode_element_shape(shape: &[usize]) -> String {
 /// someone reading this column in DuckDB should see the value, not the
 /// discriminant that happens to carry it.
 pub fn encode_features(features: &Features) -> String {
-    let object: serde_json::Map<String, serde_json::Value> = features
-        .iter()
-        .map(|(k, v)| {
-            let value = match v {
-                FeatureValue::Int(i) => serde_json::Value::from(*i),
-                FeatureValue::Float(f) => serde_json::Value::from(*f),
-                FeatureValue::Bool(b) => serde_json::Value::from(*b),
-                FeatureValue::Str(s) => serde_json::Value::from(s.clone()),
-            };
-            (k.clone(), value)
-        })
-        .collect();
-    serde_json::Value::Object(object).to_string()
+    serde_json::Value::Object(infrastore_core::features_to_plain(features)).to_string()
 }
 
 /// Parse a `features` value back, inferring each value's kind from its JSON
@@ -146,25 +134,7 @@ pub fn decode_features(text: &str) -> Result<Features, String> {
     let object = value
         .as_object()
         .ok_or_else(|| format!("{FEATURES} must be a JSON object"))?;
-    let mut features = Features::new();
-    for (key, value) in object {
-        let feature = match value {
-            serde_json::Value::Bool(b) => FeatureValue::Bool(*b),
-            serde_json::Value::Number(n) => match (n.as_i64(), n.as_f64()) {
-                (Some(i), _) => FeatureValue::Int(i),
-                (None, Some(f)) => FeatureValue::Float(f),
-                (None, None) => return Err(format!("feature {key}: number out of range")),
-            },
-            serde_json::Value::String(s) => FeatureValue::Str(s.clone()),
-            _ => {
-                return Err(format!(
-                    "feature {key}: must be an int, float, bool, or string"
-                ));
-            }
-        };
-        features.insert(key.clone(), feature);
-    }
-    Ok(features)
+    infrastore_core::features_from_plain(object).map_err(|e| e.to_string())
 }
 
 /// Parse a `time_series_type` value back.

@@ -367,7 +367,7 @@ pub fn persist(
     dry_run: bool,
     format: Format,
 ) -> Result<(), String> {
-    let catalog = store_access::catalog_path(dest);
+    let catalog = infrastore_core::catalog_sqlite_path(dest);
     // Both halves are one artifact, so either one existing counts as "there is
     // something here to lose".
     let existing: Vec<&Path> = [dest, catalog.as_path()]

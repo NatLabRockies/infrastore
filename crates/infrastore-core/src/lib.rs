@@ -41,6 +41,7 @@ pub use metadata::{
     ForecastSummaryRow, ParentChildAssociation, ParentChildFilter, StaticSummaryRow,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
 };
+pub use openapi::{features_from_plain, features_to_plain};
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{

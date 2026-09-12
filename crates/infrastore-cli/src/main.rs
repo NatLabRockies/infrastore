@@ -245,51 +245,7 @@ struct Cli {
 enum Commands {
     /// Add time series from a descriptor JSON + CSV data, or from flags.
     #[command(after_help = help::ADD)]
-    Add {
-        /// Descriptor JSON describing the series (single object or array of
-        /// objects). `-` reads it from stdin.
-        #[arg(long)]
-        descriptor: Option<PathBuf>,
-        /// CSV data path. With --descriptor it overrides the descriptor's own
-        /// (single-series descriptors only); without one it starts an inline add.
-        #[arg(long)]
-        csv: Option<PathBuf>,
-        /// Parquet partition to load, repeatable: a file, a directory, or a
-        /// partition stem. A pair written by `export -f parquet` is
-        /// self-describing and needs no other flag; a foreign values file needs
-        /// at least --owner-id and --owner-type.
-        #[arg(long, value_name = "PATH")]
-        parquet: Vec<PathBuf>,
-        /// Waive the data_hash check on a --parquet load, for values edited in a
-        /// query engine without the hash being recomputed.
-        #[arg(long)]
-        no_checksum: bool,
-        #[command(flatten)]
-        inline: commands::add::InlineArgs,
-        /// Resolve every descriptor and print what would be written, without
-        /// opening the store.
-        #[arg(long)]
-        dry_run: bool,
-        /// Remove any series that already has one of these identities first.
-        #[arg(long)]
-        replace: bool,
-        /// Commit every N series instead of the whole load in one transaction.
-        #[arg(long, value_name = "N")]
-        batch_size: Option<usize>,
-        /// Print nothing but errors.
-        #[arg(long, short = 'q')]
-        quiet: bool,
-        /// Compression for a store created by this command: none, deflate, or
-        /// deflate:LEVEL (0-9). Errors if the store already exists.
-        #[arg(long)]
-        compression: Option<String>,
-        /// Disable byte-shuffle for deflate compression (only with --compression).
-        #[arg(long)]
-        no_shuffle: bool,
-        /// Where the SQLite catalog lives while the store is open.
-        #[arg(long, value_name = "MODE", default_value_t = store_access::CatalogChoice::Attached)]
-        catalog: store_access::CatalogChoice,
-    },
+    Add(commands::add::AddArgs),
     /// Create an empty store with an explicit compression and catalog policy.
     #[command(after_help = help::INIT)]
     Init {
@@ -333,103 +289,13 @@ enum Commands {
     },
     /// Read and display a single time series.
     #[command(after_help = help::GET)]
-    Get {
-        #[command(flatten)]
-        selector: SelectorArgs,
-        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
-        /// regular series' START inside a step selects that step, an irregular series
-        /// keeps only timestamps at or after START, and a forecast's START must be a
-        /// window boundary (only its END clips).
-        #[arg(long)]
-        time_range: Option<String>,
-        /// Max rows to show in table output (default 50).
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Show all rows in table output.
-        #[arg(long)]
-        full: bool,
-        /// Take the table's rows from the end of the series, not the start.
-        #[arg(long)]
-        tail: bool,
-        /// Keep only every Nth row, in every format (applied before --limit).
-        #[arg(long, value_name = "N")]
-        stride: Option<usize>,
-        /// Draw a terminal sparkline instead of the values.
-        #[arg(long)]
-        plot: bool,
-        /// Sparkline width in characters (defaults to the terminal width).
-        #[arg(long, value_name = "COLS")]
-        plot_width: Option<usize>,
-        /// Show only forecast window N.
-        #[arg(long, value_name = "N")]
-        window: Option<usize>,
-        /// Show only the forecast window issued at this timestamp.
-        #[arg(long, value_name = "TIMESTAMP")]
-        issue_time: Option<String>,
-    },
+    Get(commands::show::GetArgs),
     /// Render N series as N columns against one shared time axis.
     #[command(after_help = help::GRID)]
-    Grid {
-        #[command(flatten)]
-        selector: SelectorArgs,
-        /// Sweep this span instead of the grid the matched series share, so
-        /// SingleTimeSeries that start at different instants or run for different
-        /// lengths line up. Each column reads at an offset of its own; a series that
-        /// does not cover the span is an error naming it. RFC3339 or epoch-ms.
-        #[arg(long, value_name = "TIMESTAMP")]
-        window_start: Option<String>,
-        /// Timesteps to sweep from --window-start; without it, as far as every matched
-        /// series reaches.
-        #[arg(long, value_name = "N", requires = "window_start")]
-        window_length: Option<usize>,
-        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
-        /// regular series' START inside a step selects that step, an irregular series
-        /// keeps only timestamps at or after START, and a forecast's START must be a
-        /// window boundary (only its END clips). Filters the rows a reader already has;
-        /// --window-start decides which rows it has at all.
-        #[arg(long)]
-        time_range: Option<String>,
-        /// Max rows to show in table output (default 50).
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Show all rows in table output.
-        #[arg(long)]
-        full: bool,
-        /// How to name the columns.
-        #[arg(long, value_name = "MODE", default_value = "auto")]
-        label: commands::grid::ColumnLabel,
-    },
+    Grid(commands::grid::GridArgs),
     /// Draw a chart to a self-contained SVG or HTML file.
     #[command(after_help = help::PLOT)]
-    Plot {
-        #[command(flatten)]
-        selector: SelectorArgs,
-        /// Which view to draw.
-        #[arg(long, default_value = "line")]
-        kind: commands::plot::Kind,
-        /// Destination file (.svg or .html); `-` writes to stdout.
-        #[arg(long, default_value = "chart.svg")]
-        out: PathBuf,
-        /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
-        /// regular series' START inside a step selects that step, an irregular series
-        /// keeps only timestamps at or after START, and a forecast's START must be a
-        /// window boundary (only its END clips).
-        #[arg(long)]
-        time_range: Option<String>,
-        /// Chart title (defaults to the series name).
-        #[arg(long)]
-        title: Option<String>,
-        #[arg(long, default_value_t = 960.0)]
-        width: f64,
-        #[arg(long, default_value_t = 440.0)]
-        height: f64,
-        /// First forecast window to draw (fan, overlay).
-        #[arg(long, default_value_t = 0)]
-        window: usize,
-        /// How many forecast windows to overlay (overlay; default 8).
-        #[arg(long, value_name = "N")]
-        limit: Option<usize>,
-    },
+    Plot(commands::plot::PlotArgs),
     /// Metadata, content hash, HDF5 location, and stats for one series.
     #[command(after_help = help::INFO)]
     Info {
@@ -714,83 +580,16 @@ enum Commands {
     },
     /// Attach supplemental attributes to components.
     #[command(after_help = help::ATTACH)]
-    Attach {
-        #[arg(long)]
-        component_id: Option<i64>,
-        #[arg(long)]
-        component_type: Option<String>,
-        #[arg(long)]
-        attribute_id: Option<i64>,
-        #[arg(long)]
-        attribute_type: Option<String>,
-        /// Bulk import from a
-        /// `component_id,component_type,attribute_id,attribute_type` CSV.
-        #[arg(long)]
-        from: Option<PathBuf>,
-        /// Show what would be attached without changing the store.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Attach(commands::assoc::AttachArgs),
     /// Remove supplemental-attribute attachments matching the filter.
     #[command(after_help = help::DETACH)]
-    Detach {
-        #[arg(long)]
-        component_id: Option<i64>,
-        #[arg(long)]
-        component_type: Option<String>,
-        #[arg(long)]
-        attribute_id: Option<i64>,
-        #[arg(long)]
-        attribute_type: Option<String>,
-        /// Remove every attachment (required when no filter is given).
-        #[arg(long)]
-        all: bool,
-        /// Skip the interactive confirmation prompt.
-        #[arg(long)]
-        force: bool,
-        /// Show how many would be detached without changing the store.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Detach(commands::assoc::DetachArgs),
     /// Add directed parent -> child component links.
     #[command(after_help = help::LINK)]
-    Link {
-        #[arg(long)]
-        parent_id: Option<i64>,
-        #[arg(long)]
-        parent_type: Option<String>,
-        #[arg(long)]
-        child_id: Option<i64>,
-        #[arg(long)]
-        child_type: Option<String>,
-        /// Bulk import from a `parent_id,parent_type,child_id,child_type` CSV.
-        #[arg(long)]
-        from: Option<PathBuf>,
-        /// Show what would be linked without changing the store.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Link(commands::assoc::LinkArgs),
     /// Remove parent -> child links matching the filter.
     #[command(after_help = help::UNLINK)]
-    Unlink {
-        #[arg(long)]
-        parent_id: Option<i64>,
-        #[arg(long)]
-        parent_type: Option<String>,
-        #[arg(long)]
-        child_id: Option<i64>,
-        #[arg(long)]
-        child_type: Option<String>,
-        /// Remove every link (required when no filter is given).
-        #[arg(long)]
-        all: bool,
-        /// Skip the interactive confirmation prompt.
-        #[arg(long)]
-        force: bool,
-        /// Show how many would be removed without changing the store.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Unlink(commands::assoc::UnlinkArgs),
     /// Move a component's associations from one id to another.
     ///
     /// The association counterpart of `replace-owner`, which moves time series.
@@ -908,51 +707,16 @@ fn run(cli: &Cli) -> Result<(), String> {
         return Err("the parquet format is only available on `export`".to_string());
     }
     match &cli.command {
-        Commands::Add {
-            descriptor,
-            csv,
-            parquet,
-            no_checksum,
-            inline,
-            dry_run,
-            replace,
-            batch_size,
-            quiet,
-            compression,
-            no_shuffle,
-            catalog,
-        } => {
-            let compression = compression
-                .as_deref()
-                .map(|spec| parse::parse_compression(spec, !no_shuffle))
-                .transpose()?;
-            commands::add::run(
-                &require_store(cli)?,
-                &commands::add::Options {
-                    descriptor: descriptor.as_deref(),
-                    csv: csv.as_deref(),
-                    parquet,
-                    no_checksum: *no_checksum,
-                    inline,
-                    compression,
-                    catalog: *catalog,
-                    batch_size: *batch_size,
-                    replace: *replace,
-                    dry_run: *dry_run,
-                    quiet: *quiet,
-                    format: cli.format,
-                },
-            )
+        Commands::Add(args) => {
+            let compression = compression(args.compression.as_deref(), args.no_shuffle)?;
+            commands::add::run(&require_store(cli)?, args, compression, cli.format)
         }
         Commands::Init {
-            compression,
+            compression: spec,
             no_shuffle,
             catalog,
         } => {
-            let compression = compression
-                .as_deref()
-                .map(|spec| parse::parse_compression(spec, !no_shuffle))
-                .transpose()?;
+            let compression = compression(spec.as_deref(), *no_shuffle)?;
             commands::manage::init(&require_store(cli)?, compression, *catalog, cli.format)
         }
         Commands::Merge {
@@ -973,79 +737,9 @@ fn run(cli: &Cli) -> Result<(), String> {
             limit,
             wide,
         } => commands::show::list(&require_store(cli)?, selector, *limit, *wide, cli.format),
-        Commands::Get {
-            selector,
-            time_range,
-            limit,
-            full,
-            tail,
-            stride,
-            plot,
-            plot_width,
-            window,
-            issue_time,
-        } => commands::show::get(
-            &require_store(cli)?,
-            selector,
-            &commands::show::GetOptions {
-                time_range: time_range.as_deref(),
-                rows: commands::show::RowWindow {
-                    limit: *limit,
-                    full: *full,
-                    tail: *tail,
-                    stride: *stride,
-                },
-                plot: *plot,
-                plot_width: *plot_width,
-                window: *window,
-                issue_time: issue_time.as_deref(),
-            },
-            cli.format,
-        ),
-        Commands::Grid {
-            selector,
-            window_start,
-            window_length,
-            time_range,
-            limit,
-            full,
-            label,
-        } => commands::grid::run(
-            &require_store(cli)?,
-            selector,
-            window_start.as_deref(),
-            *window_length,
-            time_range.as_deref(),
-            *limit,
-            *full,
-            *label,
-            cli.format,
-        ),
-        Commands::Plot {
-            selector,
-            kind,
-            out,
-            time_range,
-            title,
-            width,
-            height,
-            window,
-            limit,
-        } => commands::plot::run(
-            &require_store(cli)?,
-            selector,
-            &commands::plot::Options {
-                kind: *kind,
-                out,
-                time_range: time_range.as_deref(),
-                title: title.as_deref(),
-                width: *width,
-                height: *height,
-                window: *window,
-                limit: *limit,
-                format: cli.format,
-            },
-        ),
+        Commands::Get(args) => commands::show::get(&require_store(cli)?, args, cli.format),
+        Commands::Grid(args) => commands::grid::run(&require_store(cli)?, args, cli.format),
+        Commands::Plot(args) => commands::plot::run(&require_store(cli)?, args, cli.format),
         Commands::Info { selector, no_stats } => {
             commands::show::info(&require_store(cli)?, selector, *no_stats, cli.format)
         }
@@ -1243,82 +937,10 @@ fn run(cli: &Cli) -> Result<(), String> {
             selector,
             all,
         } => commands::diff::run(&require_store(cli)?, against, selector, *all, cli.format),
-        Commands::Attach {
-            component_id,
-            component_type,
-            attribute_id,
-            attribute_type,
-            from,
-            dry_run,
-        } => commands::assoc::attach(
-            &require_store(cli)?,
-            &commands::assoc::AttachArgs {
-                component_id: *component_id,
-                component_type: component_type.as_deref(),
-                attribute_id: *attribute_id,
-                attribute_type: attribute_type.as_deref(),
-                from: from.as_deref(),
-                dry_run: *dry_run,
-                format: cli.format,
-            },
-        ),
-        Commands::Detach {
-            component_id,
-            component_type,
-            attribute_id,
-            attribute_type,
-            all,
-            force,
-            dry_run,
-        } => commands::assoc::detach(
-            &require_store(cli)?,
-            *component_id,
-            *attribute_id,
-            component_type.as_deref(),
-            attribute_type.as_deref(),
-            *all,
-            *force,
-            *dry_run,
-            cli.format,
-        ),
-        Commands::Link {
-            parent_id,
-            parent_type,
-            child_id,
-            child_type,
-            from,
-            dry_run,
-        } => commands::assoc::link(
-            &require_store(cli)?,
-            &commands::assoc::LinkArgs {
-                parent_id: *parent_id,
-                parent_type: parent_type.as_deref(),
-                child_id: *child_id,
-                child_type: child_type.as_deref(),
-                from: from.as_deref(),
-                dry_run: *dry_run,
-                format: cli.format,
-            },
-        ),
-        Commands::Unlink {
-            parent_id,
-            parent_type,
-            child_id,
-            child_type,
-            all,
-            force,
-            dry_run,
-        } => commands::assoc::unlink(
-            &require_store(cli)?,
-            *parent_id,
-            *child_id,
-            parent_type.as_deref(),
-            child_type.as_deref(),
-            *all,
-            *force,
-            *dry_run,
-            cli.format,
-        ),
+        Commands::Attach(args) => commands::assoc::attach(&require_store(cli)?, args, cli.format),
+        Commands::Detach(args) => commands::assoc::detach(&require_store(cli)?, args, cli.format),
+        Commands::Link(args) => commands::assoc::link(&require_store(cli)?, args, cli.format),
+        Commands::Unlink(args) => commands::assoc::unlink(&require_store(cli)?, args, cli.format),
         Commands::Reassign {
             old,
             new,
@@ -1336,6 +958,15 @@ fn run(cli: &Cli) -> Result<(), String> {
         ),
         Commands::Template { ts_type } => commands::manage::template(ts_type),
     }
+}
+
+/// `--compression` with `--no-shuffle` applied, for the commands that create a store.
+fn compression(
+    spec: Option<&str>,
+    no_shuffle: bool,
+) -> Result<Option<infrastore_core::Compression>, String> {
+    spec.map(|spec| parse::parse_compression(spec, !no_shuffle))
+        .transpose()
 }
 
 fn require_store(cli: &Cli) -> Result<PathBuf, String> {

@@ -607,21 +607,23 @@ pub(crate) fn check_dtype(hash: &[u8; 32], stored: Dtype, requested: Dtype) -> R
     Ok(())
 }
 
-/// The rows `range` of `array` (its first axis), as an array of the same
-/// dtype and element shape. Refuses a range outside the array.
-pub(crate) fn slice_rows(array: &TypedArray, range: Range<usize>) -> Result<TypedArray> {
-    let len = array.length();
+/// The slice `range` of `array` along `axis`, keeping every other dimension.
+/// Refuses a range outside the array.
+pub(crate) fn slice_axis(
+    array: &TypedArray,
+    axis: usize,
+    range: Range<usize>,
+) -> Result<TypedArray> {
+    let len = array.shape.get(axis).copied().unwrap_or(0);
     if range.start > range.end || range.end > len {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "slice {range:?} out of bounds for length {len}"
         )));
     }
-    let row_bytes = array.element_shape().iter().product::<usize>() * array.dtype.size();
-    let bytes = array.bytes[range.start * row_bytes..range.end * row_bytes].to_vec();
+    let mut bytes = Vec::new();
+    write_window_block(array, axis, range.start, range.len(), &mut bytes)?;
     let mut shape = array.shape.clone();
-    if let Some(first) = shape.first_mut() {
-        *first = range.end - range.start;
-    }
+    shape[axis] = range.len();
     Ok(TypedArray {
         dtype: array.dtype,
         shape,

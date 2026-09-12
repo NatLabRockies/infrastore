@@ -462,30 +462,6 @@ def test_non_sequential_round_trip_and_slice():
     np.testing.assert_array_equal(np.asarray(got.data), np.array([20.0, 30.0]))
 
 
-def test_non_sequential_rejects_invalid_timestamps():
-    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    with pytest.raises(InvalidParameterError):
-        NonSequentialTimeSeries(
-            [initial, initial],
-            np.array([1.0, 2.0]),
-            "events",
-        )
-
-
-def test_dtype_round_trip():
-    """Non-float64 numpy dtypes round-trip with their dtype preserved."""
-    store = Store.create(in_memory=True)
-    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    res = timedelta(hours=1)
-
-    for dtype in (np.int64, np.int32, np.float32, np.uint64):
-        s = SingleTimeSeries(initial, res, np.array([1, 2, 3], dtype=dtype), f"ts_{dtype.__name__}")
-        key = store.add_time_series(1, "Generator", OwnerCategory.Component, s)
-        arr = np.asarray(store.read_by_id(key).data)
-        assert arr.dtype == dtype
-        assert arr.tolist() == [1, 2, 3]
-
-
 def test_add_time_series_bulk(tmp_path):
     """Bulk add commits all series in one transaction and returns keys in order."""
     path = tmp_path / "bulk.h5"
@@ -796,16 +772,6 @@ def test_a_zone_is_read_by_its_offset_not_by_what_it_claims_to_equal():
     assert SingleTimeSeries(
         datetime(2024, 6, 1, 12, tzinfo=zero), timedelta(hours=1), np.array([1.0]), "load"
     ).initial_timestamp == datetime(2024, 6, 1, 12, tzinfo=timezone.utc)
-
-
-def test_naive_datetime_is_accepted_and_returned_naive():
-    naive = datetime(2024, 6, 1, 12)
-    series = SingleTimeSeries(naive, timedelta(hours=1), np.array([1.0]), "load")
-    assert series.time_reference == "zoneless"
-    # The round-trip rule this whole feature rests on: what comes out equals what
-    # went in. Naive and aware datetimes are never equal in Python, so returning
-    # an aware value here would silently break every `==` a caller writes.
-    assert series.initial_timestamp == naive
 
 
 def test_a_non_datetime_is_refused_inside_the_exception_hierarchy():

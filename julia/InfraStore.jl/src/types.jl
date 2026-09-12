@@ -23,12 +23,6 @@ const _DTYPE_BY_NAME = Dict{String, Type}(
 
 const _NAME_BY_DTYPE = Dict{Type, String}(v => k for (k, v) in _DTYPE_BY_NAME)
 
-function _dtype_for_name(name::AbstractString)
-    dtype = get(_DTYPE_BY_NAME, String(name), nothing)
-    dtype === nothing && throw(InvalidParameterError("unknown dtype $name"))
-    return dtype
-end
-
 # ---- Element types --------------------------------------------------------
 # `element_type` is the store's own vocabulary for what the elements mean: a
 # dtype spelling for plain numbers, else `tuple(N,dtype)` or one of the

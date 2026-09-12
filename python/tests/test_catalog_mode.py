@@ -8,27 +8,10 @@ volatile state — a crash loses that state anyway.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import numpy as np
 import pytest
 
-from infrastore import InvalidParameterError, OwnerCategory, SingleTimeSeries, Store
-
-
-def make_series(base: float = 100.0) -> SingleTimeSeries:
-    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    data = np.arange(24, dtype=np.float64) + base
-    return SingleTimeSeries(initial, timedelta(hours=1), data, "load")
-
-
-def add(store: Store, owner_id: int, base: float = 100.0) -> None:
-    store.add_time_series(
-        owner_id=owner_id,
-        owner_type="Generator",
-        owner_category=OwnerCategory.Component,
-        time_series=make_series(base),
-    )
+from infrastore import InvalidParameterError, OwnerCategory, Store
+from conftest import add
 
 
 def test_in_memory_catalog_writes_no_sidecar_until_persist(tmp_path):

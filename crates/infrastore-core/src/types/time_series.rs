@@ -197,6 +197,73 @@ impl FromStr for TimeSeriesType {
     }
 }
 
+/// The seven descriptor builders every series struct shares. `$timeline` names
+/// what the series' instants are called in the docs; `$field` is an example
+/// component field.
+macro_rules! descriptor_builders {
+    ($timeline:literal, $field:literal) => {
+        /// Declare the logical element type of the array. Validated on commit
+        /// against the array's dtype and per-step shape.
+        pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+            self.element_type = element_type;
+            self
+        }
+
+        /// Set the user-declared units label.
+        pub fn with_units(mut self, units: impl Into<String>) -> Self {
+            self.units = Some(units.into());
+            self
+        }
+
+        /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
+        pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+            self.quantity_kind = Some(quantity_kind.into());
+            self
+        }
+
+        /// Declare which unit basis the values are expressed in.
+        pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+            self.unit_system = Some(unit_system);
+            self
+        }
+
+        #[doc = concat!("Declare how this series' ", $timeline, " were spelled. Validated on commit")]
+        /// (a zone name's *shape* only — see [`TimeReference::validate`]).
+        pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
+            self.time_reference = Some(time_reference);
+            self
+        }
+
+        /// Name the component field these values vary over time
+        #[doc = concat!("(e.g. `\"", $field, "\"`).")]
+        pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+            self.component_field = Some(component_field.into());
+            self
+        }
+
+        /// Set the opaque application payload carried through to the metadata row.
+        pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+            self.application_data = Some(application_data.into());
+            self
+        }
+    };
+}
+
+/// One `match` over every [`TimeSeriesData`] variant, binding the inner series
+/// to `$s` and evaluating `$body` in each arm.
+macro_rules! each_variant {
+    ($data:expr, $s:ident => $body:expr) => {
+        match $data {
+            TimeSeriesData::SingleTimeSeries($s) => $body,
+            TimeSeriesData::NonSequentialTimeSeries($s) => $body,
+            TimeSeriesData::Deterministic($s) => $body,
+            TimeSeriesData::Probabilistic($s) => $body,
+            TimeSeriesData::Scenarios($s) => $body,
+            TimeSeriesData::PersistentTimeSeries($s) => $body,
+        }
+    };
+}
+
 /// A time series array at regular intervals.
 ///
 /// `data` is a [`TypedArray`]: its first dimension is time (`length`) and any
@@ -380,50 +447,7 @@ impl SingleTimeSeries {
         Ok(Self::new(timestamps[0], resolution, data, name))
     }
 
-    /// Declare the logical element type of the array. Validated on commit
-    /// against the array's dtype and per-step shape.
-    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = element_type;
-        self
-    }
-
-    /// Set the user-declared units label.
-    pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.units = Some(units.into());
-        self
-    }
-
-    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
-    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
-        self.quantity_kind = Some(quantity_kind.into());
-        self
-    }
-
-    /// Declare which unit basis the values are expressed in.
-    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
-        self.unit_system = Some(unit_system);
-        self
-    }
-
-    /// Declare how this series' timestamps were spelled. Validated on commit
-    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
-    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
-        self.time_reference = Some(time_reference);
-        self
-    }
-
-    /// Name the component field these values vary over time (e.g.
-    /// `"max_active_power"`).
-    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
-        self.component_field = Some(component_field.into());
-        self
-    }
-
-    /// Set the opaque application payload carried through to the metadata row.
-    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
-        self.application_data = Some(application_data.into());
-        self
-    }
+    descriptor_builders!("timestamps", "max_active_power");
 
     /// The timestamp at 0-based `index` — `initial_timestamp + index ·
     /// resolution`, calendar-aware for a [`Period::Months`] grid. Errors if
@@ -582,50 +606,7 @@ impl NonSequentialTimeSeries {
         Ok(Self::new(timestamps, data, name)?.with_element_type(element_type))
     }
 
-    /// Declare the logical element type of the array. Validated on commit
-    /// against the array's dtype and per-step shape.
-    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = element_type;
-        self
-    }
-
-    /// Set the user-declared units label.
-    pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.units = Some(units.into());
-        self
-    }
-
-    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
-    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
-        self.quantity_kind = Some(quantity_kind.into());
-        self
-    }
-
-    /// Declare which unit basis the values are expressed in.
-    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
-        self.unit_system = Some(unit_system);
-        self
-    }
-
-    /// Declare how this series' timestamps were spelled. Validated on commit
-    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
-    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
-        self.time_reference = Some(time_reference);
-        self
-    }
-
-    /// Name the component field these values vary over time (e.g.
-    /// `"max_active_power"`).
-    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
-        self.component_field = Some(component_field.into());
-        self
-    }
-
-    /// Set the opaque application payload carried through to the metadata row.
-    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
-        self.application_data = Some(application_data.into());
-        self
-    }
+    descriptor_builders!("timestamps", "max_active_power");
 }
 
 /// A sparse step function: breakpoints plus one value each, holding the last
@@ -851,50 +832,7 @@ impl PersistentTimeSeries {
 }
 
 impl PersistentTimeSeries {
-    /// Declare the logical element type of the array. Validated on commit
-    /// against the array's dtype and per-step shape.
-    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = element_type;
-        self
-    }
-
-    /// Set the user-declared units label.
-    pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.units = Some(units.into());
-        self
-    }
-
-    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
-    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
-        self.quantity_kind = Some(quantity_kind.into());
-        self
-    }
-
-    /// Declare which unit basis the values are expressed in.
-    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
-        self.unit_system = Some(unit_system);
-        self
-    }
-
-    /// Declare how this series' breakpoints were spelled. Validated on commit
-    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
-    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
-        self.time_reference = Some(time_reference);
-        self
-    }
-
-    /// Name the component field these values vary over time (e.g.
-    /// `"fuel_cost"`).
-    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
-        self.component_field = Some(component_field.into());
-        self
-    }
-
-    /// Set the opaque application payload carried through to the metadata row.
-    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
-        self.application_data = Some(application_data.into());
-        self
-    }
+    descriptor_builders!("breakpoints", "fuel_cost");
 }
 
 /// A deterministic forecast: one complete horizon array per count window.
@@ -1177,50 +1115,7 @@ impl Deterministic {
         .with_element_type(element_type))
     }
 
-    /// Declare the logical element type of the array. Validated on commit
-    /// against the array's dtype and per-step shape.
-    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = element_type;
-        self
-    }
-
-    /// Set the user-declared units label.
-    pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.units = Some(units.into());
-        self
-    }
-
-    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
-    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
-        self.quantity_kind = Some(quantity_kind.into());
-        self
-    }
-
-    /// Declare which unit basis the values are expressed in.
-    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
-        self.unit_system = Some(unit_system);
-        self
-    }
-
-    /// Declare how this series' timestamps were spelled. Validated on commit
-    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
-    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
-        self.time_reference = Some(time_reference);
-        self
-    }
-
-    /// Name the component field these values vary over time (e.g.
-    /// `"max_active_power"`).
-    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
-        self.component_field = Some(component_field.into());
-        self
-    }
-
-    /// Set the opaque application payload carried through to the metadata row.
-    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
-        self.application_data = Some(application_data.into());
-        self
-    }
+    descriptor_builders!("timestamps", "max_active_power");
 }
 
 impl Probabilistic {
@@ -1401,50 +1296,7 @@ impl Probabilistic {
         .with_element_type(element_type))
     }
 
-    /// Declare the logical element type of the array. Validated on commit
-    /// against the array's dtype and per-step shape.
-    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = element_type;
-        self
-    }
-
-    /// Set the user-declared units label.
-    pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.units = Some(units.into());
-        self
-    }
-
-    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
-    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
-        self.quantity_kind = Some(quantity_kind.into());
-        self
-    }
-
-    /// Declare which unit basis the values are expressed in.
-    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
-        self.unit_system = Some(unit_system);
-        self
-    }
-
-    /// Declare how this series' timestamps were spelled. Validated on commit
-    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
-    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
-        self.time_reference = Some(time_reference);
-        self
-    }
-
-    /// Name the component field these values vary over time (e.g.
-    /// `"max_active_power"`).
-    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
-        self.component_field = Some(component_field.into());
-        self
-    }
-
-    /// Set the opaque application payload carried through to the metadata row.
-    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
-        self.application_data = Some(application_data.into());
-        self
-    }
+    descriptor_builders!("timestamps", "max_active_power");
 }
 
 impl Scenarios {
@@ -1626,50 +1478,7 @@ impl Scenarios {
         .with_element_type(element_type))
     }
 
-    /// Declare the logical element type of the array. Validated on commit
-    /// against the array's dtype and per-step shape.
-    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = element_type;
-        self
-    }
-
-    /// Set the user-declared units label.
-    pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.units = Some(units.into());
-        self
-    }
-
-    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
-    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
-        self.quantity_kind = Some(quantity_kind.into());
-        self
-    }
-
-    /// Declare which unit basis the values are expressed in.
-    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
-        self.unit_system = Some(unit_system);
-        self
-    }
-
-    /// Declare how this series' timestamps were spelled. Validated on commit
-    /// (a zone name's *shape* only — see [`TimeReference::validate`]).
-    pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
-        self.time_reference = Some(time_reference);
-        self
-    }
-
-    /// Name the component field these values vary over time (e.g.
-    /// `"max_active_power"`).
-    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
-        self.component_field = Some(component_field.into());
-        self
-    }
-
-    /// Set the opaque application payload carried through to the metadata row.
-    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
-        self.application_data = Some(application_data.into());
-        self
-    }
+    descriptor_builders!("timestamps", "max_active_power");
 }
 
 /// The descriptive attributes a series carries alongside its array: everything
@@ -1737,26 +1546,12 @@ impl TimeSeriesData {
     }
 
     pub fn name(&self) -> &str {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => &s.name,
-            TimeSeriesData::NonSequentialTimeSeries(s) => &s.name,
-            TimeSeriesData::Deterministic(d) => &d.name,
-            TimeSeriesData::Probabilistic(p) => &p.name,
-            TimeSeriesData::Scenarios(s) => &s.name,
-            TimeSeriesData::PersistentTimeSeries(p) => &p.name,
-        }
+        each_variant!(self, s => &s.name)
     }
 
-    /// The stored array of the wrapped series.
-    fn array(&self) -> &TypedArray {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => &s.data,
-            TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
-            TimeSeriesData::Deterministic(d) => &d.data,
-            TimeSeriesData::Probabilistic(p) => &p.data,
-            TimeSeriesData::Scenarios(s) => &s.data,
-            TimeSeriesData::PersistentTimeSeries(p) => &p.data,
-        }
+    /// The stored array of the wrapped series, whatever its type.
+    pub fn array(&self) -> &TypedArray {
+        each_variant!(self, s => &s.data)
     }
 
     /// Decode the wrapped array into the per-timestep values its element type
@@ -1798,86 +1593,37 @@ impl TimeSeriesData {
     /// The element type of the wrapped series — always concrete, defaulting to
     /// plain scalars of the array's own dtype.
     pub fn element_type(&self) -> ElementType {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.element_type,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.element_type,
-            TimeSeriesData::Deterministic(d) => d.element_type,
-            TimeSeriesData::Probabilistic(p) => p.element_type,
-            TimeSeriesData::Scenarios(s) => s.element_type,
-            TimeSeriesData::PersistentTimeSeries(p) => p.element_type,
-        }
+        each_variant!(self, s => s.element_type)
     }
 
     /// The user-declared units label, or `None`.
     pub fn units(&self) -> Option<&str> {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.units.as_deref(),
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.units.as_deref(),
-            TimeSeriesData::Deterministic(d) => d.units.as_deref(),
-            TimeSeriesData::Probabilistic(p) => p.units.as_deref(),
-            TimeSeriesData::Scenarios(s) => s.units.as_deref(),
-            TimeSeriesData::PersistentTimeSeries(p) => p.units.as_deref(),
-        }
+        each_variant!(self, s => s.units.as_deref())
     }
 
     /// The quantity kind the values measure, or `None`.
     pub fn quantity_kind(&self) -> Option<&str> {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.quantity_kind.as_deref(),
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.quantity_kind.as_deref(),
-            TimeSeriesData::Deterministic(d) => d.quantity_kind.as_deref(),
-            TimeSeriesData::Probabilistic(p) => p.quantity_kind.as_deref(),
-            TimeSeriesData::Scenarios(s) => s.quantity_kind.as_deref(),
-            TimeSeriesData::PersistentTimeSeries(p) => p.quantity_kind.as_deref(),
-        }
+        each_variant!(self, s => s.quantity_kind.as_deref())
     }
 
     /// The declared unit basis, or `None` if unspecified.
     pub fn unit_system(&self) -> Option<UnitSystem> {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.unit_system,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.unit_system,
-            TimeSeriesData::Deterministic(d) => d.unit_system,
-            TimeSeriesData::Probabilistic(p) => p.unit_system,
-            TimeSeriesData::Scenarios(s) => s.unit_system,
-            TimeSeriesData::PersistentTimeSeries(p) => p.unit_system,
-        }
+        each_variant!(self, s => s.unit_system)
     }
 
     /// How the timestamps were spelled, or `None` if unspecified.
     pub fn time_reference(&self) -> Option<&TimeReference> {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.time_reference.as_ref(),
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.time_reference.as_ref(),
-            TimeSeriesData::Deterministic(d) => d.time_reference.as_ref(),
-            TimeSeriesData::Probabilistic(p) => p.time_reference.as_ref(),
-            TimeSeriesData::Scenarios(s) => s.time_reference.as_ref(),
-            TimeSeriesData::PersistentTimeSeries(p) => p.time_reference.as_ref(),
-        }
+        each_variant!(self, s => s.time_reference.as_ref())
     }
 
     /// The component field these values vary over time, or `None`.
     pub fn component_field(&self) -> Option<&str> {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.component_field.as_deref(),
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.component_field.as_deref(),
-            TimeSeriesData::Deterministic(d) => d.component_field.as_deref(),
-            TimeSeriesData::Probabilistic(p) => p.component_field.as_deref(),
-            TimeSeriesData::Scenarios(s) => s.component_field.as_deref(),
-            TimeSeriesData::PersistentTimeSeries(p) => p.component_field.as_deref(),
-        }
+        each_variant!(self, s => s.component_field.as_deref())
     }
 
     /// The opaque application payload, or `None`.
     pub fn application_data(&self) -> Option<&str> {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.application_data.as_deref(),
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.application_data.as_deref(),
-            TimeSeriesData::Deterministic(d) => d.application_data.as_deref(),
-            TimeSeriesData::Probabilistic(p) => p.application_data.as_deref(),
-            TimeSeriesData::Scenarios(s) => s.application_data.as_deref(),
-            TimeSeriesData::PersistentTimeSeries(p) => p.application_data.as_deref(),
-        }
+        each_variant!(self, s => s.application_data.as_deref())
     }
 
     /// Declare the logical element type of the wrapped series.
@@ -1924,86 +1670,37 @@ impl TimeSeriesData {
 
     /// Set the element type in place.
     pub fn set_element_type(&mut self, element_type: ElementType) {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.element_type = element_type,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.element_type = element_type,
-            TimeSeriesData::Deterministic(d) => d.element_type = element_type,
-            TimeSeriesData::Probabilistic(p) => p.element_type = element_type,
-            TimeSeriesData::Scenarios(s) => s.element_type = element_type,
-            TimeSeriesData::PersistentTimeSeries(p) => p.element_type = element_type,
-        }
+        each_variant!(self, s => s.element_type = element_type)
     }
 
     /// Set the units label in place.
     pub fn set_units(&mut self, units: Option<String>) {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.units = units,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.units = units,
-            TimeSeriesData::Deterministic(d) => d.units = units,
-            TimeSeriesData::Probabilistic(p) => p.units = units,
-            TimeSeriesData::Scenarios(s) => s.units = units,
-            TimeSeriesData::PersistentTimeSeries(p) => p.units = units,
-        }
+        each_variant!(self, s => s.units = units)
     }
 
     /// Set the quantity kind in place.
     pub fn set_quantity_kind(&mut self, quantity_kind: Option<String>) {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.quantity_kind = quantity_kind,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.quantity_kind = quantity_kind,
-            TimeSeriesData::Deterministic(d) => d.quantity_kind = quantity_kind,
-            TimeSeriesData::Probabilistic(p) => p.quantity_kind = quantity_kind,
-            TimeSeriesData::Scenarios(s) => s.quantity_kind = quantity_kind,
-            TimeSeriesData::PersistentTimeSeries(p) => p.quantity_kind = quantity_kind,
-        }
+        each_variant!(self, s => s.quantity_kind = quantity_kind)
     }
 
     /// Set the unit basis in place.
     pub fn set_unit_system(&mut self, unit_system: Option<UnitSystem>) {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.unit_system = unit_system,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.unit_system = unit_system,
-            TimeSeriesData::Deterministic(d) => d.unit_system = unit_system,
-            TimeSeriesData::Probabilistic(p) => p.unit_system = unit_system,
-            TimeSeriesData::Scenarios(s) => s.unit_system = unit_system,
-            TimeSeriesData::PersistentTimeSeries(p) => p.unit_system = unit_system,
-        }
+        each_variant!(self, s => s.unit_system = unit_system)
     }
 
     /// Set the timestamp spelling in place.
     pub fn set_time_reference(&mut self, time_reference: Option<TimeReference>) {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.time_reference = time_reference,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.time_reference = time_reference,
-            TimeSeriesData::Deterministic(d) => d.time_reference = time_reference,
-            TimeSeriesData::Probabilistic(p) => p.time_reference = time_reference,
-            TimeSeriesData::Scenarios(s) => s.time_reference = time_reference,
-            TimeSeriesData::PersistentTimeSeries(p) => p.time_reference = time_reference,
-        }
+        each_variant!(self, s => s.time_reference = time_reference)
     }
 
     /// Set the component field in place.
     pub fn set_component_field(&mut self, component_field: Option<String>) {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.component_field = component_field,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.component_field = component_field,
-            TimeSeriesData::Deterministic(d) => d.component_field = component_field,
-            TimeSeriesData::Probabilistic(p) => p.component_field = component_field,
-            TimeSeriesData::Scenarios(s) => s.component_field = component_field,
-            TimeSeriesData::PersistentTimeSeries(p) => p.component_field = component_field,
-        }
+        each_variant!(self, s => s.component_field = component_field)
     }
 
     /// Set the application payload in place.
     pub fn set_application_data(&mut self, application_data: Option<String>) {
-        match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.application_data = application_data,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.application_data = application_data,
-            TimeSeriesData::Deterministic(d) => d.application_data = application_data,
-            TimeSeriesData::Probabilistic(p) => p.application_data = application_data,
-            TimeSeriesData::Scenarios(s) => s.application_data = application_data,
-            TimeSeriesData::PersistentTimeSeries(p) => p.application_data = application_data,
-        }
+        each_variant!(self, s => s.application_data = application_data)
     }
 
     /// Set the descriptive attributes in place. Used on the read path to fill

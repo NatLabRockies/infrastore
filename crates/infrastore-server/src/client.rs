@@ -14,55 +14,15 @@ use infrastore_core::{
     TimeSeriesId, TimeSeriesMetadata, TimeSeriesType,
 };
 
-/// Parse an ISO-8601 period received over the wire, mapping failures to a
-/// connection error (the server is the source of truth for the encoding).
-fn iso_to_period(s: &str) -> CoreResult<Period> {
-    Period::from_iso8601(s).map_err(|e| TimeSeriesError::ConnectionError(e.to_string()))
-}
-
-fn opt_iso_to_period(s: Option<String>) -> CoreResult<Option<Period>> {
-    s.filter(|s| !s.is_empty())
-        .map(|s| iso_to_period(&s))
-        .transpose()
-}
-
 /// Map a wire-conversion error to an integrity error (the server is the source
 /// of truth for the encoding).
 fn convert_err(e: impl std::fmt::Display) -> TimeSeriesError {
     TimeSeriesError::IntegrityError(format!("convert: {e}"))
 }
 
-/// Build a `ListMetadataReq` from the typed filter params shared by `list_time_series`
-/// and the metadata listings.
-#[allow(clippy::too_many_arguments)]
-fn build_list_req(
-    owner_id: Option<i64>,
-    owner_category: Option<OwnerCategory>,
-    owner_type: Option<String>,
-    time_series_type: Option<TimeSeriesType>,
-    name: Option<String>,
-    component_field: Option<String>,
-    zoneless: Option<bool>,
-    resolution: Option<Period>,
-    interval: Option<Period>,
-    features: Option<&infrastore_core::Features>,
-) -> ListMetadataReq {
-    ListMetadataReq {
-        owner_id,
-        owner_category: owner_category.map(|c| pb::OwnerCategory::from(c) as i32),
-        owner_type,
-        time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
-        name,
-        component_field,
-        zoneless,
-        resolution: resolution.map(|p| p.to_iso8601()),
-        interval: interval.map(|p| p.to_iso8601()),
-        features: features.map(features_to_pb),
-    }
-}
 use infrastore_proto::convert::{
-    features_to_pb, forecast_summary_row_from_pb, metadata_from_pb, read_resp_to_time_series_data,
-    requested_type_to_pb, static_summary_row_from_pb,
+    features_to_pb, forecast_summary_row_from_pb, metadata_from_pb, opt_period, period_from_iso,
+    read_resp_to_time_series_data, static_summary_row_from_pb, ts_type_from_i32,
 };
 use infrastore_proto::pb::{
     self, CheckStaticConsistencyReq, GetCountsReq, GetForecastParametersReq, GetIntervalsReq,
@@ -70,14 +30,15 @@ use infrastore_proto::pb::{
     ListStoreAttributesReq, ReadByIdReq, ReadByIdsReq, VerifyIntegrityReq,
     catalog_store_client::CatalogStoreClient,
 };
-use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
 /// Read-only client wrapping a tonic-generated client. All methods translate
 /// gRPC `Status` errors back into [`TimeSeriesError::ConnectionError`] so
 /// callers don't need to know whether the store is local or remote.
 pub struct RemoteClient {
-    inner: Mutex<CatalogStoreClient<Channel>>,
+    // tonic clients are cheap to clone (they share the channel), and each RPC
+    // takes `&mut self`, so every call clones rather than locking.
+    inner: CatalogStoreClient<Channel>,
 }
 
 impl RemoteClient {
@@ -92,7 +53,7 @@ impl RemoteClient {
 
     pub fn from_channel(channel: Channel) -> Self {
         Self {
-            inner: Mutex::new(CatalogStoreClient::new(channel)),
+            inner: CatalogStoreClient::new(channel),
         }
     }
 
@@ -127,20 +88,21 @@ impl RemoteClient {
         interval: Option<Period>,
         features: Option<&infrastore_core::Features>,
     ) -> CoreResult<Vec<TimeSeriesMetadata>> {
-        let req = build_list_req(
+        let req = ListMetadataReq {
             owner_id,
-            owner_category,
+            owner_category: owner_category.map(|c| pb::OwnerCategory::from(c) as i32),
             owner_type,
-            time_series_type,
+            time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
             name,
             component_field,
             zoneless,
-            resolution,
-            interval,
-            features,
-        );
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+            resolution: resolution.map(|p| p.to_iso8601()),
+            interval: interval.map(|p| p.to_iso8601()),
+            features: features.map(features_to_pb),
+        };
+        let resp = self
+            .inner
+            .clone()
             .list_metadata(req)
             .await
             .map_err(Self::map_status)?
@@ -174,8 +136,9 @@ impl RemoteClient {
             // read would.
             bounds_zoneless: time_range.map(|r| r.zoneless),
         };
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .read_by_id(req)
             .await
             .map_err(Self::map_status)?
@@ -191,18 +154,23 @@ impl RemoteClient {
         let req = GetResolutionsReq {
             time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
         };
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_resolutions(req)
             .await
             .map_err(Self::map_status)?
             .into_inner();
-        resp.resolution.iter().map(|s| iso_to_period(s)).collect()
+        resp.resolution
+            .iter()
+            .map(|s| period_from_iso(s).map_err(convert_err))
+            .collect()
     }
 
     pub async fn get_counts(&self) -> CoreResult<infrastore_core::TimeSeriesCounts> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_counts(GetCountsReq {})
             .await
             .map_err(Self::map_status)?
@@ -219,8 +187,9 @@ impl RemoteClient {
         resolution: Option<Period>,
         interval: Option<Period>,
     ) -> CoreResult<infrastore_core::ForecastParameters> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_forecast_parameters(GetForecastParametersReq {
                 resolution: resolution.map(|p| p.to_iso8601()),
                 interval: interval.map(|p| p.to_iso8601()),
@@ -237,10 +206,13 @@ impl RemoteClient {
             None => None,
         };
         Ok(infrastore_core::ForecastParameters {
-            horizon: opt_iso_to_period(resp.horizon)?,
-            interval: opt_iso_to_period(resp.interval)?,
+            horizon: opt_period(resp.horizon.as_deref().filter(|s| !s.is_empty()))
+                .map_err(convert_err)?,
+            interval: opt_period(resp.interval.as_deref().filter(|s| !s.is_empty()))
+                .map_err(convert_err)?,
             count: resp.count.map(|c| c as usize),
-            resolution: opt_iso_to_period(resp.resolution)?,
+            resolution: opt_period(resp.resolution.as_deref().filter(|s| !s.is_empty()))
+                .map_err(convert_err)?,
             initial_timestamp,
         })
     }
@@ -256,13 +228,14 @@ impl RemoteClient {
         interval: Option<Period>,
         features: infrastore_core::Features,
     ) -> CoreResult<bool> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .has_any_time_series(HasAnyTimeSeriesReq {
                 owner_id,
                 owner_category: pb::OwnerCategory::from(owner_category) as i32,
                 name: name.to_string(),
-                time_series_type: time_series_type.map(requested_type_to_pb),
+                time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
                 resolution: resolution.map(|p| p.to_iso8601()),
                 interval: interval.map(|p| p.to_iso8601()),
                 features: features_to_pb(&features).entries,
@@ -274,8 +247,9 @@ impl RemoteClient {
     }
 
     pub async fn verify_integrity(&self) -> CoreResult<infrastore_core::storage::IntegrityReport> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .verify_integrity(VerifyIntegrityReq {})
             .await
             .map_err(Self::map_status)?
@@ -292,8 +266,9 @@ impl RemoteClient {
     /// `NotFound` if the id names no row — this call is committed to fetching,
     /// where [`Self::association_exists`] treats a stale reference as an answer.
     pub async fn get_metadata_by_id(&self, id: TimeSeriesId) -> CoreResult<TimeSeriesMetadata> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_metadata_by_id(pb::GetMetadataByIdReq { id: id.get() })
             .await
             .map_err(Self::map_status)?
@@ -310,8 +285,9 @@ impl RemoteClient {
         &self,
         ids: &[TimeSeriesId],
     ) -> CoreResult<Vec<TimeSeriesMetadata>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .list_metadata_by_ids(pb::ListMetadataByIdsReq {
                 ids: ids.iter().map(|id| id.get()).collect(),
             })
@@ -330,8 +306,9 @@ impl RemoteClient {
     /// ids here rather than calling [`Self::get_metadata_by_id`] and catching
     /// `NotFound`.
     pub async fn association_exists(&self, id: TimeSeriesId) -> CoreResult<bool> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .association_exists(pb::AssociationExistsReq { id: id.get() })
             .await
             .map_err(Self::map_status)?
@@ -349,8 +326,9 @@ impl RemoteClient {
             Some(r) => (Some(r.start.to_rfc3339()), Some(r.end.to_rfc3339())),
             None => (None, None),
         };
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .read_by_ids(ReadByIdsReq {
                 ids: ids.iter().map(|id| id.get()).collect(),
                 start_rfc3339,
@@ -368,8 +346,9 @@ impl RemoteClient {
 
     /// Distinct owners per category and distinct arrays per kind.
     pub async fn time_series_counts_detailed(&self) -> CoreResult<TimeSeriesCountsDetailed> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_detailed_counts(pb::GetDetailedCountsReq {})
             .await
             .map_err(Self::map_status)?
@@ -384,8 +363,9 @@ impl RemoteClient {
 
     /// Association count grouped by time series type.
     pub async fn counts_by_type(&self) -> CoreResult<Vec<(TimeSeriesType, i64)>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_counts_by_type(pb::GetCountsByTypeReq {})
             .await
             .map_err(Self::map_status)?
@@ -393,10 +373,10 @@ impl RemoteClient {
         resp.entries
             .into_iter()
             .map(|e| {
-                let t = pb::TimeSeriesType::try_from(e.time_series_type)
-                    .map(TimeSeriesType::from)
-                    .map_err(|_| convert_err("unknown time_series_type"))?;
-                Ok((t, e.count))
+                Ok((
+                    ts_type_from_i32(e.time_series_type).map_err(convert_err)?,
+                    e.count,
+                ))
             })
             .collect()
     }
@@ -408,8 +388,9 @@ impl RemoteClient {
         time_series_type: Option<TimeSeriesType>,
         resolution: Option<Period>,
     ) -> CoreResult<Vec<i64>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .list_owner_ids(ListOwnerIdsReq {
                 owner_category: pb::OwnerCategory::from(category) as i32,
                 time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
@@ -426,21 +407,26 @@ impl RemoteClient {
         &self,
         time_series_type: Option<TimeSeriesType>,
     ) -> CoreResult<Vec<Period>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_intervals(GetIntervalsReq {
                 time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
             })
             .await
             .map_err(Self::map_status)?
             .into_inner();
-        resp.interval.iter().map(|s| iso_to_period(s)).collect()
+        resp.interval
+            .iter()
+            .map(|s| period_from_iso(s).map_err(convert_err))
+            .collect()
     }
 
     /// Grouped static-series summary.
     pub async fn static_summary(&self) -> CoreResult<Vec<StaticSummaryRow>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_static_summary(pb::GetStaticSummaryReq {})
             .await
             .map_err(Self::map_status)?
@@ -453,8 +439,9 @@ impl RemoteClient {
 
     /// Grouped forecast summary.
     pub async fn forecast_summary(&self) -> CoreResult<Vec<ForecastSummaryRow>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_forecast_summary(pb::GetForecastSummaryReq {})
             .await
             .map_err(Self::map_status)?
@@ -470,8 +457,9 @@ impl RemoteClient {
         &self,
         resolution: Option<Period>,
     ) -> CoreResult<Vec<StaticConsistency>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .check_static_consistency(CheckStaticConsistencyReq {
                 resolution: resolution.map(|p| p.to_iso8601()),
             })
@@ -482,7 +470,7 @@ impl RemoteClient {
             .into_iter()
             .map(|r| {
                 Ok(StaticConsistency {
-                    resolution: iso_to_period(&r.resolution)?,
+                    resolution: period_from_iso(&r.resolution).map_err(convert_err)?,
                     initial_timestamp: DateTime::parse_from_rfc3339(&r.initial_timestamp_rfc3339)
                         .map_err(convert_err)?
                         .with_timezone(&Utc),
@@ -503,8 +491,9 @@ impl RemoteClient {
     /// the wire, so the core's own ordering cannot survive the trip. Collecting
     /// into a `BTreeMap` restores it, and matches what `Store` returns locally.
     pub async fn list_store_attributes(&self) -> CoreResult<BTreeMap<String, String>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .list_store_attributes(ListStoreAttributesReq {})
             .await
             .map_err(Self::map_status)?
@@ -517,8 +506,9 @@ impl RemoteClient {
     /// `None` rather than `NotFound`, mirroring `Store::get_store_attribute`: a
     /// caller asking whether a key is there is asking a question.
     pub async fn get_store_attribute(&self, key: &str) -> CoreResult<Option<String>> {
-        let mut inner = self.inner.lock().await;
-        let resp = inner
+        let resp = self
+            .inner
+            .clone()
             .get_store_attribute(GetStoreAttributeReq {
                 key: key.to_string(),
             })

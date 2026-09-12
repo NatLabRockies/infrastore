@@ -66,7 +66,7 @@ impl StorageBackend for MemoryBackend {
     fn get_slice(&self, hash: &[u8; 32], dtype: Dtype, range: Range<usize>) -> Result<TypedArray> {
         let array = self.arrays.get(hash).ok_or(TimeSeriesError::NotFound)?;
         super::check_dtype(hash, array.dtype, dtype)?;
-        super::slice_rows(array, range)
+        super::slice_axis(array, 0, range)
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {

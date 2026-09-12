@@ -17,36 +17,18 @@ import numpy as np
 import pytest
 
 from infrastore import InvalidParameterError, OwnerCategory, SingleTimeSeries, Store
+from conftest import add_on_grid, t
 
 UTC = timezone.utc
 HOUR = timedelta(hours=1)
-
-
-def t(hour):
-    return datetime(2024, 1, 1, tzinfo=UTC) + timedelta(hours=hour)
-
-
-def add(store, owner, name, start, length):
-    """Hourly values equal to their own hour, so a read proves which row it hit."""
-    return store.add_time_series(
-        owner_id=owner,
-        owner_type="Generator",
-        owner_category=OwnerCategory.Component,
-        time_series=SingleTimeSeries(
-            t(start),
-            HOUR,
-            np.arange(start, start + length, dtype=np.float64),
-            name,
-        ),
-    )
 
 
 @pytest.fixture
 def ragged():
     """The shape that has no uniform reader: 24 hours beside a leap year."""
     store = Store.create(in_memory=True)
-    add(store, 7, "load", 0, 24)
-    add(store, 42, "active_power", 7, 8784)
+    add_on_grid(store, 7, 0, 24, "load")
+    add_on_grid(store, 42, 7, 8784, "active_power")
     return store
 
 
@@ -108,8 +90,8 @@ class TestWindowedSweep:
 
     def test_a_window_on_a_uniform_store_is_a_slice(self):
         store = Store.create(in_memory=True)
-        add(store, 1, "a", 0, 24)
-        add(store, 2, "b", 0, 24)
+        add_on_grid(store, 1, 0, 24, "a")
+        add_on_grid(store, 2, 0, 24, "b")
         reader = store.build_static_reader(
             resolution="PT1H", window_start=t(6), window_length=3
         )
@@ -157,7 +139,7 @@ class TestRefusals:
 
     def test_the_irregular_types_take_no_window(self):
         store = Store.create(in_memory=True)
-        add(store, 1, "a", 0, 24)
+        add_on_grid(store, 1, 0, 24, "a")
         with pytest.raises(InvalidParameterError) as e:
             store.build_static_reader(
                 time_series_type="NonSequentialTimeSeries", window_start=t(0)
@@ -196,7 +178,7 @@ class TestRefusals:
 class TestSpelling:
     def test_the_anchor_must_be_spelled_like_the_series(self):
         store = Store.create(in_memory=True)
-        add(store, 1, "a", 0, 24)  # aware -> zoned
+        add_on_grid(store, 1, 0, 24, "a")  # aware -> zoned
         naive = datetime(2024, 1, 1, 6)
         with pytest.raises(InvalidParameterError) as e:
             store.build_static_reader(

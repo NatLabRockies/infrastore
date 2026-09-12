@@ -47,17 +47,11 @@ end
 # reach lives in `InfraStoreTimeZonesExt`; without `using TimeZones` the
 # fallback in `lib.jl` says so.
 
-function zoned_timestamp(ts::SingleTimeSeries)
+function zoned_timestamp(
+    ts::Union{SingleTimeSeries, Deterministic, Probabilistic, Scenarios}
+)
     return zoned_timestamp(ts.initial_timestamp, ts.time_reference)
 end
-function zoned_timestamp(ts::Deterministic)
-    return zoned_timestamp(ts.initial_timestamp, ts.time_reference)
-end
-function zoned_timestamp(ts::Probabilistic)
-    return zoned_timestamp(ts.initial_timestamp, ts.time_reference)
-end
-zoned_timestamp(ts::Scenarios) =
-    zoned_timestamp(ts.initial_timestamp, ts.time_reference)
 
 function zoned_timestamp(m::TimeSeriesMetadata)
     m.initial_timestamp === nothing && throw(

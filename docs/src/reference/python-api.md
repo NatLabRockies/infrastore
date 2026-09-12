@@ -1573,7 +1573,6 @@ All inherit from `TimeSeriesError`:
 | `IoError`                       | Filesystem I/O failure                                  |
 | `ConnectionError`               | Connection failure (module-scoped, not the builtin)     |
 | `IncompatibleFormatError`       | Store written in an incompatible on-disk format         |
-| `IncompatibleForecastError`     | Forecast parameters clash with existing forecasts       |
 | `StorageError`                  | SQLite catalog or serialization failure                 |
 | `StoreExistsError`              | Creating a store where one already exists               |
 | `MismatchedArtifactError`       | The `.h5` and `.sqlite` halves came from two saves      |

@@ -117,8 +117,8 @@ fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
         m.name.clone(),
         fields::features_str(&m.features),
         m.element_type.to_string(),
-        fields::opt_period(m.resolution),
-        fields::opt_period(m.interval),
+        fields::opt(m.resolution),
+        fields::opt(m.interval),
         fields::opt(m.length),
         m.units.clone().unwrap_or_else(|| "-".to_string()),
         fields::short_hash(&m.data_hash),
@@ -129,7 +129,7 @@ fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
                 m.initial_timestamp
                     .map(|t| fields::render_timestamp(t, m.time_reference.as_ref())),
             ),
-            fields::opt_period(m.horizon),
+            fields::opt(m.horizon),
             fields::opt(m.count),
             format!("{:?}", m.element_shape),
             m.quantity_kind.clone().unwrap_or_else(|| "-".to_string()),
@@ -166,7 +166,7 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     obj.insert("element_shape".into(), json!(m.element_shape));
     obj.insert(
         "resolution".into(),
-        json!(m.resolution.map(parse::format_period)),
+        json!(m.resolution.map(|p| p.to_iso8601())),
     );
     obj.insert(
         "initial_timestamp".into(),
@@ -176,11 +176,8 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
         ),
     );
     obj.insert("length".into(), json!(m.length));
-    obj.insert("horizon".into(), json!(m.horizon.map(parse::format_period)));
-    obj.insert(
-        "interval".into(),
-        json!(m.interval.map(parse::format_period)),
-    );
+    obj.insert("horizon".into(), json!(m.horizon.map(|p| p.to_iso8601())));
+    obj.insert("interval".into(), json!(m.interval.map(|p| p.to_iso8601())));
     obj.insert("count".into(), json!(m.count));
     obj.insert("percentiles".into(), json!(m.percentiles));
     obj.insert("units".into(), json!(m.units));
@@ -219,11 +216,19 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
 /// Order matters within the display half: striding first and then taking from
 /// an end means `--stride 24 --tail 7` reads as "the last seven daily samples",
 /// which is what someone typing it means.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, clap::Args)]
 pub struct RowWindow {
+    /// Max rows to show in table output (default 50).
+    #[arg(long)]
     pub limit: Option<usize>,
+    /// Show all rows in table output.
+    #[arg(long)]
     pub full: bool,
+    /// Take the table's rows from the end of the series, not the start.
+    #[arg(long)]
     pub tail: bool,
+    /// Keep only every Nth row, in every format (applied before --limit).
+    #[arg(long, value_name = "N")]
     pub stride: Option<usize>,
 }
 
@@ -287,28 +292,38 @@ impl Selection {
     }
 }
 
-/// Everything `get` was asked for beyond the selector.
-pub struct GetOptions<'a> {
-    pub time_range: Option<&'a str>,
+// The `get` command's flags, handed to [`get`] as parsed.
+#[derive(Debug, clap::Args)]
+pub struct GetArgs {
+    #[command(flatten)]
+    pub selector: SelectorArgs,
+    /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+    /// regular series' START inside a step selects that step, an irregular series
+    /// keeps only timestamps at or after START, and a forecast's START must be a
+    /// window boundary (only its END clips).
+    #[arg(long)]
+    pub time_range: Option<String>,
+    #[command(flatten)]
     pub rows: RowWindow,
-    /// Draw a terminal sparkline instead of the value rows.
+    /// Draw a terminal sparkline instead of the values.
+    #[arg(long)]
     pub plot: bool,
+    /// Sparkline width in characters (defaults to the terminal width).
+    #[arg(long, value_name = "COLS")]
     pub plot_width: Option<usize>,
-    /// Restrict a forecast to one window, by index or by issue time.
+    /// Show only forecast window N.
+    #[arg(long, value_name = "N")]
     pub window: Option<usize>,
-    pub issue_time: Option<&'a str>,
+    /// Show only the forecast window issued at this timestamp.
+    #[arg(long, value_name = "TIMESTAMP")]
+    pub issue_time: Option<String>,
 }
 
 /// `get`: read a single series and render its values.
-pub fn get(
-    store_path: &Path,
-    selector: &SelectorArgs,
-    opts: &GetOptions<'_>,
-    format: Format,
-) -> Result<(), String> {
+pub fn get(store_path: &Path, opts: &GetArgs, format: Format) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
-    let (meta, key) = selector.resolve(&store)?;
-    let range = parse::parse_time_range(opts.time_range)?;
+    let (meta, key) = opts.selector.resolve(&store)?;
+    let range = parse::parse_time_range(opts.time_range.as_deref())?;
     let data = match range {
         Some(r) => store.read_by_ids_range(&[key], r).map(|mut v| v.remove(0)),
         None => store.read_by_id(key, infrastore_core::ReadWindow::full()),
@@ -319,47 +334,44 @@ pub fn get(
         return render_plot(&meta, &data, opts.plot_width);
     }
 
-    match &data {
-        TimeSeriesData::SingleTimeSeries(s) => {
-            let ts: Vec<String> = (0..s.length)
-                .map(|i| {
-                    s.resolution
-                        .add_to(s.initial_timestamp, i as i64)
-                        .map(|t| fields::render_timestamp(t, s.time_reference.as_ref()))
-                        .ok_or_else(|| {
-                            format!(
-                                "timestamp overflow at grid index {i} (initial {}, \
-                                 resolution {})",
-                                s.initial_timestamp, s.resolution
-                            )
-                        })
-                })
-                .collect::<Result<_, String>>()?;
+    match static_points(&data)? {
+        // A `PersistentTimeSeries` is rendered as breakpoint/value pairs,
+        // exactly as stored. A step function's value *between* those rows is
+        // not printed: expanding it would need a target grid the caller has not
+        // named, and the rows are the complete description of the series.
+        Some((times, arr)) => {
+            let ts = fields::render_timestamps(&times, data.time_reference());
             reject_forecast_flags(opts, &meta)?;
-            render_sequential(&meta, &ts, &s.data, format, opts.rows)
+            render_sequential(&meta, &ts, arr, format, opts.rows)
         }
-        TimeSeriesData::NonSequentialTimeSeries(ns) => {
-            let ts: Vec<String> =
-                fields::render_timestamps(&ns.timestamps, ns.time_reference.as_ref());
-            reject_forecast_flags(opts, &meta)?;
-            render_sequential(&meta, &ts, &ns.data, format, opts.rows)
-        }
-        // Rendered as breakpoint/value pairs, exactly as stored. A step
-        // function's value *between* those rows is not printed: expanding it
-        // would need a target grid the caller has not named, and the rows are
-        // the complete description of the series.
-        TimeSeriesData::PersistentTimeSeries(p) => {
-            let ts: Vec<String> =
-                fields::render_timestamps(&p.timestamps, p.time_reference.as_ref());
-            reject_forecast_flags(opts, &meta)?;
-            render_sequential(&meta, &ts, &p.data, format, opts.rows)
-        }
-        _ => {
+        None => {
             let grid = ForecastGrid::of(&data)?;
             let window = resolve_window(&grid, &ForecastGrid::stored(&meta)?, opts)?;
             render_forecast(&meta, &data, &grid, format, opts.rows, window)
         }
     }
+}
+
+/// A static series' instants and the values at them.
+pub type StaticPoints<'a> = (Vec<DateTime<Utc>>, &'a TypedArray);
+
+/// A static series' instants and values, or `None` for a forecast.
+///
+/// A `SingleTimeSeries` grid is materialized by the core, which is what steps a
+/// calendar resolution correctly; the irregular types store their instants.
+pub fn static_points(data: &TimeSeriesData) -> Result<Option<StaticPoints<'_>>, String> {
+    Ok(Some(match data {
+        TimeSeriesData::SingleTimeSeries(s) => {
+            let times = (0..s.length)
+                .map(|i| s.timestamp_at(i))
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?;
+            (times, &s.data)
+        }
+        TimeSeriesData::NonSequentialTimeSeries(ns) => (ns.timestamps.clone(), &ns.data),
+        TimeSeriesData::PersistentTimeSeries(p) => (p.timestamps.clone(), &p.data),
+        _ => return Ok(None),
+    }))
 }
 
 /// The window grid of a dense forecast *as it was read*.
@@ -436,7 +448,7 @@ impl ForecastGrid {
     }
 }
 
-fn reject_forecast_flags(opts: &GetOptions<'_>, meta: &TimeSeriesMetadata) -> Result<(), String> {
+fn reject_forecast_flags(opts: &GetArgs, meta: &TimeSeriesMetadata) -> Result<(), String> {
     if opts.window.is_some() || opts.issue_time.is_some() {
         return Err(format!(
             "--window/--issue-time select one window of a forecast; '{}' is a {}",
@@ -461,7 +473,7 @@ fn reject_forecast_flags(opts: &GetOptions<'_>, meta: &TimeSeriesMetadata) -> Re
 fn resolve_window(
     grid: &ForecastGrid,
     stored: &ForecastGrid,
-    opts: &GetOptions<'_>,
+    opts: &GetArgs,
 ) -> Result<Option<usize>, String> {
     let count = grid.count;
     // Under `--time-range`, `grid` is the selection and `stored` the whole
@@ -470,7 +482,7 @@ fn resolve_window(
     // under either grid, and saying otherwise would contradict the exact
     // boundary rule.
     let sliced = opts.time_range.is_some();
-    match (opts.window, opts.issue_time) {
+    match (opts.window, opts.issue_time.as_deref()) {
         (Some(_), Some(_)) => Err("--window and --issue-time both name a window; use one".into()),
         (Some(w), None) => {
             if w >= count {
@@ -544,7 +556,7 @@ pub fn info(
         ("element_shape".into(), json!(meta.element_shape)),
     ];
     if let Some(r) = meta.resolution {
-        rows.push(("resolution".into(), json!(parse::format_period(r))));
+        rows.push(("resolution".into(), json!(r.to_iso8601())));
     }
     if let Some(t) = meta.initial_timestamp {
         rows.push((
@@ -556,10 +568,10 @@ pub fn info(
         rows.push(("length".into(), json!(l)));
     }
     if let Some(h) = meta.horizon {
-        rows.push(("horizon".into(), json!(parse::format_period(h))));
+        rows.push(("horizon".into(), json!(h.to_iso8601())));
     }
     if let Some(iv) = meta.interval {
-        rows.push(("interval".into(), json!(parse::format_period(iv))));
+        rows.push(("interval".into(), json!(iv.to_iso8601())));
     }
     if let Some(c) = meta.count {
         rows.push(("count".into(), json!(c)));
@@ -617,9 +629,12 @@ pub fn info(
 
     if !no_stats {
         let data = store
-            .read_by_id(meta_key(&meta)?, infrastore_core::ReadWindow::full())
+            .read_by_id(
+                crate::select::id_of(&meta)?,
+                infrastore_core::ReadWindow::full(),
+            )
             .map_err(|e| e.to_string())?;
-        let arr = data_array(&data);
+        let arr = data.array();
         rows.push(("shape".into(), json!(arr.shape)));
         append_stats(arr, &mut rows);
     }
@@ -660,27 +675,16 @@ fn flat_rows(rows: &[(String, Value)], colorize: bool) -> Vec<Vec<String>> {
         match (k.as_str(), v) {
             ("features", Value::Object(map)) => {
                 for (fk, fv) in map {
-                    out.push(vec![label(&format!("feature.{fk}")), value_cell(fv)]);
+                    out.push(vec![
+                        label(&format!("feature.{fk}")),
+                        fields::value_cell(fv),
+                    ]);
                 }
             }
-            _ => out.push(vec![label(k), value_cell(v)]),
+            _ => out.push(vec![label(k), fields::value_cell(v)]),
         }
     }
     out
-}
-
-/// Flatten a JSON value for a two-column table/CSV cell: strings unquoted,
-/// everything else in its JSON spelling.
-fn value_cell(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => "-".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn meta_key(meta: &TimeSeriesMetadata) -> Result<infrastore_core::TimeSeriesId, String> {
-    crate::select::id_of(meta)
 }
 
 // --- rendering helpers -----------------------------------------------------
@@ -692,18 +696,10 @@ fn render_sequential(
     format: Format,
     window: RowWindow,
 ) -> Result<(), String> {
-    let per_step = arr.element_shape().iter().product::<usize>().max(1);
     let length = arr.length();
     // Select the rows before decoding any of them: a table showing fifty rows of
     // a year of five-minute data would otherwise stringify all 105,120 first.
     let (sel, dropped) = window.select(length, format)?;
-    let elem = arr.dtype.size();
-    let row_bytes = |i: usize| {
-        arr.bytes
-            .get(i * per_step * elem..(i + 1) * per_step * elem)
-            .unwrap_or(&[])
-    };
-    let timestamp_at = |i: usize| timestamps.get(i).cloned().unwrap_or_default();
 
     match format {
         f if f.is_json() => {
@@ -723,10 +719,10 @@ fn render_sequential(
             if sel.step > 1 {
                 obj.insert("stride".into(), json!(sel.step));
             }
-            let ts: Vec<String> = sel.iter().map(timestamp_at).collect();
+            let ts: Vec<String> = sel.iter().map(|i| timestamp_at(timestamps, i)).collect();
             let values: Vec<Value> = sel
                 .iter()
-                .flat_map(|i| csv_io::bytes_to_json_values(arr.dtype, row_bytes(i)))
+                .flat_map(|i| csv_io::bytes_to_json_values(arr.dtype, row_bytes(arr, i)))
                 .collect();
             obj.insert("timestamps".into(), json!(ts));
             obj.insert("values".into(), json!(values));
@@ -744,17 +740,7 @@ fn render_sequential(
         // initial_timestamp + resolution, but those live in the metadata rather
         // than in the file being piped.
         _ => {
-            let mut header = vec!["timestamp".to_string()];
-            header.extend(value_headers(per_step));
-            let rows: Vec<Vec<String>> = sel
-                .iter()
-                .map(|i| {
-                    let mut row = Vec::with_capacity(1 + per_step);
-                    row.push(timestamp_at(i));
-                    row.extend(csv_io::bytes_to_strings(arr.dtype, row_bytes(i)));
-                    row
-                })
-                .collect();
+            let (header, rows) = sequential_table(timestamps, arr, sel.iter());
             if format == Format::Csv {
                 output::display_csv_rows(&header, &rows)?;
             } else {
@@ -764,6 +750,37 @@ fn render_sequential(
         }
     }
     Ok(())
+}
+
+/// The `timestamp,value...` header and the named rows of a static series, as
+/// `get` prints them and `export` writes the CSV `add` reads back.
+pub fn sequential_table(
+    timestamps: &[String],
+    arr: &TypedArray,
+    rows: impl Iterator<Item = usize>,
+) -> (Vec<String>, Vec<Vec<String>>) {
+    let per_step = arr.element_shape().iter().product::<usize>().max(1);
+    let mut header = vec!["timestamp".to_string()];
+    header.extend(value_headers(per_step));
+    let rows = rows
+        .map(|i| {
+            let mut row = Vec::with_capacity(1 + per_step);
+            row.push(timestamp_at(timestamps, i));
+            row.extend(csv_io::bytes_to_strings(arr.dtype, row_bytes(arr, i)));
+            row
+        })
+        .collect();
+    (header, rows)
+}
+
+fn timestamp_at(timestamps: &[String], i: usize) -> String {
+    timestamps.get(i).cloned().unwrap_or_default()
+}
+
+/// Row `i`'s bytes: one timestep's worth of elements.
+fn row_bytes(arr: &TypedArray, i: usize) -> &[u8] {
+    let width = arr.element_shape().iter().product::<usize>().max(1) * arr.dtype.size();
+    arr.bytes.get(i * width..(i + 1) * width).unwrap_or(&[])
 }
 
 /// A dense forecast, rendered as the structured view in every format.
@@ -779,7 +796,7 @@ fn render_forecast(
     rows_window: RowWindow,
     window: Option<usize>,
 ) -> Result<(), String> {
-    let arr = data_array(data);
+    let arr = data.array();
     let (headers, mut rows) = forecast_csv_rows(meta, data)?;
 
     // One window is a contiguous run of `horizon` rows, because
@@ -926,7 +943,7 @@ fn render_plot(
     data: &TimeSeriesData,
     width: Option<usize>,
 ) -> Result<(), String> {
-    let arr = data_array(data);
+    let arr = data.array();
     let decoded = csv_io::array_to_f64_lossy(arr);
     let per_step = arr.element_shape().iter().product::<usize>().max(1);
     // A forecast has no single time axis, so its whole flattened array is drawn
@@ -1006,7 +1023,7 @@ pub fn forecast_csv_rows(
     meta: &TimeSeriesMetadata,
     data: &TimeSeriesData,
 ) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
-    let arr = data_array(data);
+    let arr = data.array();
     let decoded = csv_io::array_to_strings(arr);
     let grid = ForecastGrid::of(data)?;
     let resolution = grid.resolution;
@@ -1081,17 +1098,6 @@ pub fn forecast_csv_rows(
     Ok((headers, rows))
 }
 
-fn data_array(d: &TimeSeriesData) -> &TypedArray {
-    match d {
-        TimeSeriesData::SingleTimeSeries(s) => &s.data,
-        TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
-        TimeSeriesData::PersistentTimeSeries(s) => &s.data,
-        TimeSeriesData::Deterministic(d) => &d.data,
-        TimeSeriesData::Probabilistic(p) => &p.data,
-        TimeSeriesData::Scenarios(s) => &s.data,
-    }
-}
-
 fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String, Value>) {
     obj.insert("name".into(), json!(meta.name));
     obj.insert("owner_id".into(), json!(meta.owner_id));
@@ -1120,7 +1126,7 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
         obj.insert("application_data".into(), json!(lt));
     }
     if let Some(r) = meta.resolution {
-        obj.insert("resolution".into(), json!(parse::format_period(r)));
+        obj.insert("resolution".into(), json!(r.to_iso8601()));
     }
     if let Some(t) = meta.initial_timestamp {
         obj.insert(
@@ -1129,10 +1135,10 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
         );
     }
     if let Some(h) = meta.horizon {
-        obj.insert("horizon".into(), json!(parse::format_period(h)));
+        obj.insert("horizon".into(), json!(h.to_iso8601()));
     }
     if let Some(iv) = meta.interval {
-        obj.insert("interval".into(), json!(parse::format_period(iv)));
+        obj.insert("interval".into(), json!(iv.to_iso8601()));
     }
     if let Some(c) = meta.count {
         obj.insert("count".into(), json!(c));
@@ -1172,8 +1178,9 @@ fn append_stats(arr: &TypedArray, rows: &mut Vec<(String, Value)>) {
     let non_finite = vals.len() - finite.len();
     rows.push(("num_elements".into(), json!(vals.len())));
     rows.push(("non_finite".into(), json!(non_finite)));
-    rows.push(("first".into(), json!(finite_json(vals.first().copied()))));
-    rows.push(("last".into(), json!(finite_json(vals.last().copied()))));
+    // `serde_json` spells a non-finite float, which JSON cannot, as `null`.
+    rows.push(("first".into(), json!(vals.first())));
+    rows.push(("last".into(), json!(vals.last())));
     if finite.is_empty() {
         return;
     }
@@ -1210,14 +1217,6 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
         sorted[lo]
     } else {
         sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo as f64)
-    }
-}
-
-/// A value JSON can carry, or `null` for the non-finite ones it cannot spell.
-fn finite_json(v: Option<f64>) -> Value {
-    match v {
-        Some(v) if v.is_finite() => json!(v),
-        _ => Value::Null,
     }
 }
 

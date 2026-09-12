@@ -37,7 +37,6 @@ class TestExceptions:
             "IoError",
             "ConnectionError",
             "IncompatibleFormatError",
-            "IncompatibleForecastError",
             "StorageError",
         ):
             exc = getattr(infrastore, name)

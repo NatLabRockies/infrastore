@@ -12,7 +12,6 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::color;
 use crate::output::{self, Format};
 use crate::parse;
 use crate::select::SelectorArgs;
@@ -121,11 +120,7 @@ fn print_column(header: &str, values: &[String], format: Format) -> Result<(), S
         f if f.is_json() => output::print_items(f, values),
         Format::Csv => output::display_csv_rows(&headers, &rows),
         _ => {
-            if values.is_empty() {
-                println!("{}", color::dim("(no results)"));
-            } else {
-                output::display_table_dyn(&headers, &rows);
-            }
+            output::display_table_dyn(&headers, &rows);
             Ok(())
         }
     }

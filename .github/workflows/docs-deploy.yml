@@ -1,0 +1,71 @@
+name: Deploy Documentation (reusable)
+
+# Builds the book and publishes it under gh-pages/<version>/. Called by
+# docs.yml with `latest` on a push to main, and by release.yml with the tag.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "`latest`, or the release tag to publish under"
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Both callers push to gh-pages, and two concurrent pushes would conflict.
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: '0.4.52'
+
+      - name: Install mdbook-mermaid
+        run: cargo install mdbook-mermaid@0.16.0
+
+      - name: Build documentation
+        run: |
+          cd docs
+          # Vendors mermaid.min.js, which is not checked in.
+          mdbook-mermaid install .
+          # Point this build at its own versioned subdirectory; a release also
+          # sends "edit this page" at the tag rather than at main.
+          sed -i "s|site-url = \"/infrastore/\"|site-url = \"/infrastore/${VERSION}/\"|" book.toml
+          if [ "$VERSION" != latest ]; then
+            sed -i "s|edit-url-template = \"https://github.com/NatLabRockies/infrastore/edit/main/docs/{path}\"|edit-url-template = \"https://github.com/NatLabRockies/infrastore/tree/${VERSION}/docs/{path}\"|" book.toml
+          fi
+          mdbook build
+
+      - name: Check documentation links
+        run: python3 .github/scripts/check-doc-links.py --internal --external
+
+      - name: Setup gh-pages branch
+        run: .github/scripts/gh-pages-setup.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Deploy docs
+        run: |
+          cd gh-pages-deploy
+          rm -rf "${VERSION}"
+          cp -r ../docs/book "${VERSION}"
+          # Root redirect: `latest` owns it; a release only seeds a missing one.
+          if [ "$VERSION" = latest ] || [ ! -f index.html ]; then
+            cp ../docs/redirect.html index.html
+          fi
+          python3 ../.github/scripts/update-versions-json.py "${VERSION}"
+
+      - name: Commit and push
+        run: |
+          cd gh-pages-deploy
+          ../.github/scripts/gh-pages-commit.sh "Deploy docs ${VERSION} from ${GITHUB_SHA::8}"

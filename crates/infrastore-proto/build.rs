@@ -7,12 +7,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-changed={}", proto_file.display());
 
-    tonic_prost_build::configure()
-        .build_server(true)
-        .build_client(true)
-        .compile_protos(
-            &[proto_file.to_str().unwrap()],
-            &[proto_root.to_str().unwrap()],
-        )?;
+    tonic_prost_build::configure().compile_protos(
+        &[proto_file.to_str().unwrap()],
+        &[proto_root.to_str().unwrap()],
+    )?;
     Ok(())
 }

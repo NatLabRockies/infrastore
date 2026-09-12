@@ -15,39 +15,25 @@ should not. These tests pin the filter, and that the two compose rather than
 collide.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 
 import numpy as np
 import pytest
 
-from infrastore import InvalidParameterError, OwnerCategory, SingleTimeSeries, Store
+from infrastore import InvalidParameterError, OwnerCategory, Store
+from conftest import add_on_grid, t
 
 UTC = timezone.utc
 HOUR = timedelta(hours=1)
-
-
-def t(hour):
-    return datetime(2024, 1, 1, tzinfo=UTC) + timedelta(hours=hour)
-
-
-def add(store, owner, start, length, name="active_power"):
-    return store.add_time_series(
-        owner_id=owner,
-        owner_type="Generator",
-        owner_category=OwnerCategory.Component,
-        time_series=SingleTimeSeries(
-            t(start), HOUR, np.arange(start, start + length, dtype=np.float64), name
-        ),
-    )
 
 
 @pytest.fixture
 def mixed():
     """One stray day of data beside two full-length series on a later grid."""
     store = Store.create(in_memory=True)
-    add(store, 7, 0, 24)
-    add(store, 42, 7, 8784)
-    add(store, 43, 7, 8784)
+    add_on_grid(store, 7, 0, 24)
+    add_on_grid(store, 42, 7, 8784)
+    add_on_grid(store, 43, 7, 8784)
     return store
 
 

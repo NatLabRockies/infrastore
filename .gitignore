@@ -40,3 +40,6 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
+
+# Written by `mdbook-mermaid install` at docs build time.
+/docs/mermaid.min.js

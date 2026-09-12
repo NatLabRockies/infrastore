@@ -17,38 +17,21 @@ use crate::store_access;
 /// Render a list of `(label, value)` rows in the selected format. The JSON form
 /// is a single object mapping label -> value.
 fn render_kv(title: &str, pairs: Vec<(String, Value)>, format: Format) -> Result<(), String> {
-    match format {
-        f if f.is_json() => {
-            let obj: serde_json::Map<String, Value> = pairs.into_iter().collect();
-            output::print_value(f, &Value::Object(obj))
-        }
-        Format::Csv => {
-            let headers = vec!["Metric".to_string(), "Value".to_string()];
-            let rows: Vec<Vec<String>> = pairs
-                .iter()
-                .map(|(k, v)| vec![k.clone(), value_to_cell(v)])
-                .collect();
-            output::display_csv_rows(&headers, &rows)
-        }
-        _ => {
-            println!("{}", color::header(title));
-            let headers = vec!["Metric".to_string(), "Value".to_string()];
-            let rows: Vec<Vec<String>> = pairs
-                .iter()
-                .map(|(k, v)| vec![k.clone(), value_to_cell(v)])
-                .collect();
-            output::display_table_dyn(&headers, &rows);
-            Ok(())
-        }
+    if format.is_json() {
+        let obj: serde_json::Map<String, Value> = pairs.into_iter().collect();
+        return output::print_value(format, &Value::Object(obj));
     }
-}
-
-fn value_to_cell(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => "-".to_string(),
-        other => other.to_string(),
+    let headers = vec!["Metric".to_string(), "Value".to_string()];
+    let rows: Vec<Vec<String>> = pairs
+        .iter()
+        .map(|(k, v)| vec![k.clone(), fields::value_cell(v)])
+        .collect();
+    if format == Format::Csv {
+        return output::display_csv_rows(&headers, &rows);
     }
+    println!("{}", color::header(title));
+    output::display_table_dyn(&headers, &rows);
+    Ok(())
 }
 
 /// `stats`: overall counts, detailed counts, per-type counts, distinct arrays.
@@ -223,7 +206,7 @@ fn summarize_keys(keys: &[infrastore_core::TimeSeriesMetadata]) -> String {
 /// `store-info`: what this artifact is, before you open it with anything else.
 pub fn store_info(store_path: &Path, format: Format) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
-    let sqlite = store_access::catalog_path(store_path);
+    let sqlite = infrastore_core::catalog_sqlite_path(store_path);
     let size = |p: &Path| {
         std::fs::metadata(p)
             .map(|m| m.len())
@@ -503,7 +486,7 @@ pub fn check_consistency(
         .iter()
         .map(|c| {
             vec![
-                parse::format_period(c.resolution),
+                c.resolution.to_iso8601(),
                 c.initial_timestamp.to_rfc3339(),
                 c.length.to_string(),
             ]
@@ -547,12 +530,12 @@ pub fn resolutions(store_path: &Path, format: Format) -> Result<(), String> {
             let headers = vec!["Kind".to_string(), "Value".to_string()];
             let mut rows: Vec<Vec<String>> = res
                 .iter()
-                .map(|p| vec!["resolution".to_string(), parse::format_period(*p)])
+                .map(|p| vec!["resolution".to_string(), p.to_iso8601()])
                 .collect();
             rows.extend(
                 intervals
                     .iter()
-                    .map(|p| vec!["interval".to_string(), parse::format_period(*p)]),
+                    .map(|p| vec!["interval".to_string(), p.to_iso8601()]),
             );
             if format == Format::Csv {
                 output::display_csv_rows(&headers, &rows)?;

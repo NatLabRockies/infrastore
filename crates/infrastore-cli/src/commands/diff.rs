@@ -341,8 +341,8 @@ fn describe(id: &TimeSeriesMetadata) -> String {
         id.owner_category.as_str(),
         id.time_series_type.as_str(),
         id.name,
-        fields::opt_period(id.resolution),
-        fields::opt_period(id.interval),
+        fields::opt(id.resolution),
+        fields::opt(id.interval),
         fields::features_str(&id.features),
     )
 }

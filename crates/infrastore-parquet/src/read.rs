@@ -1813,14 +1813,7 @@ fn missing_grid(column: &str, name: &str) -> infrastore_core::TimeSeriesError {
 
 /// The stored cube and its leading axes, for hashing.
 fn cube_of(data: &TimeSeriesData) -> (&TypedArray, Vec<usize>) {
-    let array = match data {
-        TimeSeriesData::SingleTimeSeries(s) => &s.data,
-        TimeSeriesData::NonSequentialTimeSeries(s) => &s.data,
-        TimeSeriesData::PersistentTimeSeries(s) => &s.data,
-        TimeSeriesData::Deterministic(f) => &f.data,
-        TimeSeriesData::Probabilistic(f) => &f.data,
-        TimeSeriesData::Scenarios(f) => &f.data,
-    };
+    let array = data.array();
     let leading = data
         .time_series_type()
         .leading_dims()

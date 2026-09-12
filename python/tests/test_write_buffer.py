@@ -10,24 +10,13 @@ budget applied, because the caller is already holding it.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import numpy as np
 import pytest
 
-from infrastore import InvalidParameterError, OwnerCategory, SingleTimeSeries, Store
+from infrastore import InvalidParameterError, OwnerCategory, Store
+from conftest import hourly_series
 
 # One column below is 24 float64 values.
 COLUMN_BYTES = 24 * 8
-
-
-def series(base: float) -> SingleTimeSeries:
-    return SingleTimeSeries(
-        initial_timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
-        resolution=timedelta(hours=1),
-        data=np.arange(24, dtype=float) + base,
-        name="load",
-    )
 
 
 def add_ten(store: Store) -> None:
@@ -37,7 +26,7 @@ def add_ten(store: Store) -> None:
                 owner_id=owner,
                 owner_type="Generator",
                 owner_category=OwnerCategory.Component,
-                time_series=series(owner * 100.0),
+                time_series=hourly_series(owner * 100.0),
             )
 
 
@@ -92,7 +81,7 @@ def test_a_wide_budget_writes_the_dataset_the_bulk_add_writes(tmp_path):
                 "owner_id": owner,
                 "owner_type": "Generator",
                 "owner_category": OwnerCategory.Component,
-                "time_series": series(owner * 100.0),
+                "time_series": hourly_series(owner * 100.0),
             }
             for owner in range(1, 11)
         ]

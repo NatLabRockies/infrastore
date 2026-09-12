@@ -147,8 +147,9 @@ fn sort_key(meta: &TimeSeriesMetadata) -> SortKey {
 }
 
 /// A plain scalar map: `{"scenario": "high_load", "year": 2030}`, never the
-/// store's internally-tagged [`FeatureValue`] form.
-fn features_to_plain(features: &Features) -> Map<String, Value> {
+/// store's internally-tagged [`FeatureValue`] form. The OpenAPI document's
+/// spelling of a series' features.
+pub fn features_to_plain(features: &Features) -> Map<String, Value> {
     let mut out = Map::with_capacity(features.len());
     for (key, value) in features {
         let json = match value {
@@ -486,8 +487,8 @@ fn unit_system_from_wire(s: &str) -> Result<UnitSystem> {
 }
 
 /// The inverse of [`features_to_plain`]: a plain scalar map back into the
-/// store's tagged feature values.
-fn features_from_plain(map: &Map<String, Value>) -> Result<Features> {
+/// store's tagged feature values. Errors on a value that is not a JSON scalar.
+pub fn features_from_plain(map: &Map<String, Value>) -> Result<Features> {
     let mut out = Features::new();
     for (key, value) in map {
         let feature = match value {

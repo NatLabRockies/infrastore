@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant};
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
 use infrastore_core::{
     AddRequest, Deterministic, Features, ListFilter, OwnerCategory, SingleTimeSeries, Store,
@@ -63,7 +63,7 @@ enum Command {
     All(AllArgs),
 }
 
-#[derive(Args, Clone)]
+#[derive(Args)]
 struct CommonArgs {
     /// Number of components (time series).
     #[arg(long, default_value_t = 1_000)]
@@ -82,7 +82,7 @@ struct CommonArgs {
     path: Option<PathBuf>,
 }
 
-#[derive(Args, Clone)]
+#[derive(Args)]
 struct AddArgs {
     #[command(flatten)]
     common: CommonArgs,
@@ -93,7 +93,7 @@ struct AddArgs {
     transaction: bool,
 }
 
-#[derive(Args, Clone)]
+#[derive(Args)]
 struct ReadArgs {
     #[command(flatten)]
     common: CommonArgs,
@@ -108,46 +108,26 @@ struct ReadArgs {
     reader: bool,
 }
 
-#[derive(Args, Clone)]
+#[derive(Args)]
 struct AllArgs {
     #[command(flatten)]
-    common: CommonArgs,
-
-    /// Simulation steps to benchmark (default: --length).
-    #[arg(long)]
-    steps: Option<usize>,
+    read: ReadArgs,
 
     /// See `add --transaction`.
     #[arg(long)]
     transaction: bool,
-
-    /// See `read --reader`.
-    #[arg(long)]
-    reader: bool,
 }
 
 fn main() -> Result<(), Error> {
     let cli = Cli::parse();
     init_tracing(cli.log_level.as_deref());
     match cli.command {
-        Command::Add(args) => run_add(&args)?,
+        Command::Add(args) => run_add(&args.common, args.transaction)?,
         Command::Read(args) => run_read(&args)?,
-        Command::All(AllArgs {
-            common,
-            steps,
-            transaction,
-            reader,
-        }) => {
-            run_add(&AddArgs {
-                common: common.clone(),
-                transaction,
-            })?;
+        Command::All(args) => {
+            run_add(&args.read.common, args.transaction)?;
             println!();
-            run_read(&ReadArgs {
-                common,
-                steps,
-                reader,
-            })?;
+            run_read(&args.read)?;
         }
     }
     Ok(())
@@ -266,47 +246,18 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
         .collect()
 }
 
-/// The `SingleTimeSeries` association ids the read loop addresses, in owner
-/// order.
+/// The association ids the read loop addresses: `filter` resolved to one id per
+/// owner `0..count`, in that order.
 ///
 /// One catalog query for the whole set rather than one per series: the bench
 /// writes one series per owner under a fixed name, so a listing filtered to that
 /// name and resolution is exactly the set, and the row's `owner_id` puts them
 /// back in the order the loop wants.
-fn sts_ids(store: &Store, count: usize) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
-    let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
-    ids_by_owner(
-        store,
-        ListFilter::new()
-            .owner_category(OwnerCategory::Component)
-            .time_series_type(TimeSeriesType::SingleTimeSeries)
-            .name("active_power")
-            .resolution(hour),
-        count,
-    )
-}
-
-/// The `Deterministic` association ids the read loop addresses, in owner order.
-fn det_ids(store: &Store, count: usize) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
-    let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
-    ids_by_owner(
-        store,
-        ListFilter::new()
-            .owner_category(OwnerCategory::Component)
-            .time_series_type(TimeSeriesType::Deterministic)
-            .name("active_power_forecast")
-            .resolution(hour)
-            .interval(hour),
-        count,
-    )
-}
-
-/// Resolve `filter` to one id per owner `0..count`, in that order.
 fn ids_by_owner(
     store: &Store,
     filter: ListFilter,
     count: usize,
-) -> Result<Vec<TimeSeriesId>, Box<dyn std::error::Error>> {
+) -> Result<Vec<TimeSeriesId>, Error> {
     let mut by_owner: HashMap<i64, TimeSeriesId> = HashMap::new();
     for m in store.list_metadata(filter)? {
         if let Some(id) = m.id {
@@ -324,20 +275,6 @@ fn ids_by_owner(
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
-
-fn fmt_dur(d: StdDuration) -> String {
-    if d.as_secs() >= 60 {
-        format!("{:.2}min", d.as_secs_f64() / 60.0)
-    } else if d.as_secs() >= 1 {
-        format!("{:.2}s", d.as_secs_f64())
-    } else if d.as_millis() >= 1 {
-        format!("{:.2}ms", d.as_secs_f64() * 1_000.0)
-    } else if d.as_micros() >= 1 {
-        format!("{:.1}µs", d.as_secs_f64() * 1_000_000.0)
-    } else {
-        format!("{}ns", d.as_nanos())
-    }
-}
 
 fn fmt_bytes(n: usize) -> String {
     if n >= 1_000_000_000 {
@@ -379,75 +316,74 @@ fn sep() {
 
 // ── Add benchmark ─────────────────────────────────────────────────────────────
 
-fn run_add(args: &AddArgs) -> Result<(), Error> {
-    let c = &args.common;
-
-    let label = if args.transaction {
+fn run_add(c: &CommonArgs, transaction: bool) -> Result<(), Error> {
+    let label = if transaction {
         "single adds in one transaction"
     } else {
         "Bulk add"
     };
+    // Held until both phases finish, so the first store is not torn down
+    // while the second is being measured.
+    let _sts = add_phase(
+        c,
+        transaction,
+        &format!("{label}: SingleTimeSeries"),
+        "timesteps (1h resolution)",
+        c.count * c.length * 8, // f64
+        "add_sts",
+        make_sts_requests,
+    )?;
+    let _det = add_phase(
+        c,
+        transaction,
+        &format!("{label}: Deterministic"),
+        &format!("windows (horizon={DET_HORIZON_H}h, interval=1h)"),
+        c.count * DET_HORIZON_H * c.length * 8,
+        "add_det",
+        make_det_requests,
+    )?;
     sep();
-    println!("{label}: SingleTimeSeries");
-    println!(
-        "  count={}, length={} timesteps (1h resolution), storage={}",
-        c.count,
-        c.length,
-        storage_label(c),
-    );
-    let sts_bytes = c.count * c.length * 8; // f64
-    println!("  raw array data: {}", fmt_bytes(sts_bytes));
-
-    let t = Instant::now();
-    let sts_reqs = make_sts_requests(c.count, c.length);
-    let t_build = t.elapsed();
-
-    let mut handle = bench_store(c, "add_sts")?;
-    let t = Instant::now();
-    add_requests(&mut handle.store, sts_reqs, args.transaction)?;
-    let t_add = t.elapsed();
-
-    println!();
-    println!("  build requests:     {}", fmt_dur(t_build));
-    println!(
-        "  add: {}   ({}, {})",
-        fmt_dur(t_add),
-        fmt_throughput(c.count, t_add),
-        fmt_bw(sts_bytes, t_add),
-    );
-
-    sep();
-    println!("{label}: Deterministic");
-    println!(
-        "  count={}, length={} windows (horizon={}h, interval=1h), storage={}",
-        c.count,
-        c.length,
-        DET_HORIZON_H,
-        storage_label(c),
-    );
-    let det_bytes = c.count * DET_HORIZON_H * c.length * 8;
-    println!("  raw array data: {}", fmt_bytes(det_bytes));
-
-    let t = Instant::now();
-    let det_reqs = make_det_requests(c.count, c.length);
-    let t_build = t.elapsed();
-
-    let mut handle = bench_store(c, "add_det")?;
-    let t = Instant::now();
-    add_requests(&mut handle.store, det_reqs, args.transaction)?;
-    let t_add = t.elapsed();
-
-    println!();
-    println!("  build requests:     {}", fmt_dur(t_build));
-    println!(
-        "  add: {}   ({}, {})",
-        fmt_dur(t_add),
-        fmt_throughput(c.count, t_add),
-        fmt_bw(det_bytes, t_add),
-    );
-    sep();
-
     Ok(())
+}
+
+/// One add benchmark: build the requests, then time writing them to a fresh
+/// store.
+fn add_phase(
+    c: &CommonArgs,
+    transaction: bool,
+    title: &str,
+    axis: &str,
+    bytes: usize,
+    suffix: &str,
+    build: fn(usize, usize) -> Vec<AddRequest>,
+) -> Result<StoreHandle, Error> {
+    sep();
+    println!("{title}");
+    println!(
+        "  count={}, length={} {axis}, storage={}",
+        c.count,
+        c.length,
+        storage_label(c),
+    );
+    println!("  raw array data: {}", fmt_bytes(bytes));
+
+    let t = Instant::now();
+    let reqs = build(c.count, c.length);
+    let t_build = t.elapsed();
+
+    let mut handle = bench_store(c, suffix)?;
+    let t = Instant::now();
+    add_requests(&mut handle.store, reqs, transaction)?;
+    let t_add = t.elapsed();
+
+    println!();
+    println!("  build requests:     {t_build:.2?}");
+    println!(
+        "  add: {t_add:.2?}   ({}, {})",
+        fmt_throughput(c.count, t_add),
+        fmt_bw(bytes, t_add),
+    );
+    Ok(handle)
 }
 
 /// One bulk add, or one `add` per request inside a single transaction.
@@ -468,27 +404,106 @@ fn add_requests(store: &mut Store, reqs: Vec<AddRequest>, transaction: bool) -> 
 
 fn run_read(args: &ReadArgs) -> Result<(), Error> {
     let c = &args.common;
-    let steps = args.steps.unwrap_or(c.length);
-    let actual_steps = steps.min(c.length);
+    let steps = args.steps.unwrap_or(c.length).min(c.length);
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
 
-    // ── SingleTimeSeries ──────────────────────────────────────────────────────
+    let _sts = read_phase(
+        c,
+        steps,
+        "SingleTimeSeries",
+        None,
+        "read_sts",
+        make_sts_requests,
+        |store, step_times| {
+            if !args.reader {
+                let keys = ids_by_owner(
+                    store,
+                    ListFilter::new()
+                        .owner_category(OwnerCategory::Component)
+                        .time_series_type(TimeSeriesType::SingleTimeSeries)
+                        .name("active_power")
+                        .resolution(hour),
+                    c.count,
+                )?;
+                return range_sweep(store, &keys, initial, steps, step_times);
+            }
+            println!("  (StaticReader sweep: one columnar read per step)");
+            let mut reader = store.build_static_reader(
+                ListFilter::new()
+                    .time_series_type(TimeSeriesType::SingleTimeSeries)
+                    .resolution(hour),
+            )?;
+            for step in 0..steps {
+                let at = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
+                let t0 = Instant::now();
+                store.static_read(&mut reader, at)?;
+                step_times.push(t0.elapsed());
+            }
+            Ok(())
+        },
+    )?;
+
+    let _det = read_phase(
+        c,
+        steps,
+        "Deterministic",
+        Some(format!(
+            "  note: each call fetches the full [{}×{}] array from storage, then slices to 1 window",
+            DET_HORIZON_H, c.length,
+        )),
+        "read_det",
+        make_det_requests,
+        |store, step_times| {
+            let keys = ids_by_owner(
+                store,
+                ListFilter::new()
+                    .owner_category(OwnerCategory::Component)
+                    .time_series_type(TimeSeriesType::Deterministic)
+                    .name("active_power_forecast")
+                    .resolution(hour)
+                    .interval(hour),
+                c.count,
+            )?;
+            range_sweep(store, &keys, initial, steps, step_times)
+        },
+    )?;
     sep();
-    println!("Simulation read: SingleTimeSeries");
+
+    Ok(())
+}
+
+/// One simulation-read benchmark: write the series, reopen the store (on disk),
+/// then let `sweep` time one read per step into `step_times`.
+fn read_phase(
+    c: &CommonArgs,
+    steps: usize,
+    title: &str,
+    note: Option<String>,
+    suffix: &str,
+    build: fn(usize, usize) -> Vec<AddRequest>,
+    sweep: impl FnOnce(&Store, &mut Vec<StdDuration>) -> Result<(), Error>,
+) -> Result<StoreHandle, Error> {
+    sep();
+    println!("Simulation read: {title}");
     println!(
         "  components={}, length={}, steps={}, storage={}",
         c.count,
         c.length,
-        actual_steps,
+        steps,
         storage_label(c),
     );
-    println!("  total component reads: {}", c.count * actual_steps);
+    println!("  total component reads: {}", c.count * steps);
+    if let Some(note) = note {
+        println!("{note}");
+    }
     if !c.in_memory {
         println!("  (store reopened read-only between write and read phases)");
     }
 
-    let sts_reqs = make_sts_requests(c.count, c.length);
-    let mut handle = bench_store(c, "read_sts")?;
-    let _ = handle.store.add_time_series_bulk(sts_reqs)?;
+    let reqs = build(c.count, c.length);
+    let mut handle = bench_store(c, suffix)?;
+    let _ = handle.store.add_time_series_bulk(reqs)?;
     let handle = if c.in_memory {
         handle.store.flush()?;
         handle
@@ -496,85 +511,29 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         flush_and_reopen(handle)?
     };
 
-    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-
-    let mut step_times: Vec<StdDuration> = Vec::with_capacity(actual_steps);
-    if args.reader {
-        println!("  (StaticReader sweep: one columnar read per step)");
-        let hour = infrastore_core::Period::Fixed(chrono::Duration::hours(1));
-        let mut reader = handle.store.build_static_reader(
-            ListFilter::new()
-                .time_series_type(TimeSeriesType::SingleTimeSeries)
-                .resolution(hour),
-        )?;
-        for step in 0..actual_steps {
-            let at = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
-            let t0 = Instant::now();
-            handle.store.static_read(&mut reader, at)?;
-            step_times.push(t0.elapsed());
-        }
-    } else {
-        let keys = sts_ids(&handle.store, c.count)?;
-        for step in 0..actual_steps {
-            let t_start = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
-            let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
-            let t0 = Instant::now();
-            let _ = handle
-                .store
-                .read_by_ids_range(&keys, (t_start, t_end).into())?;
-            step_times.push(t0.elapsed());
-        }
-    }
+    let mut step_times: Vec<StdDuration> = Vec::with_capacity(steps);
+    sweep(&handle.store, &mut step_times)?;
 
     println!();
     print_step_stats(&step_times, c.count);
+    Ok(handle)
+}
 
-    // ── Deterministic ─────────────────────────────────────────────────────────
-    sep();
-    println!("Simulation read: Deterministic");
-    println!(
-        "  components={}, length={}, steps={}, storage={}",
-        c.count,
-        c.length,
-        actual_steps,
-        storage_label(c),
-    );
-    println!("  total component reads: {}", c.count * actual_steps);
-    println!(
-        "  note: each call fetches the full [{}×{}] array from storage, then slices to 1 window",
-        DET_HORIZON_H, c.length,
-    );
-    if !c.in_memory {
-        println!("  (store reopened read-only between write and read phases)");
-    }
-
-    let det_reqs = make_det_requests(c.count, c.length);
-    let mut handle = bench_store(c, "read_det")?;
-    let _ = handle.store.add_time_series_bulk(det_reqs)?;
-    let handle = if c.in_memory {
-        handle.store.flush()?;
-        handle
-    } else {
-        flush_and_reopen(handle)?
-    };
-
-    let keys = det_ids(&handle.store, c.count)?;
-
-    let mut step_times: Vec<StdDuration> = Vec::with_capacity(actual_steps);
-    for step in 0..actual_steps {
+/// Time one `read_by_ids_range` over `keys` per one-hour step.
+fn range_sweep(
+    store: &Store,
+    keys: &[TimeSeriesId],
+    initial: DateTime<Utc>,
+    steps: usize,
+    step_times: &mut Vec<StdDuration>,
+) -> Result<(), Error> {
+    for step in 0..steps {
         let t_start = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
         let t_end = initial + chrono::Duration::milliseconds((step + 1) as i64 * HOUR_MS);
         let t0 = Instant::now();
-        let _ = handle
-            .store
-            .read_by_ids_range(&keys, (t_start, t_end).into())?;
+        let _ = store.read_by_ids_range(keys, (t_start, t_end).into())?;
         step_times.push(t0.elapsed());
     }
-
-    println!();
-    print_step_stats(&step_times, c.count);
-    sep();
-
     Ok(())
 }
 
@@ -595,14 +554,8 @@ fn print_step_stats(step_times: &[StdDuration], count: usize) {
 
     let total_reads = n * count;
 
-    println!(
-        "  step time:  min={}  median={}  p95={}  max={}",
-        fmt_dur(min),
-        fmt_dur(median),
-        fmt_dur(p95),
-        fmt_dur(max),
-    );
-    println!("  total:      {} ({} steps)", fmt_dur(total), n);
+    println!("  step time:  min={min:.2?}  median={median:.2?}  p95={p95:.2?}  max={max:.2?}");
+    println!("  total:      {total:.2?} ({n} steps)");
     println!(
         "  throughput: {} component-reads",
         fmt_throughput(total_reads, total),

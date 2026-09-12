@@ -11,7 +11,7 @@
 //! attributes themselves live in the consumer's object graph, which is why the
 //! flags here are bare ids and type names rather than objects.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use infrastore_core::{
     ParentChildAssociation, ParentChildFilter, SupplementalAttributeAssociation,
@@ -230,16 +230,31 @@ fn link_filter(
 
 // --- writes ----------------------------------------------------------------
 
-/// The four fields of one attachment, as flags.
-pub struct AttachArgs<'a> {
+// The four fields of one attachment, as flags: `attach` names one, `detach`
+// filters by them.
+#[derive(Debug, clap::Args)]
+pub struct AttachmentFlags {
+    #[arg(long)]
     pub component_id: Option<i64>,
-    pub component_type: Option<&'a str>,
+    #[arg(long)]
+    pub component_type: Option<String>,
+    #[arg(long)]
     pub attribute_id: Option<i64>,
-    pub attribute_type: Option<&'a str>,
-    /// A `component_id,component_type,attribute_id,attribute_type` CSV.
-    pub from: Option<&'a Path>,
+    #[arg(long)]
+    pub attribute_type: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct AttachArgs {
+    #[command(flatten)]
+    pub one: AttachmentFlags,
+    /// Bulk import from a
+    /// `component_id,component_type,attribute_id,attribute_type` CSV.
+    #[arg(long)]
+    pub from: Option<PathBuf>,
+    /// Show what would be attached without changing the store.
+    #[arg(long)]
     pub dry_run: bool,
-    pub format: Format,
 }
 
 /// `attach`: attach supplemental attributes to components.
@@ -247,8 +262,9 @@ pub struct AttachArgs<'a> {
 /// One attachment from flags, or a whole table from `--from`. The bulk form
 /// goes through the core's all-or-nothing batch insert, so a duplicate anywhere
 /// in the file leaves the catalog exactly as it was rather than half-imported.
-pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
-    let rows = match args.from {
+pub fn attach(store_path: &Path, args: &AttachArgs, format: Format) -> Result<(), String> {
+    let one = &args.one;
+    let rows = match &args.from {
         Some(path) => read_assoc_csv(path, ATTACH_COLUMNS)?
             .into_iter()
             .map(|r| SupplementalAttributeAssociation {
@@ -260,16 +276,16 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
             })
             .collect::<Vec<_>>(),
         None => vec![SupplementalAttributeAssociation {
-            component_id: require_id(args.component_id, "--component-id")?,
-            component_type: require_type(args.component_type, "--component-type")?,
-            attribute_id: require_id(args.attribute_id, "--attribute-id")?,
-            attribute_type: require_type(args.attribute_type, "--attribute-type")?,
+            component_id: require_id(one.component_id, "--component-id")?,
+            component_type: require_type(one.component_type.as_deref(), "--component-type")?,
+            attribute_id: require_id(one.attribute_id, "--attribute-id")?,
+            attribute_type: require_type(one.attribute_type.as_deref(), "--attribute-type")?,
             id: None,
         }],
     };
     if args.dry_run {
         return report(
-            args.format,
+            format,
             || {
                 json!({
                     "dry_run": true,
@@ -302,7 +318,7 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
     let n = ids.len();
     store.flush().map_err(|e| e.to_string())?;
     report(
-        args.format,
+        format,
         || json!({ "attached": n, "ids": ids }),
         || {
             println!(
@@ -318,23 +334,23 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
 ///
 /// A bare `detach` would empty the whole catalog, so it insists on at least one
 /// narrowing flag — `--all` is how you say you meant it.
-#[allow(clippy::too_many_arguments)]
-pub fn detach(
-    store_path: &Path,
-    component_id: Option<i64>,
-    attribute_id: Option<i64>,
-    component_type: Option<&str>,
-    attribute_type: Option<&str>,
-    all: bool,
-    force: bool,
-    dry_run: bool,
-    format: Format,
-) -> Result<(), String> {
-    let filter = attribute_filter(component_id, attribute_id, component_type, attribute_type);
-    let narrowed = component_id.is_some()
-        || attribute_id.is_some()
-        || component_type.is_some()
-        || attribute_type.is_some();
+pub fn detach(store_path: &Path, args: &DetachArgs, format: Format) -> Result<(), String> {
+    let DetachArgs {
+        filter: flags,
+        all,
+        force,
+        dry_run,
+    } = args;
+    let filter = attribute_filter(
+        flags.component_id,
+        flags.attribute_id,
+        flags.component_type.as_deref(),
+        flags.attribute_type.as_deref(),
+    );
+    let narrowed = flags.component_id.is_some()
+        || flags.attribute_id.is_some()
+        || flags.component_type.is_some()
+        || flags.attribute_type.is_some();
     if !narrowed && !all {
         return Err(
             "detach with no filter would remove every attachment; pass --all to mean that, \
@@ -348,7 +364,7 @@ pub fn detach(
         .count_supplemental_attribute_associations(&filter)
         .map_err(|e| e.to_string())?;
     drop(store);
-    if dry_run {
+    if *dry_run {
         return report(
             format,
             || json!({ "dry_run": true, "would_detach": matched }),
@@ -381,21 +397,66 @@ pub fn detach(
     )
 }
 
-/// The four fields of one directed edge, as flags.
-pub struct LinkArgs<'a> {
-    pub parent_id: Option<i64>,
-    pub parent_type: Option<&'a str>,
-    pub child_id: Option<i64>,
-    pub child_type: Option<&'a str>,
-    /// A `parent_id,parent_type,child_id,child_type` CSV.
-    pub from: Option<&'a Path>,
+#[derive(Debug, clap::Args)]
+pub struct DetachArgs {
+    #[command(flatten)]
+    pub filter: AttachmentFlags,
+    /// Remove every attachment (required when no filter is given).
+    #[arg(long)]
+    pub all: bool,
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub force: bool,
+    /// Show how many would be detached without changing the store.
+    #[arg(long)]
     pub dry_run: bool,
-    pub format: Format,
+}
+
+// The four fields of one directed edge, as flags: `link` names one, `unlink`
+// filters by them.
+#[derive(Debug, clap::Args)]
+pub struct EdgeFlags {
+    #[arg(long)]
+    pub parent_id: Option<i64>,
+    #[arg(long)]
+    pub parent_type: Option<String>,
+    #[arg(long)]
+    pub child_id: Option<i64>,
+    #[arg(long)]
+    pub child_type: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct LinkArgs {
+    #[command(flatten)]
+    pub one: EdgeFlags,
+    /// Bulk import from a `parent_id,parent_type,child_id,child_type` CSV.
+    #[arg(long)]
+    pub from: Option<PathBuf>,
+    /// Show what would be linked without changing the store.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct UnlinkArgs {
+    #[command(flatten)]
+    pub filter: EdgeFlags,
+    /// Remove every link (required when no filter is given).
+    #[arg(long)]
+    pub all: bool,
+    /// Skip the interactive confirmation prompt.
+    #[arg(long)]
+    pub force: bool,
+    /// Show how many would be removed without changing the store.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `link`: add directed parent -> child component edges.
-pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
-    let rows = match args.from {
+pub fn link(store_path: &Path, args: &LinkArgs, format: Format) -> Result<(), String> {
+    let one = &args.one;
+    let rows = match &args.from {
         Some(path) => read_assoc_csv(path, LINK_COLUMNS)?
             .into_iter()
             .map(|r| ParentChildAssociation {
@@ -407,16 +468,16 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
             })
             .collect::<Vec<_>>(),
         None => vec![ParentChildAssociation {
-            parent_id: require_id(args.parent_id, "--parent-id")?,
-            parent_type: require_type(args.parent_type, "--parent-type")?,
-            child_id: require_id(args.child_id, "--child-id")?,
-            child_type: require_type(args.child_type, "--child-type")?,
+            parent_id: require_id(one.parent_id, "--parent-id")?,
+            parent_type: require_type(one.parent_type.as_deref(), "--parent-type")?,
+            child_id: require_id(one.child_id, "--child-id")?,
+            child_type: require_type(one.child_type.as_deref(), "--child-type")?,
             id: None,
         }],
     };
     if args.dry_run {
         return report(
-            args.format,
+            format,
             || {
                 json!({
                     "dry_run": true,
@@ -447,7 +508,7 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
     let n = ids.len();
     store.flush().map_err(|e| e.to_string())?;
     report(
-        args.format,
+        format,
         || json!({ "linked": n, "ids": ids }),
         || {
             println!("{}", color::header(&format!("Added {n} link(s).")));
@@ -457,21 +518,23 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
 }
 
 /// `unlink`: remove every edge matching the filter.
-#[allow(clippy::too_many_arguments)]
-pub fn unlink(
-    store_path: &Path,
-    parent_id: Option<i64>,
-    child_id: Option<i64>,
-    parent_type: Option<&str>,
-    child_type: Option<&str>,
-    all: bool,
-    force: bool,
-    dry_run: bool,
-    format: Format,
-) -> Result<(), String> {
-    let filter = link_filter(parent_id, child_id, parent_type, child_type);
-    let narrowed =
-        parent_id.is_some() || child_id.is_some() || parent_type.is_some() || child_type.is_some();
+pub fn unlink(store_path: &Path, args: &UnlinkArgs, format: Format) -> Result<(), String> {
+    let UnlinkArgs {
+        filter: flags,
+        all,
+        force,
+        dry_run,
+    } = args;
+    let filter = link_filter(
+        flags.parent_id,
+        flags.child_id,
+        flags.parent_type.as_deref(),
+        flags.child_type.as_deref(),
+    );
+    let narrowed = flags.parent_id.is_some()
+        || flags.child_id.is_some()
+        || flags.parent_type.is_some()
+        || flags.child_type.is_some();
     if !narrowed && !all {
         return Err(
             "unlink with no filter would remove every edge; pass --all to mean that, or \
@@ -485,7 +548,7 @@ pub fn unlink(
         .count_parent_child_associations(&filter)
         .map_err(|e| e.to_string())?;
     drop(store);
-    if dry_run {
+    if *dry_run {
         return report(
             format,
             || json!({ "dry_run": true, "would_unlink": matched }),
