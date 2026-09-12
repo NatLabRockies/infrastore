@@ -262,32 +262,15 @@ fn render(
 }
 
 fn render_csv(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<String, String> {
-    let (headers, rows) = match data {
-        TimeSeriesData::SingleTimeSeries(s) => {
-            let timestamps: Vec<String> = (0..s.length)
-                .map(|i| {
-                    s.resolution
-                        .add_to(s.initial_timestamp, i as i64)
-                        .map(|t| fields::render_timestamp(t, s.time_reference.as_ref()))
-                        .ok_or_else(|| format!("timestamp overflow at grid index {i}"))
-                })
-                .collect::<Result<_, String>>()?;
-            sequential_rows(&timestamps, &s.data)
-        }
-        TimeSeriesData::NonSequentialTimeSeries(ns) => {
-            let timestamps: Vec<String> =
-                fields::render_timestamps(&ns.timestamps, ns.time_reference.as_ref());
-            sequential_rows(&timestamps, &ns.data)
-        }
-        // The breakpoints and their values, which is the whole series. The CSV
-        // this writes is exactly what `add` reads back for the type, so the
-        // round trip closes the same way it does for the irregular type above.
-        TimeSeriesData::PersistentTimeSeries(p) => {
-            let timestamps: Vec<String> =
-                fields::render_timestamps(&p.timestamps, p.time_reference.as_ref());
-            sequential_rows(&timestamps, &p.data)
-        }
-        _ => show::forecast_csv_rows(meta, data)?,
+    let (headers, rows) = match show::static_points(data)? {
+        // For a `PersistentTimeSeries` these are the breakpoints and their
+        // values, which is the whole series and exactly what `add` reads back.
+        Some((times, arr)) => show::sequential_table(
+            &fields::render_timestamps(&times, data.time_reference()),
+            arr,
+            0..arr.length(),
+        ),
+        None => show::forecast_csv_rows(meta, data)?,
     };
     let mut writer = csv::Writer::from_writer(Vec::new());
     writer.write_record(&headers).map_err(|e| e.to_string())?;
@@ -296,31 +279,6 @@ fn render_csv(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<String
     }
     let bytes = writer.into_inner().map_err(|e| e.to_string())?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
-}
-
-fn sequential_rows(
-    timestamps: &[String],
-    arr: &infrastore_core::TypedArray,
-) -> (Vec<String>, Vec<Vec<String>>) {
-    let per_step = arr.element_shape().iter().product::<usize>().max(1);
-    let decoded = csv_io::array_to_strings(arr);
-    let mut headers = vec!["timestamp".to_string()];
-    if per_step <= 1 {
-        headers.push("value".to_string());
-    } else {
-        headers.extend((0..per_step).map(|i| format!("value[{i}]")));
-    }
-    let rows = (0..arr.length())
-        .map(|i| {
-            let mut row = Vec::with_capacity(1 + per_step);
-            row.push(timestamps.get(i).cloned().unwrap_or_default());
-            for j in 0..per_step {
-                row.push(decoded[i * per_step + j].clone());
-            }
-            row
-        })
-        .collect();
-    (headers, rows)
 }
 
 /// One series as a JSON document: pretty for `-f json`, one compact line for

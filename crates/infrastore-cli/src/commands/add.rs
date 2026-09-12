@@ -231,32 +231,68 @@ impl InlineArgs {
     }
 }
 
-/// Everything `add` was asked to do, assembled by `main`.
-pub struct Options<'a> {
-    pub descriptor: Option<&'a Path>,
-    pub csv: Option<&'a Path>,
-    /// Parquet partitions to load: a file, a directory, or a stem. Mutually
-    /// exclusive with the descriptor and CSV forms, because a partition's series
-    /// file *is* the descriptor.
-    pub parquet: &'a [PathBuf],
-    /// Waive the `data_hash` comparison the array key doubles as.
-    ///
-    /// Only the Parquet path reads it, so a build without that feature has a
-    /// flag it parses and does not use — which is what every other `--parquet`
-    /// argument does too, and better than a flag that vanishes from `--help`.
+// The `add` command's flags, handed to [`run`] as parsed.
+//
+// `--parquet` is mutually exclusive with the descriptor and CSV forms, because
+// a partition's series file *is* the descriptor. `--no-checksum` is read only
+// by the Parquet path, so a build without that feature parses a flag it does
+// not use — as it does every other `--parquet` argument, which beats a flag
+// that vanishes from `--help`.
+#[derive(Debug, clap::Args)]
+pub struct AddArgs {
+    /// Descriptor JSON describing the series (single object or array of
+    /// objects). `-` reads it from stdin.
+    #[arg(long)]
+    pub descriptor: Option<PathBuf>,
+    /// CSV data path. With --descriptor it overrides the descriptor's own
+    /// (single-series descriptors only); without one it starts an inline add.
+    #[arg(long)]
+    pub csv: Option<PathBuf>,
+    /// Parquet partition to load, repeatable: a file, a directory, or a
+    /// partition stem. A pair written by `export -f parquet` is
+    /// self-describing and needs no other flag; a foreign values file needs
+    /// at least --owner-id and --owner-type.
+    #[arg(long, value_name = "PATH")]
+    pub parquet: Vec<PathBuf>,
+    /// Waive the data_hash check on a --parquet load, for values edited in a
+    /// query engine without the hash being recomputed.
+    #[arg(long)]
     #[cfg_attr(not(feature = "parquet"), allow(dead_code))]
     pub no_checksum: bool,
-    pub inline: &'a InlineArgs,
-    pub compression: Option<Compression>,
-    pub catalog: CatalogChoice,
-    pub batch_size: Option<usize>,
-    pub replace: bool,
+    #[command(flatten)]
+    pub inline: InlineArgs,
+    /// Resolve every descriptor and print what would be written, without
+    /// opening the store.
+    #[arg(long)]
     pub dry_run: bool,
+    /// Remove any series that already has one of these identities first.
+    #[arg(long)]
+    pub replace: bool,
+    /// Commit every N series instead of the whole load in one transaction.
+    #[arg(long, value_name = "N")]
+    pub batch_size: Option<usize>,
+    /// Print nothing but errors.
+    #[arg(long, short = 'q')]
     pub quiet: bool,
-    pub format: Format,
+    /// Compression for a store created by this command: none, deflate, or
+    /// deflate:LEVEL (0-9). Errors if the store already exists.
+    #[arg(long)]
+    pub compression: Option<String>,
+    /// Disable byte-shuffle for deflate compression (only with --compression).
+    #[arg(long)]
+    pub no_shuffle: bool,
+    /// Where the SQLite catalog lives while the store is open.
+    #[arg(long, value_name = "MODE", default_value_t = CatalogChoice::Attached)]
+    pub catalog: CatalogChoice,
 }
 
-pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
+/// `compression` is `--compression` / `--no-shuffle` already parsed.
+pub fn run(
+    store_path: &Path,
+    opts: &AddArgs,
+    compression: Option<Compression>,
+    format: Format,
+) -> Result<(), String> {
     // Resolved up front, because a Parquet file *is* the descriptor: there is
     // nothing to load from a JSON file and nothing for a relative `csv` path to
     // sit beside.
@@ -269,10 +305,8 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
 
     if opts.dry_run {
         return match &parquet {
-            Some((setup, files)) => {
-                report_parquet_dry_run(&parquet_dry_run(setup, files)?, opts.format)
-            }
-            None => dry_run(&descriptors, base_dir.as_deref(), csv_override, opts.format),
+            Some((setup, files)) => report_parquet_dry_run(&parquet_dry_run(setup, files)?, format),
+            None => dry_run(&descriptors, base_dir.as_deref(), csv_override, format),
         };
     }
 
@@ -314,7 +348,7 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
                     file,
                     setup,
                     &mut store,
-                    &|| open(opts.compression, opts.catalog),
+                    &|| open(compression, opts.catalog),
                     opts.replace,
                     &mut added,
                 )?;
@@ -330,14 +364,14 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
             // make.
             if pending.len() >= batch {
                 if store.is_none() {
-                    store = Some(open(opts.compression, opts.catalog)?);
+                    store = Some(open(compression, opts.catalog)?);
                 }
                 let store = store.as_mut().expect("just opened");
                 total += flush(store, &mut pending, opts.replace, &mut added)?;
             }
         }
         if !pending.is_empty() && store.is_none() {
-            store = Some(open(opts.compression, opts.catalog)?);
+            store = Some(open(compression, opts.catalog)?);
         }
         if let Some(store) = store.as_mut() {
             total += flush(store, &mut pending, opts.replace, &mut added)?;
@@ -374,7 +408,7 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     }
     let listed = total <= PER_SERIES_LIST_MAX;
     crate::output::report(
-        opts.format,
+        format,
         || {
             serde_json::json!({
                 "added": total,
@@ -577,8 +611,8 @@ type Loaded<'a> = (Vec<Descriptor>, Option<PathBuf>, Option<&'a Path>);
 
 /// Resolve the descriptors plus the directory their relative `csv` paths are
 /// against, from whichever input form was used.
-fn load_descriptors<'a>(opts: &'a Options<'a>) -> Result<Loaded<'a>, String> {
-    match (opts.descriptor, opts.csv) {
+fn load_descriptors(opts: &AddArgs) -> Result<Loaded<'_>, String> {
+    match (opts.descriptor.as_deref(), opts.csv.as_deref()) {
         (Some(path), csv) => {
             if opts.inline.any_set() {
                 return Err(
@@ -710,14 +744,14 @@ impl ParquetImport {
 /// does not redo the committed ones.
 #[cfg(feature = "parquet")]
 fn parquet_import(
-    opts: &Options<'_>,
+    opts: &AddArgs,
 ) -> Result<(ParquetImport, Vec<infrastore_parquet::PartitionFiles>), String> {
     if opts.descriptor.is_some() || opts.csv.is_some() {
         return Err(
             "--parquet carries its own descriptors; drop --descriptor and --csv".to_string(),
         );
     }
-    refuse_grid_flags(opts.inline)?;
+    refuse_grid_flags(&opts.inline)?;
     let setup = ParquetImport {
         options: parquet_options(opts)?,
         features: inline_features(opts)?,
@@ -729,7 +763,7 @@ fn parquet_import(
             .transpose()?,
     };
     let mut files = Vec::new();
-    for path in opts.parquet {
+    for path in &opts.parquet {
         files.extend(infrastore_parquet::partitions(path).map_err(|e| e.to_string())?);
     }
     Ok((setup, files))
@@ -964,7 +998,7 @@ fn refuse_grid_flags(inline: &InlineArgs) -> Result<(), String> {
 }
 
 #[cfg(feature = "parquet")]
-fn parquet_options(opts: &Options<'_>) -> Result<infrastore_parquet::read::ImportOptions, String> {
+fn parquet_options(opts: &AddArgs) -> Result<infrastore_parquet::read::ImportOptions, String> {
     Ok(infrastore_parquet::read::ImportOptions {
         time_series_type: opts
             .inline
@@ -1027,7 +1061,7 @@ fn parquet_options(opts: &Options<'_>) -> Result<infrastore_parquet::read::Impor
 }
 
 #[cfg(feature = "parquet")]
-fn inline_features(opts: &Options<'_>) -> Result<Option<infrastore_core::Features>, String> {
+fn inline_features(opts: &AddArgs) -> Result<Option<infrastore_core::Features>, String> {
     if opts.inline.feature.is_empty() {
         return Ok(None);
     }
@@ -1043,8 +1077,8 @@ fn inline_features(opts: &Options<'_>) -> Result<Option<infrastore_core::Feature
 struct ParquetImport;
 
 #[cfg(not(feature = "parquet"))]
-fn parquet_import(_opts: &Options<'_>) -> Result<(ParquetImport, Vec<PathBuf>), String> {
-    Err(without_parquet())
+fn parquet_import(_opts: &AddArgs) -> Result<(ParquetImport, Vec<PathBuf>), String> {
+    Err(crate::commands::without_parquet())
 }
 
 #[cfg(not(feature = "parquet"))]
@@ -1056,7 +1090,7 @@ fn import_parquet_partition(
     _replace: bool,
     _added: &mut Vec<AddedRow>,
 ) -> Result<usize, String> {
-    Err(without_parquet())
+    Err(crate::commands::without_parquet())
 }
 
 #[cfg(not(feature = "parquet"))]
@@ -1064,12 +1098,7 @@ fn parquet_dry_run(
     _setup: &ParquetImport,
     _files: &[PathBuf],
 ) -> Result<Vec<ParquetBatch>, String> {
-    Err(without_parquet())
-}
-
-#[cfg(not(feature = "parquet"))]
-fn without_parquet() -> String {
-    crate::commands::without_parquet()
+    Err(crate::commands::without_parquet())
 }
 
 /// Report what a Parquet load would write, per partition.

@@ -53,44 +53,66 @@ pub enum ColumnLabel {
     Full,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    store_path: &Path,
-    selector: &SelectorArgs,
-    window_start: Option<&str>,
-    window_length: Option<usize>,
-    time_range: Option<&str>,
-    limit: Option<usize>,
-    full: bool,
-    label: ColumnLabel,
-    format: Format,
-) -> Result<(), String> {
+// The `grid` command's flags, handed to [`run`] as parsed.
+#[derive(Debug, clap::Args)]
+pub struct GridArgs {
+    #[command(flatten)]
+    pub selector: SelectorArgs,
+    /// Sweep this span instead of the grid the matched series share, so
+    /// SingleTimeSeries that start at different instants or run for different
+    /// lengths line up. Each column reads at an offset of its own; a series that
+    /// does not cover the span is an error naming it. RFC3339 or epoch-ms.
+    #[arg(long, value_name = "TIMESTAMP")]
+    pub window_start: Option<String>,
+    /// Timesteps to sweep from --window-start; without it, as far as every matched
+    /// series reaches.
+    #[arg(long, value_name = "N", requires = "window_start")]
+    pub window_length: Option<usize>,
+    /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+    /// regular series' START inside a step selects that step, an irregular series
+    /// keeps only timestamps at or after START, and a forecast's START must be a
+    /// window boundary (only its END clips). Filters the rows a reader already has;
+    /// --window-start decides which rows it has at all.
+    #[arg(long)]
+    pub time_range: Option<String>,
+    /// Max rows to show in table output (default 50).
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Show all rows in table output.
+    #[arg(long)]
+    pub full: bool,
+    /// How to name the columns.
+    #[arg(long, value_name = "MODE", default_value = "auto")]
+    pub label: ColumnLabel,
+}
+
+pub fn run(store_path: &Path, args: &GridArgs, format: Format) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     // `--window-start` builds a different reader; `--time-range` filters the
     // rows of whichever reader was built. They compose, and only the first can
     // rescue a selection whose series share no grid.
-    let window = match window_start {
+    let window = match args.window_start.as_deref() {
         None => infrastore_core::ReadWindow::full(),
         Some(text) => {
             let (instant, reference) = crate::parse::parse_timestamp_with_reference(text)?;
             infrastore_core::ReadWindow {
                 start: Some(instant),
                 zoneless: reference.is_zoneless(),
-                len: window_length,
+                len: args.window_length,
                 count: None,
             }
         }
     };
     let mut reader = store
-        .build_static_reader_over(selector.to_filter()?, window)
+        .build_static_reader_over(args.selector.to_filter()?, window)
         .map_err(|e| e.to_string())?;
 
-    let headers = column_headers(&store, &reader, label)?;
+    let headers = column_headers(&store, &reader, args.label)?;
     if headers.len() == 1 {
         return Err("no time series matched the selector".to_string());
     }
 
-    let range = crate::parse::parse_time_range(time_range)?;
+    let range = crate::parse::parse_time_range(args.time_range.as_deref())?;
     // Decision 8 again: a bound has to be spelled the way the thing it slices
     // is. Every other ranged read gets this for free by handing the range to the
     // core, which checks it once in `materialize_time_series`; `grid` filters the
@@ -113,7 +135,7 @@ pub fn run(
     // back by `add`, and a truncated file is still a valid wide CSV, so
     // shortening one here would surface much later as a series that ends early.
     // Slice a pipe with `--time-range` instead.
-    let max = match (format, full, limit) {
+    let max = match (format, args.full, args.limit) {
         (Format::Table, false, Some(n)) => n,
         (Format::Table, false, None) => DEFAULT_LIMIT,
         _ => all.len(),

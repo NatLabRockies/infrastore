@@ -151,21 +151,66 @@ pub fn parses_as(dtype: Dtype, cell: &str) -> bool {
     encode_cell(dtype, cell, &mut sink).is_ok()
 }
 
+/// Expand `$arm!(T)` for the Rust type `T` a [`Dtype`] stores, so each
+/// per-dtype conversion is written once rather than as eleven match arms.
+macro_rules! by_dtype {
+    ($dtype:expr, $arm:ident) => {
+        match $dtype {
+            Dtype::F64 => $arm!(f64),
+            Dtype::F32 => $arm!(f32),
+            Dtype::I64 => $arm!(i64),
+            Dtype::I32 => $arm!(i32),
+            Dtype::I16 => $arm!(i16),
+            Dtype::I8 => $arm!(i8),
+            Dtype::U64 => $arm!(u64),
+            Dtype::U32 => $arm!(u32),
+            Dtype::U16 => $arm!(u16),
+            Dtype::U8 => $arm!(u8),
+            Dtype::Bool => $arm!(bool),
+        }
+    };
+}
+
+/// Decode every little-endian element of `bytes`: `|v| $num` for a numeric
+/// dtype (`v` its Rust type), `|b| $boolean` for `Bool`.
+macro_rules! map_elements {
+    ($dtype:expr, $bytes:expr, |$v:ident| $num:expr, |$b:ident| $boolean:expr) => {{
+        let bytes: &[u8] = $bytes;
+        macro_rules! each {
+            (bool) => {
+                bytes
+                    .iter()
+                    .map(|&byte| {
+                        let $b = byte != 0;
+                        $boolean
+                    })
+                    .collect()
+            };
+            ($t:ty) => {
+                bytes
+                    .chunks_exact(std::mem::size_of::<$t>())
+                    .map(|c| {
+                        let $v = <$t>::from_le_bytes(c.try_into().unwrap());
+                        $num
+                    })
+                    .collect()
+            };
+        }
+        by_dtype!($dtype, each)
+    }};
+}
+
 fn encode_cell(dtype: Dtype, raw: &str, out: &mut Vec<u8>) -> Result<(), String> {
     let s = raw.trim();
-    match dtype {
-        Dtype::F64 => out.extend_from_slice(&parse_num::<f64>(s)?.to_le_bytes()),
-        Dtype::F32 => out.extend_from_slice(&parse_num::<f32>(s)?.to_le_bytes()),
-        Dtype::I64 => out.extend_from_slice(&parse_num::<i64>(s)?.to_le_bytes()),
-        Dtype::I32 => out.extend_from_slice(&parse_num::<i32>(s)?.to_le_bytes()),
-        Dtype::I16 => out.extend_from_slice(&parse_num::<i16>(s)?.to_le_bytes()),
-        Dtype::I8 => out.extend_from_slice(&parse_num::<i8>(s)?.to_le_bytes()),
-        Dtype::U64 => out.extend_from_slice(&parse_num::<u64>(s)?.to_le_bytes()),
-        Dtype::U32 => out.extend_from_slice(&parse_num::<u32>(s)?.to_le_bytes()),
-        Dtype::U16 => out.extend_from_slice(&parse_num::<u16>(s)?.to_le_bytes()),
-        Dtype::U8 => out.extend_from_slice(&parse_num::<u8>(s)?.to_le_bytes()),
-        Dtype::Bool => out.push(parse_bool(s)? as u8),
+    macro_rules! encode {
+        (bool) => {
+            out.push(parse_bool(s)? as u8)
+        };
+        ($t:ty) => {
+            out.extend_from_slice(&parse_num::<$t>(s)?.to_le_bytes())
+        };
     }
+    by_dtype!(dtype, encode);
     Ok(())
 }
 
@@ -194,23 +239,7 @@ pub fn array_to_strings(arr: &TypedArray) -> Vec<String> {
 /// than a [`TypedArray`], and wrapping it in one per timestep would copy the
 /// whole buffer on every step of the loop the reader exists to make cheap.
 pub fn bytes_to_strings(dtype: Dtype, bytes: &[u8]) -> Vec<String> {
-    let size = dtype.size();
-    bytes
-        .chunks_exact(size)
-        .map(|c| match dtype {
-            Dtype::F64 => f64::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::F32 => f32::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::I64 => i64::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::I32 => i32::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::I16 => i16::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::I8 => i8::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::U64 => u64::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::U32 => u32::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::U16 => u16::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::U8 => u8::from_le_bytes(c.try_into().unwrap()).to_string(),
-            Dtype::Bool => (c[0] != 0).to_string(),
-        })
-        .collect()
+    map_elements!(dtype, bytes, |v| v.to_string(), |b| b.to_string())
 }
 
 /// Decode every element to a JSON scalar of its own type.
@@ -231,51 +260,13 @@ pub fn array_to_json_values(arr: &TypedArray) -> Vec<serde_json::Value> {
 /// slice of a buffer — a row of a series it is about to print — rather than the
 /// whole of it.
 pub fn bytes_to_json_values(dtype: Dtype, bytes: &[u8]) -> Vec<serde_json::Value> {
-    use serde_json::{Value, json};
-    let size = dtype.size();
-    bytes
-        .chunks_exact(size)
-        .map(|c| match dtype {
-            Dtype::F64 => finite_json(f64::from_le_bytes(c.try_into().unwrap())),
-            Dtype::F32 => finite_json(f32::from_le_bytes(c.try_into().unwrap()) as f64),
-            Dtype::I64 => json!(i64::from_le_bytes(c.try_into().unwrap())),
-            Dtype::I32 => json!(i32::from_le_bytes(c.try_into().unwrap())),
-            Dtype::I16 => json!(i16::from_le_bytes(c.try_into().unwrap())),
-            Dtype::I8 => json!(i8::from_le_bytes(c.try_into().unwrap())),
-            Dtype::U64 => json!(u64::from_le_bytes(c.try_into().unwrap())),
-            Dtype::U32 => json!(u32::from_le_bytes(c.try_into().unwrap())),
-            Dtype::U16 => json!(u16::from_le_bytes(c.try_into().unwrap())),
-            Dtype::U8 => json!(u8::from_le_bytes(c.try_into().unwrap())),
-            Dtype::Bool => json!(c[0] != 0),
-        })
-        .collect::<Vec<Value>>()
-}
-
-fn finite_json(v: f64) -> serde_json::Value {
-    if v.is_finite() {
-        serde_json::json!(v)
-    } else {
-        serde_json::Value::Null
-    }
+    // `serde_json` already maps a non-finite float to `null`.
+    map_elements!(dtype, bytes, |v| serde_json::json!(v), |b| {
+        serde_json::json!(b)
+    })
 }
 
 /// Decode every element to `f64` (lossy for wide integer types), for stats.
 pub fn array_to_f64_lossy(arr: &TypedArray) -> Vec<f64> {
-    let size = arr.dtype.size();
-    arr.bytes
-        .chunks_exact(size)
-        .map(|c| match arr.dtype {
-            Dtype::F64 => f64::from_le_bytes(c.try_into().unwrap()),
-            Dtype::F32 => f32::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::I64 => i64::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::I32 => i32::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::I16 => i16::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::I8 => i8::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::U64 => u64::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::U32 => u32::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::U16 => u16::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::U8 => u8::from_le_bytes(c.try_into().unwrap()) as f64,
-            Dtype::Bool => (c[0] != 0) as u8 as f64,
-        })
-        .collect()
+    map_elements!(arr.dtype, &arr.bytes, |v| v as f64, |b| f64::from(b))
 }

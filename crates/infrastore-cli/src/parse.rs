@@ -16,7 +16,7 @@ const DURATION_EXAMPLES: &str = "PT1H, PT15M, PT30S, P1D, P1M, P1Y";
 /// spans, `P1M` / `P1Y` for calendar ones.
 ///
 /// ISO-8601 is the only accepted spelling, matching what the CLI *prints*
-/// (every rendered period goes through [`format_period`]), so a duration copied
+/// (every rendered period goes through `Period::to_iso8601`), so a duration copied
 /// out of `list`, `info`, or `export -f json` pastes back into the descriptor
 /// it came from. A human form (`1h`, `15min`, `7d`) survives in
 /// [`legacy_suggestion`] as an error hint only.
@@ -48,11 +48,6 @@ fn legacy_suggestion(s: &str) -> Option<String> {
         _ => return None,
     };
     Some(Period::Fixed(d).to_iso8601())
-}
-
-/// Render a [`Period`] as its canonical ISO-8601 duration string.
-pub fn format_period(p: Period) -> String {
-    p.to_iso8601()
 }
 
 /// `H = horizon / resolution` for periods, requiring an exact positive integer
@@ -635,9 +630,9 @@ mod tests {
         );
         assert_eq!(parse_period("P1M").unwrap(), Period::Months(1));
         assert_eq!(parse_period("P1Y").unwrap(), Period::Months(12));
-        assert_eq!(format_period(Period::Fixed(Duration::hours(1))), "PT1H");
-        assert_eq!(format_period(Period::Months(1)), "P1M");
-        assert_eq!(format_period(Period::Months(12)), "P1Y");
+        assert_eq!(Period::Fixed(Duration::hours(1)).to_iso8601(), "PT1H");
+        assert_eq!(Period::Months(1).to_iso8601(), "P1M");
+        assert_eq!(Period::Months(12).to_iso8601(), "P1Y");
     }
 
     /// Every period the CLI renders must be one the CLI can read back. This is
@@ -655,7 +650,7 @@ mod tests {
             Period::Months(3),
             Period::Months(12),
         ] {
-            let rendered = format_period(p);
+            let rendered = p.to_iso8601();
             assert_eq!(parse_period(&rendered).unwrap(), p, "round trip {rendered}");
         }
     }

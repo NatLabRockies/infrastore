@@ -14,7 +14,7 @@
 //! * `overlay` — a `Deterministic`'s windows drawn over the `SingleTimeSeries`
 //!   it was transformed from: forecast against actual.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Timelike, Utc};
 use infrastore_core::{
@@ -44,19 +44,36 @@ pub enum Kind {
     Overlay,
 }
 
-/// Everything `plot` was asked to draw.
-pub struct Options<'a> {
+// The `plot` command's flags, handed to [`run`] as parsed.
+#[derive(Debug, clap::Args)]
+pub struct PlotArgs {
+    #[command(flatten)]
+    pub selector: SelectorArgs,
+    /// Which view to draw.
+    #[arg(long, default_value = "line")]
     pub kind: Kind,
-    pub out: &'a Path,
-    pub time_range: Option<&'a str>,
-    pub title: Option<&'a str>,
+    /// Destination file (.svg or .html); `-` writes to stdout.
+    #[arg(long, default_value = "chart.svg")]
+    pub out: PathBuf,
+    /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
+    /// regular series' START inside a step selects that step, an irregular series
+    /// keeps only timestamps at or after START, and a forecast's START must be a
+    /// window boundary (only its END clips).
+    #[arg(long)]
+    pub time_range: Option<String>,
+    /// Chart title (defaults to the series name).
+    #[arg(long)]
+    pub title: Option<String>,
+    #[arg(long, default_value_t = 960.0)]
     pub width: f64,
+    #[arg(long, default_value_t = 440.0)]
     pub height: f64,
-    /// Which forecast window `fan` draws, and how many windows `overlay` shows.
+    /// First forecast window to draw (fan, overlay).
+    #[arg(long, default_value_t = 0)]
     pub window: usize,
+    /// How many forecast windows to overlay (overlay; default 8).
+    #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
-    /// Only shapes the "wrote it" line — the chart itself is always SVG.
-    pub format: Format,
 }
 
 /// The smallest canvas worth rendering. Below this the margins alone consume the
@@ -87,11 +104,13 @@ fn check_canvas(value: f64, flag: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run(store_path: &Path, selector: &SelectorArgs, opts: &Options<'_>) -> Result<(), String> {
+/// `format` only shapes the "wrote it" line — the chart itself is always SVG.
+pub fn run(store_path: &Path, opts: &PlotArgs, format: Format) -> Result<(), String> {
     check_canvas(opts.width, "width")?;
     check_canvas(opts.height, "height")?;
+    let selector = &opts.selector;
     let store = store_access::open_readonly(store_path)?;
-    let range = crate::parse::parse_time_range(opts.time_range)?;
+    let range = crate::parse::parse_time_range(opts.time_range.as_deref())?;
     let document = match opts.kind {
         Kind::Line => line(&store, selector, opts, range)?,
         Kind::Duration => duration(&store, selector, opts, range)?,
@@ -100,10 +119,10 @@ pub fn run(store_path: &Path, selector: &SelectorArgs, opts: &Options<'_>) -> Re
         Kind::Overlay => overlay(&store, selector, opts)?,
     };
     write_out(
-        opts.out,
-        opts.title.unwrap_or("infrastore"),
+        &opts.out,
+        opts.title.as_deref().unwrap_or("infrastore"),
         &document,
-        opts.format,
+        format,
     )
 }
 
@@ -135,7 +154,7 @@ fn write_out(out: &Path, title: &str, document: &str, format: Format) -> Result<
 fn line(
     store: &Store,
     selector: &SelectorArgs,
-    opts: &Options<'_>,
+    opts: &PlotArgs,
     range: Option<crate::parse::TimeRange>,
 ) -> Result<String, String> {
     let curves = static_curves(store, selector, range)?;
@@ -151,7 +170,7 @@ fn line(
         })
         .collect();
     Ok(svg::Chart {
-        title: opts.title.map(str::to_string).unwrap_or_else(|| {
+        title: opts.title.clone().unwrap_or_else(|| {
             curves
                 .first()
                 .map(|c| c.name.clone())
@@ -172,7 +191,7 @@ fn line(
 fn duration(
     store: &Store,
     selector: &SelectorArgs,
-    opts: &Options<'_>,
+    opts: &PlotArgs,
     range: Option<crate::parse::TimeRange>,
 ) -> Result<String, String> {
     let curves = static_curves(store, selector, range)?;
@@ -198,7 +217,7 @@ fn duration(
     Ok(svg::Chart {
         title: opts
             .title
-            .map(str::to_string)
+            .clone()
             .unwrap_or_else(|| "Load duration curve".to_string()),
         subtitle: subtitle(&curves),
         x_label: "Percent of time at or above (%)".to_string(),
@@ -216,7 +235,7 @@ fn duration(
 fn heatmap(
     store: &Store,
     selector: &SelectorArgs,
-    opts: &Options<'_>,
+    opts: &PlotArgs,
     range: Option<crate::parse::TimeRange>,
 ) -> Result<String, String> {
     let mut curves = static_curves(store, selector, range)?;
@@ -292,7 +311,7 @@ fn heatmap(
     Ok(svg::Heatmap {
         title: opts
             .title
-            .map(str::to_string)
+            .clone()
             .unwrap_or_else(|| format!("{} by hour and day", curve.name)),
         subtitle: format!("{} · {} · {} days", curve.label, step.to_iso8601(), cols),
         x_label: "Day (UTC)".to_string(),
@@ -306,7 +325,7 @@ fn heatmap(
     .render())
 }
 
-fn fan(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result<String, String> {
+fn fan(store: &Store, selector: &SelectorArgs, opts: &PlotArgs) -> Result<String, String> {
     let (meta, key) = selector.resolve(store)?;
     let data = store
         .read_by_id(key, infrastore_core::ReadWindow::full())
@@ -395,10 +414,7 @@ fn fan(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result<Str
     }
 
     Ok(svg::Chart {
-        title: opts
-            .title
-            .map(str::to_string)
-            .unwrap_or_else(|| meta.name.clone()),
+        title: opts.title.clone().unwrap_or_else(|| meta.name.clone()),
         subtitle: format!(
             "{} · owner {} · window {} issued {}",
             meta.time_series_type.as_str(),
@@ -417,7 +433,7 @@ fn fan(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result<Str
     .render())
 }
 
-fn overlay(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result<String, String> {
+fn overlay(store: &Store, selector: &SelectorArgs, opts: &PlotArgs) -> Result<String, String> {
     let (meta, key) = selector.resolve(store)?;
     if !matches!(
         meta.time_series_type,
@@ -503,7 +519,7 @@ fn overlay(store: &Store, selector: &SelectorArgs, opts: &Options<'_>) -> Result
     Ok(svg::Chart {
         title: opts
             .title
-            .map(str::to_string)
+            .clone()
             .unwrap_or_else(|| format!("{} — forecast vs actual", meta.name)),
         subtitle: format!(
             "{} · owner {} · windows {}..{}{}",
@@ -619,26 +635,13 @@ fn read_curve(
         None => store.read_by_id(id, infrastore_core::ReadWindow::full()),
     }
     .map_err(|e| e.to_string())?;
-    let (times, arr) = match &data {
-        TimeSeriesData::SingleTimeSeries(s) => {
-            let times = (0..s.length)
-                .map(|i| {
-                    s.resolution
-                        .add_to(s.initial_timestamp, i as i64)
-                        .ok_or_else(|| format!("timestamp overflow at grid index {i}"))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            (times, &s.data)
-        }
-        TimeSeriesData::NonSequentialTimeSeries(ns) => (ns.timestamps.clone(), &ns.data),
-        TimeSeriesData::PersistentTimeSeries(p) => (p.timestamps.clone(), &p.data),
-        other => {
-            return Err(format!(
-                "{} is not a static series",
-                other.time_series_type().as_str()
-            ));
-        }
+    let Some((times, arr)) = super::show::static_points(&data)? else {
+        return Err(format!(
+            "{} is not a static series",
+            data.time_series_type().as_str()
+        ));
     };
+
     // Only the first element of a multidimensional timestep is drawn: a line
     // chart has one value per instant, and silently summing or averaging the
     // rest would invent a number the store does not hold.

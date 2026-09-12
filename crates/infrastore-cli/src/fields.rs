@@ -5,8 +5,6 @@ use chrono::{DateTime, FixedOffset, Utc};
 use infrastore_core::{FeatureValue, Features, TimeReference, TimeSeriesMetadata};
 use serde_json::{Map, Value, json};
 
-use crate::parse;
-
 /// How many leading hex characters of a content hash the table views show.
 ///
 /// A full hash is 64 characters and would dominate any table. 12 is the git
@@ -69,13 +67,18 @@ pub fn feature_value_json(v: &FeatureValue) -> Value {
     }
 }
 
-/// An optional period as its ISO-8601 spelling, or `-`.
-pub fn opt_period(p: Option<infrastore_core::Period>) -> String {
-    p.map(parse::format_period)
-        .unwrap_or_else(|| "-".to_string())
+/// Flatten a JSON value for a two-column table/CSV cell: strings unquoted,
+/// `null` as `-`, everything else in its JSON spelling.
+pub fn value_cell(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => "-".to_string(),
+        other => other.to_string(),
+    }
 }
 
-/// An optional `Display` value as text, or `-`.
+/// An optional `Display` value as text, or `-`. A `Period` displays as its
+/// ISO-8601 spelling.
 pub fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())
 }
@@ -94,8 +97,8 @@ pub fn identity_line(m: &TimeSeriesMetadata) -> String {
         m.owner_category.as_str(),
         m.time_series_type.as_str(),
         m.name,
-        opt_period(m.resolution),
-        opt_period(m.interval),
+        opt(m.resolution),
+        opt(m.interval),
         features_str(&m.features),
         short_hash(&m.data_hash),
     )
