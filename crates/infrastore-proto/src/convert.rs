@@ -161,17 +161,8 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
 }
 
 pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata, ConvertError> {
-    let owner_category =
-        pb::OwnerCategory::try_from(m.owner_category).map_err(|_| ConvertError::InvalidValue {
-            field: "owner_category",
-            message: format!("unknown enum value {}", m.owner_category),
-        })?;
-    let ts_type = pb::TimeSeriesType::try_from(m.time_series_type).map_err(|_| {
-        ConvertError::InvalidValue {
-            field: "time_series_type",
-            message: format!("unknown enum value {}", m.time_series_type),
-        }
-    })?;
+    let owner_category = owner_category_from_i32(m.owner_category)?;
+    let time_series_type = ts_type_from_i32(m.time_series_type)?;
     if m.data_hash.len() != 32 {
         return Err(ConvertError::BadHashLen(m.data_hash.len()));
     }
@@ -200,8 +191,8 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
     Ok(TimeSeriesMetadata {
         owner_id: m.owner_id,
         owner_type: m.owner_type,
-        owner_category: OwnerCategory::from(owner_category),
-        time_series_type: TimeSeriesType::from(ts_type),
+        owner_category,
+        time_series_type,
         name: m.name,
         data_hash,
         initial_timestamp,
@@ -259,155 +250,90 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
 /// or `ListTimeSeries` rather than from the values. Pinned by
 /// `application_data_is_always_empty_in_read_resp`; see the proto comment on field 10.
 pub fn time_series_data_to_read_resp(data: &TimeSeriesData) -> pb::ReadByIdResp {
-    let element_type = data.element_type();
-    // Uniform across every variant, so read once. These describe the values and
-    // travel with them, which is exactly why the read path has to carry them:
+    // Uniform across every variant. These describe the values and travel with
+    // them, which is exactly why the read path has to carry them:
     // `Store::materialize_time_series` populates them on a local read, so
     // dropping them here made the same call return an undescribed series over
     // the wire. (`application_data` above is the genuine exception and stays
     // empty.)
-    let units = data.units().map(str::to_owned);
-    let quantity_kind = data.quantity_kind().map(str::to_owned);
-    let unit_system = data.unit_system().map(|u| u.as_str().to_owned());
-    let time_reference = data.time_reference().map(TimeReference::as_storage_string);
-    let component_field = data.component_field().map(str::to_owned);
-    let name = data.name().to_owned();
+    let base = pb::ReadByIdResp {
+        element_type: data.element_type().to_string(),
+        units: data.units().map(str::to_owned),
+        quantity_kind: data.quantity_kind().map(str::to_owned),
+        unit_system: data.unit_system().map(|u| u.as_str().to_owned()),
+        time_reference: data.time_reference().map(TimeReference::as_storage_string),
+        component_field: data.component_field().map(str::to_owned),
+        name: data.name().to_owned(),
+        ..Default::default()
+    };
+    let shape = |a: &TypedArray| a.shape.iter().map(|d| *d as u64).collect();
     match data {
         TimeSeriesData::SingleTimeSeries(s) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
             resolution: s.resolution.to_iso8601(),
             length: s.length as u64,
-            shape: s.data.shape.iter().map(|d| *d as u64).collect(),
-            element_type: element_type.to_string(),
-            units: units.clone(),
-            quantity_kind: quantity_kind.clone(),
-            unit_system: unit_system.clone(),
-            time_reference: time_reference.clone(),
-            component_field: component_field.clone(),
+            shape: shape(&s.data),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
-            timestamps_rfc3339: Vec::new(),
-            application_data: String::new(),
-            horizon: String::new(),
-            interval: String::new(),
-            count: 0,
-            percentiles: Vec::new(),
-            scenario_count: 0,
-            name: name.clone(),
+            ..base
         },
         TimeSeriesData::NonSequentialTimeSeries(s) => pb::ReadByIdResp {
-            initial_timestamp_rfc3339: String::new(),
-            resolution: String::new(),
             length: s.length as u64,
-            shape: s.data.shape.iter().map(|d| *d as u64).collect(),
-            element_type: element_type.to_string(),
-            units: units.clone(),
-            quantity_kind: quantity_kind.clone(),
-            unit_system: unit_system.clone(),
-            time_reference: time_reference.clone(),
-            component_field: component_field.clone(),
+            shape: shape(&s.data),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
-            application_data: String::new(),
-            horizon: String::new(),
-            interval: String::new(),
-            count: 0,
-            percentiles: Vec::new(),
-            scenario_count: 0,
-            name: name.clone(),
+            ..base
         },
         // Wire-identical to the `NonSequentialTimeSeries` arm above but for the
         // type tag: both are static series on an explicit time axis, so both
         // send `length` plus `timestamps_rfc3339` and nothing else. The
         // difference between them is a read *semantic*, not a payload shape.
         TimeSeriesData::PersistentTimeSeries(s) => pb::ReadByIdResp {
-            initial_timestamp_rfc3339: String::new(),
-            resolution: String::new(),
             length: s.length as u64,
-            shape: s.data.shape.iter().map(|d| *d as u64).collect(),
-            element_type: element_type.to_string(),
-            units: units.clone(),
-            quantity_kind: quantity_kind.clone(),
-            unit_system: unit_system.clone(),
-            time_reference: time_reference.clone(),
-            component_field: component_field.clone(),
+            shape: shape(&s.data),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::PersistentTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
-            application_data: String::new(),
-            horizon: String::new(),
-            interval: String::new(),
-            count: 0,
-            percentiles: Vec::new(),
-            scenario_count: 0,
-            name: name.clone(),
+            ..base
         },
         TimeSeriesData::Deterministic(d) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: d.initial_timestamp.to_rfc3339(),
             resolution: d.resolution.to_iso8601(),
             length: d.data.shape[0] as u64,
-            shape: d.data.shape.iter().map(|x| *x as u64).collect(),
-            element_type: element_type.to_string(),
-            units: units.clone(),
-            quantity_kind: quantity_kind.clone(),
-            unit_system: unit_system.clone(),
-            time_reference: time_reference.clone(),
-            component_field: component_field.clone(),
+            shape: shape(&d.data),
             value_bytes: d.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Deterministic as i32,
-            timestamps_rfc3339: Vec::new(),
-            application_data: String::new(),
             horizon: d.horizon.to_iso8601(),
             interval: d.interval.to_iso8601(),
             count: d.count as u64,
-            percentiles: Vec::new(),
-            scenario_count: 0,
-            name: name.clone(),
+            ..base
         },
         TimeSeriesData::Probabilistic(p) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: p.initial_timestamp.to_rfc3339(),
             resolution: p.resolution.to_iso8601(),
             length: p.data.shape[0] as u64,
-            shape: p.data.shape.iter().map(|x| *x as u64).collect(),
-            element_type: element_type.to_string(),
-            units: units.clone(),
-            quantity_kind: quantity_kind.clone(),
-            unit_system: unit_system.clone(),
-            time_reference: time_reference.clone(),
-            component_field: component_field.clone(),
+            shape: shape(&p.data),
             value_bytes: p.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Probabilistic as i32,
-            timestamps_rfc3339: Vec::new(),
-            application_data: String::new(),
             horizon: p.horizon.to_iso8601(),
             interval: p.interval.to_iso8601(),
             count: p.count as u64,
             percentiles: p.percentiles.clone(),
-            scenario_count: 0,
-            name: name.clone(),
+            ..base
         },
         TimeSeriesData::Scenarios(s) => pb::ReadByIdResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
             resolution: s.resolution.to_iso8601(),
             length: s.data.shape[0] as u64,
-            shape: s.data.shape.iter().map(|x| *x as u64).collect(),
-            element_type: element_type.to_string(),
-            units: units.clone(),
-            quantity_kind: quantity_kind.clone(),
-            unit_system: unit_system.clone(),
-            time_reference: time_reference.clone(),
-            component_field: component_field.clone(),
+            shape: shape(&s.data),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Scenarios as i32,
-            timestamps_rfc3339: Vec::new(),
-            application_data: String::new(),
             horizon: s.horizon.to_iso8601(),
             interval: s.interval.to_iso8601(),
             count: s.count as u64,
-            percentiles: Vec::new(),
             scenario_count: s.scenario_count as u64,
-            name: name.clone(),
+            ..base
         },
     }
 }
@@ -420,12 +346,7 @@ pub fn read_resp_to_time_series_data(
     mut resp: pb::ReadByIdResp,
 ) -> Result<TimeSeriesData, ConvertError> {
     let name = std::mem::take(&mut resp.name);
-    let ts_type = pb::TimeSeriesType::try_from(resp.time_series_type).map_err(|_| {
-        ConvertError::InvalidValue {
-            field: "time_series_type",
-            message: format!("unknown enum value {}", resp.time_series_type),
-        }
-    })?;
+    let ts_type = ts_type_from_i32(resp.time_series_type)?;
     let shape: Vec<usize> = resp.shape.iter().map(|d| *d as usize).collect();
     let element_type =
         ElementType::parse(&resp.element_type).ok_or(ConvertError::InvalidValue {
@@ -458,7 +379,7 @@ pub fn read_resp_to_time_series_data(
         }
     })?;
     let series: Result<TimeSeriesData, ConvertError> = match ts_type {
-        pb::TimeSeriesType::SingleTimeSeries => {
+        TimeSeriesType::SingleTimeSeries => {
             let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
                 .map(|d| d.with_timezone(&Utc))?;
             Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
@@ -478,7 +399,7 @@ pub fn read_resp_to_time_series_data(
                 application_data: None,
             }))
         }
-        pb::TimeSeriesType::NonSequentialTimeSeries => {
+        TimeSeriesType::NonSequentialTimeSeries => {
             let timestamps = resp
                 .timestamps_rfc3339
                 .iter()
@@ -493,7 +414,7 @@ pub fn read_resp_to_time_series_data(
                 })?;
             Ok(TimeSeriesData::NonSequentialTimeSeries(series))
         }
-        pb::TimeSeriesType::PersistentTimeSeries => {
+        TimeSeriesType::PersistentTimeSeries => {
             let timestamps = resp
                 .timestamps_rfc3339
                 .iter()
@@ -507,7 +428,7 @@ pub fn read_resp_to_time_series_data(
             })?;
             Ok(TimeSeriesData::PersistentTimeSeries(series))
         }
-        pb::TimeSeriesType::Deterministic | pb::TimeSeriesType::DeterministicSingleTimeSeries => {
+        TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => {
             let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
                 .map(|d| d.with_timezone(&Utc))?;
             let det = Deterministic::new(
@@ -525,7 +446,7 @@ pub fn read_resp_to_time_series_data(
             })?;
             Ok(TimeSeriesData::Deterministic(det))
         }
-        pb::TimeSeriesType::Probabilistic => {
+        TimeSeriesType::Probabilistic => {
             let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
                 .map(|d| d.with_timezone(&Utc))?;
             let prob = Probabilistic::new(
@@ -544,7 +465,7 @@ pub fn read_resp_to_time_series_data(
             })?;
             Ok(TimeSeriesData::Probabilistic(prob))
         }
-        pb::TimeSeriesType::Scenarios => {
+        TimeSeriesType::Scenarios => {
             let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
                 .map(|d| d.with_timezone(&Utc))?;
             let scen = Scenarios::new(
@@ -597,7 +518,7 @@ fn parse_time_reference(s: Option<&str>) -> Result<Option<TimeReference>, Conver
 }
 
 /// Decode an optional ISO-8601 period from a proto3 `optional string` field.
-fn opt_period(s: Option<&str>) -> Result<Option<Period>, ConvertError> {
+pub fn opt_period(s: Option<&str>) -> Result<Option<Period>, ConvertError> {
     match s {
         Some(s) => Period::from_iso8601(s)
             .map(Some)
@@ -610,7 +531,7 @@ fn opt_period(s: Option<&str>) -> Result<Option<Period>, ConvertError> {
 }
 
 /// Decode a required ISO-8601 period string.
-fn period_from_iso(s: &str) -> Result<Period, ConvertError> {
+pub fn period_from_iso(s: &str) -> Result<Period, ConvertError> {
     Period::from_iso8601(s).map_err(|e| ConvertError::InvalidValue {
         field: "period",
         message: e.to_string(),
@@ -679,34 +600,27 @@ pub fn forecast_summary_row_from_pb(
     })
 }
 
-/// Decode a requested [`TimeSeriesType`] from its proto enum code. The widening
-/// of a `Deterministic` request to its two storage forms happens in the core
-/// (see [`TimeSeriesType::accepts`]), not on the wire.
-pub fn requested_type_from_pb(code: i32) -> Result<TimeSeriesType, ConvertError> {
-    ts_type_from_i32(code)
-}
-
-/// Encode a requested [`TimeSeriesType`] as its proto enum code.
-pub fn requested_type_to_pb(t: TimeSeriesType) -> i32 {
-    pb::TimeSeriesType::from(t) as i32
-}
-
-fn owner_category_from_i32(v: i32) -> Result<OwnerCategory, ConvertError> {
+/// Decode an [`OwnerCategory`] from its proto enum code.
+pub fn owner_category_from_i32(v: i32) -> Result<OwnerCategory, ConvertError> {
     pb::OwnerCategory::try_from(v)
         .map(OwnerCategory::from)
-        .map_err(|_| ConvertError::InvalidValue {
-            field: "owner_category",
-            message: format!("unknown enum value {v}"),
-        })
+        .map_err(|_| unknown_enum("owner_category", v))
 }
 
-fn ts_type_from_i32(v: i32) -> Result<TimeSeriesType, ConvertError> {
+/// Decode a [`TimeSeriesType`] from its proto enum code. The widening of a
+/// `Deterministic` request to its two storage forms happens in the core (see
+/// [`TimeSeriesType::accepts`]), not on the wire.
+pub fn ts_type_from_i32(v: i32) -> Result<TimeSeriesType, ConvertError> {
     pb::TimeSeriesType::try_from(v)
         .map(TimeSeriesType::from)
-        .map_err(|_| ConvertError::InvalidValue {
-            field: "time_series_type",
-            message: format!("unknown enum value {v}"),
-        })
+        .map_err(|_| unknown_enum("time_series_type", v))
+}
+
+fn unknown_enum(field: &'static str, v: i32) -> ConvertError {
+    ConvertError::InvalidValue {
+        field,
+        message: format!("unknown enum value {v}"),
+    }
 }
 
 fn parse_opt_rfc3339(s: Option<&str>) -> Result<Option<DateTime<Utc>>, ConvertError> {
@@ -1510,17 +1424,13 @@ mod convert_coverage_tests {
             TimeSeriesType::SingleTimeSeries,
             TimeSeriesType::NonSequentialTimeSeries,
         ] {
-            let pb = requested_type_to_pb(requested);
-            assert_eq!(
-                requested_type_from_pb(pb).unwrap(),
-                requested,
-                "{requested:?}"
-            );
+            let pb = pb::TimeSeriesType::from(requested) as i32;
+            assert_eq!(ts_type_from_i32(pb).unwrap(), requested, "{requested:?}");
         }
 
         // An unknown code is a clean error.
         assert!(matches!(
-            requested_type_from_pb(999),
+            ts_type_from_i32(999),
             Err(ConvertError::InvalidValue {
                 field: "time_series_type",
                 ..
