@@ -9,34 +9,15 @@ calls that quietly do the wrong thing to a path that already holds a save.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import numpy as np
 import pytest
 
 from infrastore import (
     MismatchedArtifactError,
-    OwnerCategory,
-    SingleTimeSeries,
     Store,
     StoreExistsError,
     TimeSeriesError,
 )
-
-
-def make_series(base: float = 100.0) -> SingleTimeSeries:
-    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
-    data = np.arange(24, dtype=np.float64) + base
-    return SingleTimeSeries(initial, timedelta(hours=1), data, "load")
-
-
-def add(store: Store, owner_id: int, base: float = 100.0) -> None:
-    store.add_time_series(
-        owner_id=owner_id,
-        owner_type="Generator",
-        owner_category=OwnerCategory.Component,
-        time_series=make_series(base),
-    )
+from conftest import add
 
 
 def saved_store(path) -> None:

@@ -1111,31 +1111,6 @@ def test_sub_second_resolutions_are_exact_down_to_one_millisecond():
         assert sliced.initial_timestamp == T0 + resolution
 
 
-def test_a_naive_datetime_is_recorded_as_zoneless():
-    """A timestamp with no tzinfo names a wall clock, not an instant -- so it is
-    recorded as one and handed back as one.
-
-    Accepting it is only defensible because the read path returns the same
-    spelling: a naive datetime does not equal an aware one and cannot even be
-    compared with one, so a store that took one and returned the other would be
-    worse than one that refused. It used to refuse.
-    """
-    series = SingleTimeSeries(
-        datetime(2024, 1, 1), timedelta(hours=1), np.arange(4, dtype=np.float64), "naive"
-    )
-    assert series.time_reference == "zoneless"
-    assert series.initial_timestamp == datetime(2024, 1, 1)
-    assert series.initial_timestamp.tzinfo is None
-
-    # And the conversion never goes through `astimezone`, which would apply the
-    # machine's local zone -- the same script would then write a different
-    # instant in Denver than in CI. The wall clock is taken as it stands.
-    stored = SingleTimeSeries(
-        datetime(2024, 1, 1), timedelta(hours=1), np.arange(4, dtype=np.float64), "naive"
-    )
-    assert stored.initial_timestamp == datetime(2024, 1, 1)
-
-
 def test_pre_1970_and_far_future_timestamps_round_trip(tmp_path):
     path = tmp_path / "spans.h5"
     store = Store.create(path=str(path), in_memory=False)

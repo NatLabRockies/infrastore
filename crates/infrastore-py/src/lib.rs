@@ -30,24 +30,41 @@ use pyo3::types::{
 
 // ---- Exceptions -----------------------------------------------------------
 
-create_exception!(infrastore, TimeSeriesError, PyException);
-create_exception!(infrastore, NotFoundError, TimeSeriesError);
-create_exception!(infrastore, OwnerMismatchError, TimeSeriesError);
-create_exception!(infrastore, DuplicateTimeSeriesError, TimeSeriesError);
-create_exception!(infrastore, DuplicateAssociationError, TimeSeriesError);
-create_exception!(infrastore, DuplicateAssociationIdError, TimeSeriesError);
-create_exception!(infrastore, InvalidParameterError, TimeSeriesError);
-create_exception!(infrastore, IntegrityError, TimeSeriesError);
-create_exception!(infrastore, ReadOnlyStoreError, TimeSeriesError);
-create_exception!(infrastore, IoError, TimeSeriesError);
-create_exception!(infrastore, ConnectionError, TimeSeriesError);
-create_exception!(infrastore, IncompatibleFormatError, TimeSeriesError);
-create_exception!(infrastore, IncompatibleForecastError, TimeSeriesError);
-create_exception!(infrastore, StorageError, TimeSeriesError);
-create_exception!(infrastore, StoreExistsError, TimeSeriesError);
-create_exception!(infrastore, MismatchedArtifactError, TimeSeriesError);
-create_exception!(infrastore, CatalogMigrationRequiredError, TimeSeriesError);
-create_exception!(infrastore, CatalogTooNewError, TimeSeriesError);
+/// Each exception named once: defined here and registered on the module by the
+/// generated `add_exceptions`. `TimeSeriesError` is the base of the rest.
+macro_rules! exceptions {
+    ($($name:ident),* $(,)?) => {
+        create_exception!(infrastore, TimeSeriesError, PyException);
+        $(create_exception!(infrastore, $name, TimeSeriesError);)*
+
+        fn add_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            let py = m.py();
+            m.add("TimeSeriesError", py.get_type::<TimeSeriesError>())?;
+            $(m.add(stringify!($name), py.get_type::<$name>())?;)*
+            Ok(())
+        }
+    };
+}
+
+exceptions!(
+    NotFoundError,
+    OwnerMismatchError,
+    DuplicateTimeSeriesError,
+    DuplicateAssociationError,
+    DuplicateAssociationIdError,
+    InvalidParameterError,
+    IntegrityError,
+    ReadOnlyStoreError,
+    IoError,
+    ConnectionError,
+    IncompatibleFormatError,
+    IncompatibleForecastError,
+    StorageError,
+    StoreExistsError,
+    MismatchedArtifactError,
+    CatalogMigrationRequiredError,
+    CatalogTooNewError,
+);
 
 fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     use core_lib::TimeSeriesError as E;
@@ -439,10 +456,34 @@ fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
 /// hand-written one rather than wrapping it, so the hand-written block stays a
 /// plain impl that `rustfmt` formats — a macro invocation's body is out of its
 /// reach.
+///
+/// `$leading_axes` is how many axes precede the element in the stored array: one
+/// timestep axis for a static series, `[H, count]` for a `Deterministic`, and a
+/// percentile or scenario axis in front of those for the other two forecasts.
 macro_rules! series_pymethods {
-    ($ty:ident) => {
+    ($ty:ident, $leading_axes:literal) => {
         #[pymethods]
         impl $ty {
+            /// Decode this series' array into the per-timestep values its element type
+            /// describes — the read-side counterpart of `from_values`, and the reason a
+            /// caller never has to know the stored row layouts.
+            ///
+            /// Same shapes as `decode_element_values`, which this is: the element type
+            /// and the number of leading axes both come from the series, so there is
+            /// nothing left to pass and nothing to get wrong.
+            ///
+            /// `None` for a scalar element type and for any array whose physical dtype
+            /// is not `float64`: there the stored elements already are the values, and
+            /// `.data` is the answer.
+            fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+                decoded_or_none(py, &self.inner.data, self.inner.element_type, $leading_axes)
+            }
+
+            /// Value equality: all fields including the data array (bitwise).
+            fn __eq__(&self, other: &Self) -> bool {
+                self.inner == other.inner
+            }
+
             /// The values, as a numpy array.
             #[getter]
             fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -507,98 +548,99 @@ macro_rules! series_pymethods {
     };
 }
 
-#[pyclass(
-    eq,
-    eq_int,
-    name = "TimeSeriesType",
-    module = "infrastore",
-    from_py_object
-)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PyTimeSeriesType {
-    SingleTimeSeries,
-    NonSequentialTimeSeries,
-    PersistentTimeSeries,
-    Deterministic,
-    DeterministicSingleTimeSeries,
-    Probabilistic,
-    Scenarios,
-}
+/// The window-timeline getters the three dense forecast types share.
+macro_rules! forecast_pymethods {
+    ($ty:ident) => {
+        #[pymethods]
+        impl $ty {
+            /// The first window's timestamp, spelled the way it was written.
+            #[getter]
+            fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                spell_instant(
+                    py,
+                    self.inner.initial_timestamp,
+                    self.inner.time_reference.as_ref(),
+                )
+            }
 
-impl From<PyTimeSeriesType> for core_lib::TimeSeriesType {
-    fn from(v: PyTimeSeriesType) -> Self {
-        match v {
-            PyTimeSeriesType::SingleTimeSeries => core_lib::TimeSeriesType::SingleTimeSeries,
-            PyTimeSeriesType::NonSequentialTimeSeries => {
-                core_lib::TimeSeriesType::NonSequentialTimeSeries
+            #[getter]
+            fn resolution(&self) -> String {
+                self.inner.resolution.to_iso8601()
             }
-            PyTimeSeriesType::PersistentTimeSeries => {
-                core_lib::TimeSeriesType::PersistentTimeSeries
-            }
-            PyTimeSeriesType::Deterministic => core_lib::TimeSeriesType::Deterministic,
-            PyTimeSeriesType::DeterministicSingleTimeSeries => {
-                core_lib::TimeSeriesType::DeterministicSingleTimeSeries
-            }
-            PyTimeSeriesType::Probabilistic => core_lib::TimeSeriesType::Probabilistic,
-            PyTimeSeriesType::Scenarios => core_lib::TimeSeriesType::Scenarios,
-        }
-    }
-}
 
-impl From<core_lib::TimeSeriesType> for PyTimeSeriesType {
-    fn from(v: core_lib::TimeSeriesType) -> Self {
-        match v {
-            core_lib::TimeSeriesType::SingleTimeSeries => PyTimeSeriesType::SingleTimeSeries,
-            core_lib::TimeSeriesType::NonSequentialTimeSeries => {
-                PyTimeSeriesType::NonSequentialTimeSeries
+            #[getter]
+            fn horizon(&self) -> String {
+                self.inner.horizon.to_iso8601()
             }
-            core_lib::TimeSeriesType::PersistentTimeSeries => {
-                PyTimeSeriesType::PersistentTimeSeries
-            }
-            core_lib::TimeSeriesType::Deterministic => PyTimeSeriesType::Deterministic,
-            core_lib::TimeSeriesType::DeterministicSingleTimeSeries => {
-                PyTimeSeriesType::DeterministicSingleTimeSeries
-            }
-            core_lib::TimeSeriesType::Probabilistic => PyTimeSeriesType::Probabilistic,
-            core_lib::TimeSeriesType::Scenarios => PyTimeSeriesType::Scenarios,
-        }
-    }
-}
 
-#[pyclass(
-    eq,
-    eq_int,
-    name = "OwnerCategory",
-    module = "infrastore",
-    from_py_object
-)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PyOwnerCategory {
-    Component,
-    SupplementalAttribute,
-}
+            #[getter]
+            fn interval(&self) -> String {
+                self.inner.interval.to_iso8601()
+            }
 
-impl From<PyOwnerCategory> for core_lib::OwnerCategory {
-    fn from(v: PyOwnerCategory) -> Self {
-        match v {
-            PyOwnerCategory::Component => core_lib::OwnerCategory::Component,
-            PyOwnerCategory::SupplementalAttribute => {
-                core_lib::OwnerCategory::SupplementalAttribute
+            #[getter]
+            fn count(&self) -> usize {
+                self.inner.count
+            }
+
+            /// Number of forecast windows (`count`).
+            fn __len__(&self) -> usize {
+                self.inner.count
             }
         }
-    }
+    };
 }
 
-impl From<core_lib::OwnerCategory> for PyOwnerCategory {
-    fn from(v: core_lib::OwnerCategory) -> Self {
-        match v {
-            core_lib::OwnerCategory::Component => PyOwnerCategory::Component,
-            core_lib::OwnerCategory::SupplementalAttribute => {
-                PyOwnerCategory::SupplementalAttribute
+/// A Python-visible enum mirroring a core one variant for variant, with the
+/// conversions both ways.
+macro_rules! mirror_enum {
+    ($py_name:literal, $py:ident, $core:ident { $($v:ident),* $(,)? }) => {
+        #[pyclass(eq, eq_int, name = $py_name, module = "infrastore", from_py_object)]
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub enum $py {
+            $($v),*
+        }
+
+        impl From<$py> for core_lib::$core {
+            fn from(v: $py) -> Self {
+                match v {
+                    $($py::$v => Self::$v),*
+                }
             }
         }
-    }
+
+        impl From<core_lib::$core> for $py {
+            fn from(v: core_lib::$core) -> Self {
+                match v {
+                    $(core_lib::$core::$v => Self::$v),*
+                }
+            }
+        }
+    };
 }
+
+mirror_enum!(
+    "TimeSeriesType",
+    PyTimeSeriesType,
+    TimeSeriesType {
+        SingleTimeSeries,
+        NonSequentialTimeSeries,
+        PersistentTimeSeries,
+        Deterministic,
+        DeterministicSingleTimeSeries,
+        Probabilistic,
+        Scenarios,
+    }
+);
+
+mirror_enum!(
+    "OwnerCategory",
+    PyOwnerCategory,
+    OwnerCategory {
+        Component,
+        SupplementalAttribute,
+    }
+);
 
 // ---- Features -------------------------------------------------------------
 
@@ -941,20 +983,8 @@ fn arrow_table_from_column<'py>(
 }
 
 /// A list of integers as a JSON array: `[]`, `[3]`, `[2,3]`.
-///
-/// Hand-rolled rather than through `serde_json`, which is not otherwise a
-/// dependency of this crate: a list of `usize` has no escaping, no float
-/// formatting, and no failure mode.
 fn json_int_list(values: &[usize]) -> String {
-    let mut out = String::from("[");
-    for (i, v) in values.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&v.to_string());
-    }
-    out.push(']');
-    out
+    format!("{values:?}").replace(' ', "")
 }
 
 /// What the `time_reference` metadata key holds for a series that records no
@@ -1260,17 +1290,16 @@ fn nulls_refused() -> PyErr {
 /// column with no zone reads as `zoneless`: a naive timestamp is a wall clock.
 /// This is why the metadata spells the reference out at all — Arrow cannot
 /// distinguish `zoneless` from *unspecified*.
-#[allow(clippy::too_many_arguments)]
-fn arrow_descriptor_args(
-    parts: &ArrowParts<'_>,
-    application_data: Option<String>,
-    element_type: Option<String>,
-    units: Option<String>,
-    quantity_kind: Option<String>,
-    unit_system: Option<String>,
-    component_field: Option<String>,
-    time_reference: Option<String>,
-) -> PyResult<DescriptorArgs> {
+fn arrow_descriptor_args(parts: &ArrowParts<'_>, args: DescriptorArgs) -> PyResult<DescriptorArgs> {
+    let DescriptorArgs {
+        application_data,
+        element_type,
+        units,
+        quantity_kind,
+        unit_system,
+        component_field,
+        time_reference,
+    } = args;
     let meta = &parts.metadata;
     let element_type = match (meta.get("element_type"), element_type) {
         (Some(from_table), Some(asserted)) if from_table != &asserted => {
@@ -1420,7 +1449,8 @@ pub struct PyDeterministic {
     inner: core_lib::Deterministic,
 }
 
-series_pymethods!(PyDeterministic);
+series_pymethods!(PyDeterministic, 2);
+forecast_pymethods!(PyDeterministic);
 
 #[pymethods]
 impl PyDeterministic {
@@ -1547,52 +1577,6 @@ impl PyDeterministic {
         Ok(Self { inner })
     }
 
-    /// Decode this series' array into the per-timestep values its element type
-    /// describes — the read-side counterpart of `from_values`, and the reason a
-    /// caller never has to know the stored row layouts.
-    ///
-    /// Same shapes as `decode_element_values`, which this is: the element type
-    /// and the number of leading axes both come from the series, so there is
-    /// nothing left to pass and nothing to get wrong.
-    ///
-    /// `None` for a scalar element type and for any array whose physical dtype
-    /// is not `float64`: there the stored elements already are the values, and
-    /// `.data` is the answer.
-    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        decoded_or_none(py, &self.inner.data, self.inner.element_type, 2)
-    }
-
-    /// The first window's timestamp, spelled the way it was written.
-    #[getter]
-    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        spell_instant(
-            py,
-            self.inner.initial_timestamp,
-            self.inner.time_reference.as_ref(),
-        )
-    }
-
-    #[getter]
-    fn resolution(&self) -> String {
-        self.inner.resolution.to_iso8601()
-    }
-
-    #[getter]
-    fn horizon(&self) -> String {
-        self.inner.horizon.to_iso8601()
-    }
-
-    #[getter]
-    fn interval(&self) -> String {
-        self.inner.interval.to_iso8601()
-    }
-
-    #[getter]
-    fn count(&self) -> usize {
-        self.inner.count
-    }
-
-    /// Value equality: all fields including the data array (bitwise).
     /// The forecast as `{issue_time: pyarrow.Table}`, one entry per window.
     ///
     /// Requires pyarrow, which is not installed with infrastore — use
@@ -1672,15 +1656,6 @@ impl PyDeterministic {
         Ok(windows)
     }
 
-    fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
-    }
-
-    /// Number of forecast windows (`count`).
-    fn __len__(&self) -> usize {
-        self.inner.count
-    }
-
     fn __repr__(&self) -> String {
         format!(
             "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, shape={:?}, time_reference={})",
@@ -1704,7 +1679,8 @@ pub struct PyProbabilistic {
     inner: core_lib::Probabilistic,
 }
 
-series_pymethods!(PyProbabilistic);
+series_pymethods!(PyProbabilistic, 3);
+forecast_pymethods!(PyProbabilistic);
 
 #[pymethods]
 impl PyProbabilistic {
@@ -1836,64 +1812,9 @@ impl PyProbabilistic {
         Ok(Self { inner })
     }
 
-    /// Decode this series' array into the per-timestep values its element type
-    /// describes — the read-side counterpart of `from_values`, and the reason a
-    /// caller never has to know the stored row layouts.
-    ///
-    /// Same shapes as `decode_element_values`, which this is: the element type
-    /// and the number of leading axes both come from the series, so there is
-    /// nothing left to pass and nothing to get wrong.
-    ///
-    /// `None` for a scalar element type and for any array whose physical dtype
-    /// is not `float64`: there the stored elements already are the values, and
-    /// `.data` is the answer.
-    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
-    }
-
-    /// The first window's timestamp, spelled the way it was written.
-    #[getter]
-    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        spell_instant(
-            py,
-            self.inner.initial_timestamp,
-            self.inner.time_reference.as_ref(),
-        )
-    }
-
-    #[getter]
-    fn resolution(&self) -> String {
-        self.inner.resolution.to_iso8601()
-    }
-
-    #[getter]
-    fn horizon(&self) -> String {
-        self.inner.horizon.to_iso8601()
-    }
-
-    #[getter]
-    fn interval(&self) -> String {
-        self.inner.interval.to_iso8601()
-    }
-
-    #[getter]
-    fn count(&self) -> usize {
-        self.inner.count
-    }
-
     #[getter]
     fn percentiles(&self) -> Vec<f64> {
         self.inner.percentiles.clone()
-    }
-
-    /// Value equality: all fields including the data array (bitwise).
-    fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
-    }
-
-    /// Number of forecast windows (`count`).
-    fn __len__(&self) -> usize {
-        self.inner.count
     }
 
     fn __repr__(&self) -> String {
@@ -1920,7 +1841,8 @@ pub struct PyScenarios {
     inner: core_lib::Scenarios,
 }
 
-series_pymethods!(PyScenarios);
+series_pymethods!(PyScenarios, 3);
+forecast_pymethods!(PyScenarios);
 
 #[pymethods]
 impl PyScenarios {
@@ -2058,64 +1980,9 @@ impl PyScenarios {
         Ok(Self { inner })
     }
 
-    /// Decode this series' array into the per-timestep values its element type
-    /// describes — the read-side counterpart of `from_values`, and the reason a
-    /// caller never has to know the stored row layouts.
-    ///
-    /// Same shapes as `decode_element_values`, which this is: the element type
-    /// and the number of leading axes both come from the series, so there is
-    /// nothing left to pass and nothing to get wrong.
-    ///
-    /// `None` for a scalar element type and for any array whose physical dtype
-    /// is not `float64`: there the stored elements already are the values, and
-    /// `.data` is the answer.
-    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        decoded_or_none(py, &self.inner.data, self.inner.element_type, 3)
-    }
-
-    /// The first window's timestamp, spelled the way it was written.
-    #[getter]
-    fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        spell_instant(
-            py,
-            self.inner.initial_timestamp,
-            self.inner.time_reference.as_ref(),
-        )
-    }
-
-    #[getter]
-    fn resolution(&self) -> String {
-        self.inner.resolution.to_iso8601()
-    }
-
-    #[getter]
-    fn horizon(&self) -> String {
-        self.inner.horizon.to_iso8601()
-    }
-
-    #[getter]
-    fn interval(&self) -> String {
-        self.inner.interval.to_iso8601()
-    }
-
-    #[getter]
-    fn count(&self) -> usize {
-        self.inner.count
-    }
-
     #[getter]
     fn scenario_count(&self) -> usize {
         self.inner.scenario_count
-    }
-
-    /// Value equality: all fields including the data array (bitwise).
-    fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
-    }
-
-    /// Number of forecast windows (`count`).
-    fn __len__(&self) -> usize {
-        self.inner.count
     }
 
     fn __repr__(&self) -> String {
@@ -2142,7 +2009,7 @@ pub struct PySingleTimeSeries {
     inner: core_lib::SingleTimeSeries,
 }
 
-series_pymethods!(PySingleTimeSeries);
+series_pymethods!(PySingleTimeSeries, 1);
 
 #[pymethods]
 impl PySingleTimeSeries {
@@ -2377,21 +2244,6 @@ impl PySingleTimeSeries {
         Ok(Self { inner })
     }
 
-    /// Decode this series' array into the per-timestep values its element type
-    /// describes — the read-side counterpart of `from_values`, and the reason a
-    /// caller never has to know the stored row layouts.
-    ///
-    /// Same shapes as `decode_element_values`, which this is: the element type
-    /// and the number of leading axes both come from the series, so there is
-    /// nothing left to pass and nothing to get wrong.
-    ///
-    /// `None` for a scalar element type and for any array whose physical dtype
-    /// is not `float64`: there the stored elements already are the values, and
-    /// `.data` is the answer.
-    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
-    }
-
     /// The grid's first timestamp, spelled the way it was written.
     #[getter]
     fn initial_timestamp<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -2523,13 +2375,15 @@ impl PySingleTimeSeries {
         };
         let descriptors = arrow_descriptor_args(
             &parts,
-            application_data,
-            element_type,
-            units,
-            quantity_kind,
-            unit_system,
-            component_field,
-            time_reference,
+            DescriptorArgs {
+                application_data,
+                element_type,
+                units,
+                quantity_kind,
+                unit_system,
+                component_field,
+                time_reference,
+            },
         )?
         .resolve(py, inner.element_type, None)?;
         apply_descriptors!(inner, descriptors);
@@ -2573,11 +2427,6 @@ impl PySingleTimeSeries {
         )
     }
 
-    /// Value equality: all fields including the data array (bitwise).
-    fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
-    }
-
     /// Number of time steps (`length`).
     fn __len__(&self) -> usize {
         self.inner.length
@@ -2608,7 +2457,7 @@ pub struct PyNonSequentialTimeSeries {
     inner: core_lib::NonSequentialTimeSeries,
 }
 
-series_pymethods!(PyNonSequentialTimeSeries);
+series_pymethods!(PyNonSequentialTimeSeries, 1);
 
 #[pymethods]
 impl PyNonSequentialTimeSeries {
@@ -2703,21 +2552,6 @@ impl PyNonSequentialTimeSeries {
         Ok(Self { inner })
     }
 
-    /// Decode this series' array into the per-timestep values its element type
-    /// describes — the read-side counterpart of `from_values`, and the reason a
-    /// caller never has to know the stored row layouts.
-    ///
-    /// Same shapes as `decode_element_values`, which this is: the element type
-    /// and the number of leading axes both come from the series, so there is
-    /// nothing left to pass and nothing to get wrong.
-    ///
-    /// `None` for a scalar element type and for any array whose physical dtype
-    /// is not `float64`: there the stored elements already are the values, and
-    /// `.data` is the answer.
-    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
-    }
-
     /// The explicit timestamp vector, spelled the way it was written.
     #[getter]
     fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
@@ -2764,13 +2598,15 @@ impl PyNonSequentialTimeSeries {
             .map_err(InvalidParameterError::new_err)?;
         let descriptors = arrow_descriptor_args(
             &parts,
-            application_data,
-            element_type,
-            units,
-            quantity_kind,
-            unit_system,
-            component_field,
-            time_reference,
+            DescriptorArgs {
+                application_data,
+                element_type,
+                units,
+                quantity_kind,
+                unit_system,
+                component_field,
+                time_reference,
+            },
         )?
         .resolve(py, inner.element_type, None)?;
         apply_descriptors!(inner, descriptors);
@@ -2795,11 +2631,6 @@ impl PyNonSequentialTimeSeries {
             &self.inner.data,
             arrow_metadata!(self.inner, "NonSequentialTimeSeries"),
         )
-    }
-
-    /// Value equality: all fields including the data array (bitwise).
-    fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
     }
 
     /// Number of time steps (`length`).
@@ -2837,7 +2668,7 @@ pub struct PyPersistentTimeSeries {
     inner: core_lib::PersistentTimeSeries,
 }
 
-series_pymethods!(PyPersistentTimeSeries);
+series_pymethods!(PyPersistentTimeSeries, 1);
 
 #[pymethods]
 impl PyPersistentTimeSeries {
@@ -2931,21 +2762,6 @@ impl PyPersistentTimeSeries {
         .resolve(py, inner.element_type, reference)?;
         apply_descriptors!(inner, descriptors);
         Ok(Self { inner })
-    }
-
-    /// Decode this series' array into the per-timestep values its element type
-    /// describes — the read-side counterpart of `from_values`, and the reason a
-    /// caller never has to know the stored row layouts.
-    ///
-    /// Same shapes as `decode_element_values`, which this is: the element type
-    /// and the number of leading axes both come from the series, so there is
-    /// nothing left to pass and nothing to get wrong.
-    ///
-    /// `None` for a scalar element type and for any array whose physical dtype
-    /// is not `float64`: there the stored elements already are the values, and
-    /// `.data` is the answer.
-    fn decoded_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        decoded_or_none(py, &self.inner.data, self.inner.element_type, 1)
     }
 
     /// The breakpoint vector, spelled the way it was written.
@@ -3054,13 +2870,15 @@ impl PyPersistentTimeSeries {
             .map_err(InvalidParameterError::new_err)?;
         let descriptors = arrow_descriptor_args(
             &parts,
-            application_data,
-            element_type,
-            units,
-            quantity_kind,
-            unit_system,
-            component_field,
-            time_reference,
+            DescriptorArgs {
+                application_data,
+                element_type,
+                units,
+                quantity_kind,
+                unit_system,
+                component_field,
+                time_reference,
+            },
         )?
         .resolve(py, inner.element_type, None)?;
         apply_descriptors!(inner, descriptors);
@@ -3086,11 +2904,6 @@ impl PyPersistentTimeSeries {
             &self.inner.data,
             arrow_metadata!(self.inner, "PersistentTimeSeries"),
         )
-    }
-
-    /// Value equality: all fields including the data array (bitwise).
-    fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
     }
 
     /// Number of breakpoints (`length`).
@@ -3357,18 +3170,6 @@ fn time_series_data_to_py(py: Python<'_>, data: core_lib::TimeSeriesData) -> PyR
     }
 }
 
-/// Build a numpy array (owned, writable) from raw dtype/shape/bytes.
-fn numpy_from_parts<'py>(
-    py: Python<'py>,
-    dtype: core_lib::Dtype,
-    shape: Vec<usize>,
-    bytes: Vec<u8>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let arr =
-        core_lib::TypedArray::new(dtype, shape, bytes).map_err(InvalidParameterError::new_err)?;
-    numpy_from_typed(py, &arr)
-}
-
 // ---- StaticReader / ForecastReader ----------------------------------------
 
 /// A prepared columnar reader over the static series sharing one timeline —
@@ -3469,7 +3270,9 @@ impl PyStaticReader {
         })?;
         let mut shape = vec![group.num_columns()];
         shape.extend_from_slice(group.element_shape());
-        numpy_from_parts(py, group.dtype(), shape, group.values().to_vec())
+        let arr = core_lib::TypedArray::new(group.dtype(), shape, group.values().to_vec())
+            .map_err(InvalidParameterError::new_err)?;
+        numpy_from_typed(py, &arr)
     }
 }
 
@@ -3559,12 +3362,13 @@ impl PyForecastReader {
             )));
         }
         let slot = self.inner.entry_slot(index);
-        numpy_from_parts(
-            py,
+        let arr = core_lib::TypedArray::new(
             slot.dtype(),
             slot.window_shape().to_vec(),
             slot.window().to_vec(),
         )
+        .map_err(InvalidParameterError::new_err)?;
+        numpy_from_typed(py, &arr)
     }
 }
 
@@ -4136,10 +3940,7 @@ impl PyStore {
     ) -> PyResult<usize> {
         let horizon = pyany_to_period(&horizon)?;
         let interval = pyany_to_period(&interval)?;
-        let resolution = match resolution {
-            Some(r) => Some(pyany_to_period(&r)?),
-            None => None,
-        };
+        let resolution = resolution.as_ref().map(pyany_to_period).transpose()?;
         self.store_mut()?
             .transform_single_time_series(
                 horizon,
@@ -4186,129 +3987,6 @@ impl PyStore {
             .map_err(map_err)
     }
 
-    /// Return a list of catalog metadata dicts matching the filter. Each dict
-    /// has `id` — the association id that addresses the series — plus
-    /// `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
-    /// `data_hash` (hex string), `length`, `resolution` (ISO 8601 duration
-    /// string, e.g. `PT1H`, or `None`), `features`, `units`, and the rest of the
-    /// row's descriptors.
-    ///
-    /// The listing that answers identity questions: which series exist, what
-    /// each is, and the `id` to read or remove it by. `timestamps` is always
-    /// `None` here — an irregular series' time axis is the one part of a row
-    /// that costs a read per row, so a listing omits it; `read_by_id` returns
-    /// the series with its axis.
-    ///
-    /// `name_glob` filters names by a SQLite `GLOB` pattern (case-sensitive,
-    /// `*`/`?` wildcards); when both `name` and `name_glob` are given, both
-    /// must match. `component_field` matches the owning component's field
-    /// exactly and case-sensitively — "every series that varies this field";
-    /// a row that declares none matches no value, so it cannot select the rows
-    /// that left it unset. All filter arguments are keyword-only.
-    ///
-    /// `time_series_type` is a `TimeSeriesType`. `TimeSeriesType.Deterministic`
-    /// also matches the `DeterministicSingleTimeSeries` rows that
-    /// `transform_single_time_series` derives — each row still reports its own
-    /// `time_series_type`, and passing
-    /// `TimeSeriesType.DeterministicSingleTimeSeries` selects only those. Every
-    /// method taking these filter kwargs reads the type the same way.
-    #[pyo3(signature = (
-        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None,
-        features_exact=false
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn list_metadata<'py>(
-        &self,
-        py: Python<'py>,
-        owner_id: Option<i64>,
-        owner_category: Option<PyOwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-        name: Option<String>,
-        name_glob: Option<String>,
-        component_field: Option<String>,
-        zoneless: Option<bool>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        initial_timestamp: Option<PyInstant>,
-        length: Option<usize>,
-        features: Option<&Bound<'_, PyDict>>,
-        features_exact: bool,
-    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let filter = build_list_filter(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type.as_ref(),
-            name,
-            name_glob,
-            component_field,
-            zoneless,
-            resolution,
-            initial_timestamp,
-            length,
-            interval,
-            features,
-            features_exact,
-        )?;
-        let metas = self.store()?.list_metadata(filter).map_err(map_err)?;
-        let mut out = Vec::with_capacity(metas.len());
-        for m in &metas {
-            out.push(metadata_to_dict(py, m)?);
-        }
-        Ok(out)
-    }
-
-    /// Return True if at least one time series matches the filters — e.g.
-    /// "does this owner have any time series (of type T)?" — without listing
-    /// them. Accepts the same keyword-only filters as `list_metadata`, and
-    /// answers from index probes that hydrate no rows — a `features` filter
-    /// included — so it is safe to call in hot loops.
-    #[pyo3(signature = (
-        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None,
-        features_exact=false
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn has_any_time_series(
-        &self,
-        owner_id: Option<i64>,
-        owner_category: Option<PyOwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-        name: Option<String>,
-        name_glob: Option<String>,
-        component_field: Option<String>,
-        zoneless: Option<bool>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        initial_timestamp: Option<PyInstant>,
-        length: Option<usize>,
-        features: Option<&Bound<'_, PyDict>>,
-        features_exact: bool,
-    ) -> PyResult<bool> {
-        let filter = build_list_filter(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type.as_ref(),
-            name,
-            name_glob,
-            component_field,
-            zoneless,
-            resolution,
-            initial_timestamp,
-            length,
-            interval,
-            features,
-            features_exact,
-        )?;
-        self.store()?.has_any_time_series(filter).map_err(map_err)
-    }
-
     /// Return True if the store holds no persistent content of any kind — no
     /// time series, no associations in any catalog, and no store attributes.
     ///
@@ -4321,12 +3999,7 @@ impl PyStore {
     }
 
     #[pyo3(signature = (time_series_type=None))]
-    fn get_resolutions(
-        &self,
-        py: Python<'_>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<Vec<String>> {
-        let _ = py;
+    fn get_resolutions(&self, time_series_type: Option<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
         let requested = pyany_to_requested_type_opt(time_series_type.as_ref(), "time_series_type")?;
         Ok(self
             .store()?
@@ -4348,14 +4021,8 @@ impl PyStore {
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let resolution = match resolution {
-            Some(r) => Some(pyany_to_period(&r)?),
-            None => None,
-        };
-        let interval = match interval {
-            Some(i) => Some(pyany_to_period(&i)?),
-            None => None,
-        };
+        let resolution = resolution.as_ref().map(pyany_to_period).transpose()?;
+        let interval = interval.as_ref().map(pyany_to_period).transpose()?;
         let p = self
             .store()?
             .get_forecast_parameters(resolution, interval)
@@ -4901,139 +4568,6 @@ impl PyStore {
             .collect())
     }
 
-    /// Distinct series names matching the filter, sorted.
-    #[pyo3(signature = (
-        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None,
-        features_exact=false
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn list_names(
-        &self,
-        owner_id: Option<i64>,
-        owner_category: Option<PyOwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-        name: Option<String>,
-        name_glob: Option<String>,
-        component_field: Option<String>,
-        zoneless: Option<bool>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        initial_timestamp: Option<PyInstant>,
-        length: Option<usize>,
-        features: Option<&Bound<'_, PyDict>>,
-        features_exact: bool,
-    ) -> PyResult<Vec<String>> {
-        let filter = build_list_filter(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type.as_ref(),
-            name,
-            name_glob,
-            component_field,
-            zoneless,
-            resolution,
-            initial_timestamp,
-            length,
-            interval,
-            features,
-            features_exact,
-        )?;
-        self.store()?.list_names(filter).map_err(map_err)
-    }
-
-    /// Distinct owner types matching the filter, sorted.
-    #[pyo3(signature = (
-        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None,
-        features_exact=false
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn list_owner_types(
-        &self,
-        owner_id: Option<i64>,
-        owner_category: Option<PyOwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-        name: Option<String>,
-        name_glob: Option<String>,
-        component_field: Option<String>,
-        zoneless: Option<bool>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        initial_timestamp: Option<PyInstant>,
-        length: Option<usize>,
-        features: Option<&Bound<'_, PyDict>>,
-        features_exact: bool,
-    ) -> PyResult<Vec<String>> {
-        let filter = build_list_filter(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type.as_ref(),
-            name,
-            name_glob,
-            component_field,
-            zoneless,
-            resolution,
-            initial_timestamp,
-            length,
-            interval,
-            features,
-            features_exact,
-        )?;
-        self.store()?.list_owner_types(filter).map_err(map_err)
-    }
-
-    /// Remove every series matching the filter in one all-or-nothing
-    /// transaction. Returns the number of associations removed.
-    #[pyo3(signature = (
-        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None,
-        features_exact=false
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn remove_by_filter(
-        &mut self,
-        owner_id: Option<i64>,
-        owner_category: Option<PyOwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-        name: Option<String>,
-        name_glob: Option<String>,
-        component_field: Option<String>,
-        zoneless: Option<bool>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        initial_timestamp: Option<PyInstant>,
-        length: Option<usize>,
-        features: Option<&Bound<'_, PyDict>>,
-        features_exact: bool,
-    ) -> PyResult<usize> {
-        let filter = build_list_filter(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type.as_ref(),
-            name,
-            name_glob,
-            component_field,
-            zoneless,
-            resolution,
-            initial_timestamp,
-            length,
-            interval,
-            features,
-            features_exact,
-        )?;
-        self.store_mut()?.remove_by_filter(filter).map_err(map_err)
-    }
-
     /// Copy an association onto another owner, optionally renaming it. Shares the
     /// underlying array (no data is duplicated). Returns the new key.
     #[pyo3(signature = (src, dst_owner_id, dst_owner_type, *, new_name=None))]
@@ -5064,10 +4598,7 @@ impl PyStore {
         time_series_type: Option<Bound<'_, PyAny>>,
         resolution: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Vec<i64>> {
-        let resolution = match resolution {
-            Some(r) => Some(pyany_to_period(&r)?),
-            None => None,
-        };
+        let resolution = resolution.as_ref().map(pyany_to_period).transpose()?;
         let requested = pyany_to_requested_type_opt(time_series_type.as_ref(), "time_series_type")?;
         self.store()?
             .list_owner_ids(owner_category.into(), requested, resolution)
@@ -5169,10 +4700,7 @@ impl PyStore {
         py: Python<'py>,
         resolution: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let resolution = match resolution {
-            Some(r) => Some(pyany_to_period(&r)?),
-            None => None,
-        };
+        let resolution = resolution.as_ref().map(pyany_to_period).transpose()?;
         self.store()?
             .check_static_consistency(resolution)
             .map_err(map_err)?
@@ -5300,115 +4828,6 @@ impl PyStore {
             .map_err(map_err)
     }
 
-    /// Whether any attachment matches the filter.
-    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
-    fn has_supplemental_attribute_association(
-        &self,
-        component_id: Option<i64>,
-        component_types: Option<Vec<String>>,
-        attribute_id: Option<i64>,
-        attribute_types: Option<Vec<String>>,
-    ) -> PyResult<bool> {
-        let filter = build_supplemental_attribute_filter(
-            component_id,
-            component_types,
-            attribute_id,
-            attribute_types,
-        );
-        self.store()?
-            .has_supplemental_attribute_association(&filter)
-            .map_err(map_err)
-    }
-
-    /// Full attachment rows matching the filter, in insertion order. Passing no
-    /// filter exports the whole table.
-    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
-    fn list_supplemental_attribute_associations(
-        &self,
-        component_id: Option<i64>,
-        component_types: Option<Vec<String>>,
-        attribute_id: Option<i64>,
-        attribute_types: Option<Vec<String>>,
-    ) -> PyResult<Vec<PySupplementalAttributeAssociation>> {
-        let filter = build_supplemental_attribute_filter(
-            component_id,
-            component_types,
-            attribute_id,
-            attribute_types,
-        );
-        Ok(self
-            .store()?
-            .list_supplemental_attribute_associations(&filter)
-            .map_err(map_err)?
-            .into_iter()
-            .map(|inner| PySupplementalAttributeAssociation { inner })
-            .collect())
-    }
-
-    /// Distinct attribute ids matching the filter, ascending — the attributes
-    /// attached to one component when `component_id` is given.
-    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
-    fn list_supplemental_attribute_ids(
-        &self,
-        component_id: Option<i64>,
-        component_types: Option<Vec<String>>,
-        attribute_id: Option<i64>,
-        attribute_types: Option<Vec<String>>,
-    ) -> PyResult<Vec<i64>> {
-        let filter = build_supplemental_attribute_filter(
-            component_id,
-            component_types,
-            attribute_id,
-            attribute_types,
-        );
-        self.store()?
-            .list_supplemental_attribute_ids(&filter)
-            .map_err(map_err)
-    }
-
-    /// Distinct component ids matching the filter, ascending — the components
-    /// carrying one attribute when `attribute_id` is given.
-    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
-    fn list_components_with_attributes(
-        &self,
-        component_id: Option<i64>,
-        component_types: Option<Vec<String>>,
-        attribute_id: Option<i64>,
-        attribute_types: Option<Vec<String>>,
-    ) -> PyResult<Vec<i64>> {
-        let filter = build_supplemental_attribute_filter(
-            component_id,
-            component_types,
-            attribute_id,
-            attribute_types,
-        );
-        self.store()?
-            .list_components_with_attributes(&filter)
-            .map_err(map_err)
-    }
-
-    /// Remove every attachment matching the filter, returning how many were
-    /// removed. Matching nothing returns 0 rather than raising: only the caller
-    /// knows whether a hit was expected.
-    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
-    fn remove_supplemental_attribute_associations(
-        &mut self,
-        component_id: Option<i64>,
-        component_types: Option<Vec<String>>,
-        attribute_id: Option<i64>,
-        attribute_types: Option<Vec<String>>,
-    ) -> PyResult<usize> {
-        let filter = build_supplemental_attribute_filter(
-            component_id,
-            component_types,
-            attribute_id,
-            attribute_types,
-        );
-        self.store_mut()?
-            .remove_supplemental_attribute_associations(&filter)
-            .map_err(map_err)
-    }
-
     /// Move every attachment from component `old_id` to `new_id`, returning the
     /// rows updated. Raises `DuplicateAssociationError` if `new_id` already
     /// carries one of the attributes being moved.
@@ -5419,68 +4838,6 @@ impl PyStore {
     ) -> PyResult<usize> {
         self.store_mut()?
             .replace_supplemental_attribute_component_id(old_id, new_id)
-            .map_err(map_err)
-    }
-
-    /// Number of attachments matching the filter.
-    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
-    fn count_supplemental_attribute_associations(
-        &self,
-        component_id: Option<i64>,
-        component_types: Option<Vec<String>>,
-        attribute_id: Option<i64>,
-        attribute_types: Option<Vec<String>>,
-    ) -> PyResult<i64> {
-        let filter = build_supplemental_attribute_filter(
-            component_id,
-            component_types,
-            attribute_id,
-            attribute_types,
-        );
-        self.store()?
-            .count_supplemental_attribute_associations(&filter)
-            .map_err(map_err)
-    }
-
-    /// Number of *distinct* attributes among the attachments matching the
-    /// filter.
-    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
-    fn count_supplemental_attributes(
-        &self,
-        component_id: Option<i64>,
-        component_types: Option<Vec<String>>,
-        attribute_id: Option<i64>,
-        attribute_types: Option<Vec<String>>,
-    ) -> PyResult<i64> {
-        let filter = build_supplemental_attribute_filter(
-            component_id,
-            component_types,
-            attribute_id,
-            attribute_types,
-        );
-        self.store()?
-            .count_supplemental_attributes(&filter)
-            .map_err(map_err)
-    }
-
-    /// Number of *distinct* components among the attachments matching the
-    /// filter.
-    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
-    fn count_components_with_attributes(
-        &self,
-        component_id: Option<i64>,
-        component_types: Option<Vec<String>>,
-        attribute_id: Option<i64>,
-        attribute_types: Option<Vec<String>>,
-    ) -> PyResult<i64> {
-        let filter = build_supplemental_attribute_filter(
-            component_id,
-            component_types,
-            attribute_id,
-            attribute_types,
-        );
-        self.store()?
-            .count_components_with_attributes(&filter)
             .map_err(map_err)
     }
 
@@ -5540,106 +4897,12 @@ impl PyStore {
             .map_err(map_err)
     }
 
-    /// Whether any edge matches the filter.
-    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
-    fn has_parent_child_association(
-        &self,
-        parent_id: Option<i64>,
-        parent_types: Option<Vec<String>>,
-        child_id: Option<i64>,
-        child_types: Option<Vec<String>>,
-    ) -> PyResult<bool> {
-        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
-        self.store()?
-            .has_parent_child_association(&filter)
-            .map_err(map_err)
-    }
-
-    /// Full edge rows matching the filter, in insertion order. Passing no filter
-    /// exports the whole table.
-    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
-    fn list_parent_child_associations(
-        &self,
-        parent_id: Option<i64>,
-        parent_types: Option<Vec<String>>,
-        child_id: Option<i64>,
-        child_types: Option<Vec<String>>,
-    ) -> PyResult<Vec<PyParentChildAssociation>> {
-        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
-        Ok(self
-            .store()?
-            .list_parent_child_associations(&filter)
-            .map_err(map_err)?
-            .into_iter()
-            .map(|inner| PyParentChildAssociation { inner })
-            .collect())
-    }
-
-    /// Distinct child ids matching the filter, ascending — the children of one
-    /// component when `parent_id` is given.
-    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
-    fn list_children(
-        &self,
-        parent_id: Option<i64>,
-        parent_types: Option<Vec<String>>,
-        child_id: Option<i64>,
-        child_types: Option<Vec<String>>,
-    ) -> PyResult<Vec<i64>> {
-        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
-        self.store()?.list_children(&filter).map_err(map_err)
-    }
-
-    /// Distinct parent ids matching the filter, ascending — the parents of one
-    /// component when `child_id` is given.
-    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
-    fn list_parents(
-        &self,
-        parent_id: Option<i64>,
-        parent_types: Option<Vec<String>>,
-        child_id: Option<i64>,
-        child_types: Option<Vec<String>>,
-    ) -> PyResult<Vec<i64>> {
-        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
-        self.store()?.list_parents(&filter).map_err(map_err)
-    }
-
-    /// Remove every edge matching the filter, returning how many were removed.
-    /// Matching nothing returns 0 rather than raising.
-    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
-    fn remove_parent_child_associations(
-        &mut self,
-        parent_id: Option<i64>,
-        parent_types: Option<Vec<String>>,
-        child_id: Option<i64>,
-        child_types: Option<Vec<String>>,
-    ) -> PyResult<usize> {
-        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
-        self.store_mut()?
-            .remove_parent_child_associations(&filter)
-            .map_err(map_err)
-    }
-
     /// Rewrite component `old_id` to `new_id` on both ends of every edge,
     /// returning the rows updated. Raises `DuplicateAssociationError` if the
     /// rewrite would duplicate an edge `new_id` already has.
     fn replace_parent_child_component_id(&mut self, old_id: i64, new_id: i64) -> PyResult<usize> {
         self.store_mut()?
             .replace_parent_child_component_id(old_id, new_id)
-            .map_err(map_err)
-    }
-
-    /// Number of edges matching the filter.
-    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
-    fn count_parent_child_associations(
-        &self,
-        parent_id: Option<i64>,
-        parent_types: Option<Vec<String>>,
-        child_id: Option<i64>,
-        child_types: Option<Vec<String>>,
-    ) -> PyResult<i64> {
-        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
-        self.store()?
-            .count_parent_child_associations(&filter)
             .map_err(map_err)
     }
 
@@ -5700,59 +4963,6 @@ impl PyStore {
     // the mapping between catalog rows and schema rows; these four methods are
     // a thin wrapper over it.
 
-    /// Export `time_series_associations` matching the filter (the same filter
-    /// keywords as `list_metadata`) as a sorted OpenAPI-row JSON array.
-    /// Each row's `uri` and `data_hash` are the hex-encoded content hash the
-    /// store already has for that row — never a caller-supplied locator.
-    /// With no filter this exports the whole catalog, minus `PersistentTimeSeries`
-    /// rows: the type is an infrastore-local extension the wire contract has no
-    /// schema for, so it is omitted, and a filter naming it raises
-    /// `InvalidParameterError`.
-    #[pyo3(signature = (
-        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, component_field=None, zoneless=None, resolution=None,
-        interval=None, initial_timestamp=None, length=None, features=None,
-        features_exact=false
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn export_time_series_associations_openapi(
-        &self,
-        owner_id: Option<i64>,
-        owner_category: Option<PyOwnerCategory>,
-        owner_type: Option<String>,
-        time_series_type: Option<Bound<'_, PyAny>>,
-        name: Option<String>,
-        name_glob: Option<String>,
-        component_field: Option<String>,
-        zoneless: Option<bool>,
-        resolution: Option<Bound<'_, PyAny>>,
-        interval: Option<Bound<'_, PyAny>>,
-        initial_timestamp: Option<PyInstant>,
-        length: Option<usize>,
-        features: Option<&Bound<'_, PyDict>>,
-        features_exact: bool,
-    ) -> PyResult<String> {
-        let filter = build_list_filter(
-            owner_id,
-            owner_category,
-            owner_type,
-            time_series_type.as_ref(),
-            name,
-            name_glob,
-            component_field,
-            zoneless,
-            resolution,
-            initial_timestamp,
-            length,
-            interval,
-            features,
-            features_exact,
-        )?;
-        self.store()?
-            .export_time_series_associations_openapi(&filter)
-            .map_err(map_err)
-    }
-
     /// Bulk-ingest a JSON array of time-series association OpenAPI rows in one
     /// all-or-nothing transaction, returning the number inserted. This is the
     /// import half of the round trip whose export is
@@ -5790,6 +5000,367 @@ impl PyStore {
         self.store_mut()?
             .import_supplemental_attribute_associations_openapi(json)
             .map_err(map_err)
+    }
+}
+
+/// Store methods taking one of the three filters' keyword arguments, each in a
+/// `#[pymethods]` block of its own (PyO3's `multiple-pymethods`), so a filter's
+/// arguments are spelled once here rather than once per method.
+///
+/// `list` is the time-series `ListFilter`; `supplemental_attribute` and
+/// `parent_child` are the association catalogs'. The body receives the store —
+/// `store()` for `&self`, `store_mut()` for `&mut self` — and the built filter.
+/// The reader builders keep their own signatures: their arguments differ.
+macro_rules! filter_pymethods {
+    (@list $recv:tt $accessor:ident; $(#[doc = $doc:literal])* fn $name:ident($($py:ident)?) -> $ret:ty {
+        |$store:ident, $filter:ident| $body:expr
+    }) => {
+        filter_pymethods!(@emit $recv $accessor; $(#[doc = $doc])* fn $name($($py)?) -> $ret {
+            |$store, $filter| $body
+        } signature = (
+            *, owner_id=None, owner_category=None, owner_type=None,
+                    time_series_type=None, name=None, name_glob=None, component_field=None,
+                    zoneless=None, resolution=None, interval=None, initial_timestamp=None,
+                    length=None, features=None, features_exact=false
+        ) params = (
+            owner_id: Option<i64>,
+            owner_category: Option<PyOwnerCategory>,
+            owner_type: Option<String>,
+            time_series_type: Option<Bound<'_, PyAny>>,
+            name: Option<String>,
+            name_glob: Option<String>,
+            component_field: Option<String>,
+            zoneless: Option<bool>,
+            resolution: Option<Bound<'_, PyAny>>,
+            interval: Option<Bound<'_, PyAny>>,
+            initial_timestamp: Option<PyInstant>,
+            length: Option<usize>,
+            features: Option<&Bound<'_, PyDict>>,
+            features_exact: bool,
+        ) build = build_list_filter(
+            owner_id,
+            owner_category,
+            owner_type,
+            time_series_type.as_ref(),
+            name,
+            name_glob,
+            component_field,
+            zoneless,
+            resolution,
+            initial_timestamp,
+            length,
+            interval,
+            features,
+            features_exact,
+        )?);
+    };
+    (@supplemental_attribute $recv:tt $accessor:ident; $(#[doc = $doc:literal])* fn $name:ident($($py:ident)?) -> $ret:ty {
+        |$store:ident, $filter:ident| $body:expr
+    }) => {
+        filter_pymethods!(@emit $recv $accessor; $(#[doc = $doc])* fn $name($($py)?) -> $ret {
+            |$store, $filter| $body
+        } signature = (
+            *, component_id=None, component_types=None, attribute_id=None, attribute_types=None
+        ) params = (
+            component_id: Option<i64>,
+            component_types: Option<Vec<String>>,
+            attribute_id: Option<i64>,
+            attribute_types: Option<Vec<String>>,
+        ) build = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        ));
+    };
+    (@parent_child $recv:tt $accessor:ident; $(#[doc = $doc:literal])* fn $name:ident($($py:ident)?) -> $ret:ty {
+        |$store:ident, $filter:ident| $body:expr
+    }) => {
+        filter_pymethods!(@emit $recv $accessor; $(#[doc = $doc])* fn $name($($py)?) -> $ret {
+            |$store, $filter| $body
+        } signature = (
+            *, parent_id=None, parent_types=None, child_id=None, child_types=None
+        ) params = (
+            parent_id: Option<i64>,
+            parent_types: Option<Vec<String>>,
+            child_id: Option<i64>,
+            child_types: Option<Vec<String>>,
+        ) build = build_parent_child_filter(parent_id, parent_types, child_id, child_types));
+    };
+    (@emit [$($m:tt)?] $accessor:ident; $(#[doc = $doc:literal])* fn $name:ident($($py:ident)?) -> $ret:ty {
+        |$store:ident, $filter:ident| $body:expr
+    } signature = ($($sig:tt)*) params = ($($param:ident: $pty:ty),* $(,)?) build = $build:expr) => {
+        #[pymethods]
+        impl PyStore {
+            $(#[doc = $doc])*
+            #[pyo3(signature = ($($sig)*))]
+            // `'py` is unused when the invocation takes no `py`.
+            #[allow(clippy::too_many_arguments, clippy::extra_unused_lifetimes)]
+            fn $name<'py>(
+                &$($m)? self,
+                $($py: Python<'py>,)?
+                $($param: $pty),*
+            ) -> PyResult<$ret> {
+                let $filter = $build;
+                let $store = self.$accessor()?;
+                $body
+            }
+        }
+    };
+    ($kind:ident, $(#[doc = $doc:literal])* fn $name:ident(&self $(, $py:ident)?) -> $ret:ty {
+        |$store:ident, $filter:ident| $body:expr
+    }) => {
+        filter_pymethods!(@$kind [] store; $(#[doc = $doc])* fn $name($($py)?) -> $ret {
+            |$store, $filter| $body
+        });
+    };
+    ($kind:ident, $(#[doc = $doc:literal])* fn $name:ident(&mut self $(, $py:ident)?) -> $ret:ty {
+        |$store:ident, $filter:ident| $body:expr
+    }) => {
+        filter_pymethods!(@$kind [mut] store_mut; $(#[doc = $doc])* fn $name($($py)?) -> $ret {
+            |$store, $filter| $body
+        });
+    };
+}
+
+filter_pymethods! {
+    list,
+    /// Return a list of catalog metadata dicts matching the filter. Each dict
+    /// has `id` — the association id that addresses the series — plus
+    /// `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
+    /// `data_hash` (hex string), `length`, `resolution` (ISO 8601 duration
+    /// string, e.g. `PT1H`, or `None`), `features`, `units`, and the rest of the
+    /// row's descriptors.
+    ///
+    /// The listing that answers identity questions: which series exist, what
+    /// each is, and the `id` to read or remove it by. `timestamps` is always
+    /// `None` here — an irregular series' time axis is the one part of a row
+    /// that costs a read per row, so a listing omits it; `read_by_id` returns
+    /// the series with its axis.
+    ///
+    /// `name_glob` filters names by a SQLite `GLOB` pattern (case-sensitive,
+    /// `*`/`?` wildcards); when both `name` and `name_glob` are given, both
+    /// must match. `component_field` matches the owning component's field
+    /// exactly and case-sensitively — "every series that varies this field";
+    /// a row that declares none matches no value, so it cannot select the rows
+    /// that left it unset. All filter arguments are keyword-only.
+    ///
+    /// `time_series_type` is a `TimeSeriesType`. `TimeSeriesType.Deterministic`
+    /// also matches the `DeterministicSingleTimeSeries` rows that
+    /// `transform_single_time_series` derives — each row still reports its own
+    /// `time_series_type`, and passing
+    /// `TimeSeriesType.DeterministicSingleTimeSeries` selects only those. Every
+    /// method taking these filter kwargs reads the type the same way.
+    fn list_metadata(&self, py) -> Vec<Bound<'py, PyDict>> {
+        |store, filter| {
+            store
+                .list_metadata(filter)
+                .map_err(map_err)?
+                .iter()
+                .map(|m| metadata_to_dict(py, m))
+                .collect()
+        }
+    }
+}
+
+filter_pymethods! {
+    list,
+    /// Return True if at least one time series matches the filters — e.g.
+    /// "does this owner have any time series (of type T)?" — without listing
+    /// them. Accepts the same keyword-only filters as `list_metadata`, and
+    /// answers from index probes that hydrate no rows — a `features` filter
+    /// included — so it is safe to call in hot loops.
+    fn has_any_time_series(&self) -> bool {
+        |store, filter| store.has_any_time_series(filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    list,
+    /// Distinct series names matching the filter, sorted.
+    fn list_names(&self) -> Vec<String> {
+        |store, filter| store.list_names(filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    list,
+    /// Distinct owner types matching the filter, sorted.
+    fn list_owner_types(&self) -> Vec<String> {
+        |store, filter| store.list_owner_types(filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    list,
+    /// Remove every series matching the filter in one all-or-nothing
+    /// transaction. Returns the number of associations removed.
+    fn remove_by_filter(&mut self) -> usize {
+        |store, filter| store.remove_by_filter(filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    supplemental_attribute,
+    /// Whether any attachment matches the filter.
+    fn has_supplemental_attribute_association(&self) -> bool {
+        |store, filter| store.has_supplemental_attribute_association(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    supplemental_attribute,
+    /// Full attachment rows matching the filter, in insertion order. Passing no
+    /// filter exports the whole table.
+    fn list_supplemental_attribute_associations(&self) -> Vec<PySupplementalAttributeAssociation> {
+        |store, filter| {
+            Ok(store
+                .list_supplemental_attribute_associations(&filter)
+                .map_err(map_err)?
+                .into_iter()
+                .map(|inner| PySupplementalAttributeAssociation { inner })
+                .collect())
+        }
+    }
+}
+
+filter_pymethods! {
+    supplemental_attribute,
+    /// Distinct attribute ids matching the filter, ascending — the attributes
+    /// attached to one component when `component_id` is given.
+    fn list_supplemental_attribute_ids(&self) -> Vec<i64> {
+        |store, filter| store.list_supplemental_attribute_ids(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    supplemental_attribute,
+    /// Distinct component ids matching the filter, ascending — the components
+    /// carrying one attribute when `attribute_id` is given.
+    fn list_components_with_attributes(&self) -> Vec<i64> {
+        |store, filter| store.list_components_with_attributes(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    supplemental_attribute,
+    /// Remove every attachment matching the filter, returning how many were
+    /// removed. Matching nothing returns 0 rather than raising: only the caller
+    /// knows whether a hit was expected.
+    fn remove_supplemental_attribute_associations(&mut self) -> usize {
+        |store, filter| {
+            store
+                .remove_supplemental_attribute_associations(&filter)
+                .map_err(map_err)
+        }
+    }
+}
+
+filter_pymethods! {
+    supplemental_attribute,
+    /// Number of attachments matching the filter.
+    fn count_supplemental_attribute_associations(&self) -> i64 {
+        |store, filter| {
+            store
+                .count_supplemental_attribute_associations(&filter)
+                .map_err(map_err)
+        }
+    }
+}
+
+filter_pymethods! {
+    supplemental_attribute,
+    /// Number of *distinct* attributes among the attachments matching the
+    /// filter.
+    fn count_supplemental_attributes(&self) -> i64 {
+        |store, filter| store.count_supplemental_attributes(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    supplemental_attribute,
+    /// Number of *distinct* components among the attachments matching the
+    /// filter.
+    fn count_components_with_attributes(&self) -> i64 {
+        |store, filter| store.count_components_with_attributes(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    parent_child,
+    /// Whether any edge matches the filter.
+    fn has_parent_child_association(&self) -> bool {
+        |store, filter| store.has_parent_child_association(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    parent_child,
+    /// Full edge rows matching the filter, in insertion order. Passing no filter
+    /// exports the whole table.
+    fn list_parent_child_associations(&self) -> Vec<PyParentChildAssociation> {
+        |store, filter| {
+            Ok(store
+                .list_parent_child_associations(&filter)
+                .map_err(map_err)?
+                .into_iter()
+                .map(|inner| PyParentChildAssociation { inner })
+                .collect())
+        }
+    }
+}
+
+filter_pymethods! {
+    parent_child,
+    /// Distinct child ids matching the filter, ascending — the children of one
+    /// component when `parent_id` is given.
+    fn list_children(&self) -> Vec<i64> {
+        |store, filter| store.list_children(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    parent_child,
+    /// Distinct parent ids matching the filter, ascending — the parents of one
+    /// component when `child_id` is given.
+    fn list_parents(&self) -> Vec<i64> {
+        |store, filter| store.list_parents(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    parent_child,
+    /// Remove every edge matching the filter, returning how many were removed.
+    /// Matching nothing returns 0 rather than raising.
+    fn remove_parent_child_associations(&mut self) -> usize {
+        |store, filter| store.remove_parent_child_associations(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    parent_child,
+    /// Number of edges matching the filter.
+    fn count_parent_child_associations(&self) -> i64 {
+        |store, filter| store.count_parent_child_associations(&filter).map_err(map_err)
+    }
+}
+
+filter_pymethods! {
+    list,
+    /// Export `time_series_associations` matching the filter (the same filter
+    /// keywords as `list_metadata`) as a sorted OpenAPI-row JSON array.
+    /// Each row's `uri` and `data_hash` are the hex-encoded content hash the
+    /// store already has for that row — never a caller-supplied locator.
+    /// With no filter this exports the whole catalog, minus `PersistentTimeSeries`
+    /// rows: the type is an infrastore-local extension the wire contract has no
+    /// schema for, so it is omitted, and a filter naming it raises
+    /// `InvalidParameterError`.
+    fn export_time_series_associations_openapi(&self) -> String {
+        |store, filter| {
+            store
+                .export_time_series_associations_openapi(&filter)
+                .map_err(map_err)
+        }
     }
 }
 
@@ -5870,10 +5441,7 @@ fn pyany_to_requested_type_opt(
     v: Option<&Bound<'_, PyAny>>,
     param: &str,
 ) -> PyResult<Option<core_lib::TimeSeriesType>> {
-    match v {
-        Some(v) => Ok(Some(pyany_to_requested_type(v, param)?)),
-        None => Ok(None),
-    }
+    v.map(|v| pyany_to_requested_type(v, param)).transpose()
 }
 
 /// Decode a 64-character lowercase-or-uppercase hex string into a 32-byte hash.
@@ -6150,12 +5718,6 @@ fn render_catalog_timestamp(
         }
         _ => t.to_rfc3339(),
     }
-}
-
-#[allow(dead_code)]
-fn unused_tz_imports() {
-    // Touch TimeZone so the import isn't pruned in case rustc trims earlier.
-    let _ = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 }
 
 // ---- Tracing ---------------------------------------------------------------
@@ -6575,7 +6137,7 @@ fn py_to_decoded(
 // ---- Module init ----------------------------------------------------------
 
 #[pymodule]
-fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn infrastore(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Auto-initialize from RUST_LOG if set. try_init() is a no-op when a
     // subscriber is already registered, so this is safe to call unconditionally.
     let _ = tracing_subscriber::fmt()
@@ -6597,48 +6159,7 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStaticReader>()?;
     m.add_class::<PyForecastReader>()?;
 
-    m.add("TimeSeriesError", py.get_type::<TimeSeriesError>())?;
-    m.add("NotFoundError", py.get_type::<NotFoundError>())?;
-    m.add("OwnerMismatchError", py.get_type::<OwnerMismatchError>())?;
-    m.add(
-        "DuplicateTimeSeriesError",
-        py.get_type::<DuplicateTimeSeriesError>(),
-    )?;
-    m.add(
-        "DuplicateAssociationError",
-        py.get_type::<DuplicateAssociationError>(),
-    )?;
-    m.add(
-        "DuplicateAssociationIdError",
-        py.get_type::<DuplicateAssociationIdError>(),
-    )?;
-    m.add(
-        "InvalidParameterError",
-        py.get_type::<InvalidParameterError>(),
-    )?;
-    m.add("IntegrityError", py.get_type::<IntegrityError>())?;
-    m.add("ReadOnlyStoreError", py.get_type::<ReadOnlyStoreError>())?;
-    m.add("IoError", py.get_type::<IoError>())?;
-    m.add("ConnectionError", py.get_type::<ConnectionError>())?;
-    m.add(
-        "IncompatibleFormatError",
-        py.get_type::<IncompatibleFormatError>(),
-    )?;
-    m.add(
-        "IncompatibleForecastError",
-        py.get_type::<IncompatibleForecastError>(),
-    )?;
-    m.add("StorageError", py.get_type::<StorageError>())?;
-    m.add("StoreExistsError", py.get_type::<StoreExistsError>())?;
-    m.add(
-        "MismatchedArtifactError",
-        py.get_type::<MismatchedArtifactError>(),
-    )?;
-    m.add(
-        "CatalogMigrationRequiredError",
-        py.get_type::<CatalogMigrationRequiredError>(),
-    )?;
-    m.add("CatalogTooNewError", py.get_type::<CatalogTooNewError>())?;
+    add_exceptions(m)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(init_tracing, m)?)?;

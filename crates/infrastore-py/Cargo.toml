@@ -33,7 +33,6 @@ vendored = ["infrastore-core/vendored"]
 
 [dependencies]
 chrono = { workspace = true }
-numpy = { workspace = true }
 pyo3 = { workspace = true, features = ["extension-module", "abi3-py311", "chrono", "multiple-pymethods"] }
 infrastore-core = { workspace = true }
 tracing-subscriber = { workspace = true }
