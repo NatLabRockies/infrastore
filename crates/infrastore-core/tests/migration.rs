@@ -10,8 +10,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, TimeSeriesData,
-    TimeSeriesError, TimeSeriesType, TypedArray, create_store, open_store,
+    Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData,
+    TimeSeriesError, TimeSeriesType, TypedArray,
 };
 
 /// The revision-1 shape of `time_series_associations`, verbatim as 0.17.0
@@ -97,7 +97,7 @@ fn stale_store() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -188,7 +188,7 @@ fn generation_stamps(path: &std::path::Path) -> (Option<String>, Option<String>)
 fn fresh_store_stamps_the_current_revision() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let store = create_store(Some(path.as_path()), false).unwrap();
+    let store = Store::create(Some(path.as_path()), false).unwrap();
     assert_eq!(store.catalog_schema_revision().unwrap(), 2);
 }
 
@@ -199,7 +199,7 @@ fn a_revision_1_catalog_upgrades_in_place_on_a_writable_open() {
     let before = generation_stamps(&path);
     let format_before = format_version_on_disk(&path);
 
-    let mut store = open_store(path.as_path(), false).unwrap();
+    let mut store = Store::open(path.as_path(), false).unwrap();
     assert_eq!(store.catalog_schema_revision().unwrap(), 2);
 
     // Both pre-existing series survived, byte for byte.
@@ -273,7 +273,7 @@ fn persistent() -> infrastore_core::PersistentTimeSeries {
 #[test]
 fn a_read_only_open_of_a_stale_catalog_reports_migration_required() {
     let (_dir, path) = stale_store();
-    match open_store(path.as_path(), true) {
+    match Store::open(path.as_path(), true) {
         Err(TimeSeriesError::CatalogMigrationRequired { found, expected }) => {
             assert_eq!((found, expected), (1, 2));
             // The message has to name the remedy, not just the numbers: this is
@@ -307,7 +307,7 @@ fn a_stale_catalog_can_still_be_copied_and_the_copy_migrates() {
     let (dir, path) = stale_store();
     let dest = dir.path().join("scratch.h5");
 
-    let copy = infrastore_core::open_store_copy(
+    let copy = infrastore_core::Store::open_copy(
         path.as_path(),
         dest.as_path(),
         infrastore_core::CatalogMode::Attached,
@@ -332,16 +332,16 @@ fn a_stale_catalog_can_still_be_copied_and_the_copy_migrates() {
 fn a_migrated_store_reopens_without_migrating_again() {
     let (_dir, path) = stale_store();
     {
-        let store = open_store(path.as_path(), false).unwrap();
+        let store = Store::open(path.as_path(), false).unwrap();
         assert_eq!(store.catalog_schema_revision().unwrap(), 2);
     }
     // A second writable open finds nothing to do, and a read-only open — which
     // could not migrate even if there were — now succeeds.
     {
-        let store = open_store(path.as_path(), false).unwrap();
+        let store = Store::open(path.as_path(), false).unwrap();
         assert_eq!(store.catalog_schema_revision().unwrap(), 2);
     }
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     assert_eq!(store.catalog_schema_revision().unwrap(), 2);
     assert_eq!(
         store
@@ -357,7 +357,7 @@ fn a_catalog_from_a_newer_build_is_refused_rather_than_downgraded() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        create_store(Some(path.as_path()), false)
+        Store::create(Some(path.as_path()), false)
             .unwrap()
             .flush()
             .unwrap();
@@ -370,7 +370,7 @@ fn a_catalog_from_a_newer_build_is_refused_rather_than_downgraded() {
         .unwrap();
     }
     for read_only in [false, true] {
-        match open_store(path.as_path(), read_only) {
+        match Store::open(path.as_path(), read_only) {
             Err(TimeSeriesError::CatalogTooNew { found, expected }) => {
                 assert_eq!((found, expected), (99, 2));
             }
@@ -386,7 +386,7 @@ fn a_catalog_from_a_newer_build_is_refused_rather_than_downgraded() {
 fn a_store_older_than_the_upgrade_floor_is_still_rejected_outright() {
     let (_dir, path) = stale_store();
     set_format_attr(&path, "0.16.0");
-    match open_store(path.as_path(), false) {
+    match Store::open(path.as_path(), false) {
         Err(TimeSeriesError::IncompatibleFormat { found, expected }) => {
             assert_eq!(found, "0.16.0");
             assert_eq!(expected, infrastore_core::DATA_FORMAT_VERSION);
@@ -420,7 +420,7 @@ fn a_mismatched_pair_is_refused_before_anything_migrates() {
         .unwrap();
     }
 
-    match open_store(path.as_path(), false) {
+    match Store::open(path.as_path(), false) {
         Err(TimeSeriesError::MismatchedArtifact { .. }) => {}
         Err(other) => panic!("expected MismatchedArtifact, got {other:?}"),
         Ok(_) => panic!("a mismatched pair must not open"),
@@ -444,7 +444,7 @@ fn the_readable_view_renders_a_code_it_does_not_name() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -490,7 +490,7 @@ fn the_readable_view_names_the_new_type() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,

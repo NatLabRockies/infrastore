@@ -468,14 +468,6 @@ fn wire_err(msg: impl Into<String>) -> crate::error::TimeSeriesError {
     crate::error::TimeSeriesError::InvalidParameter(msg.into())
 }
 
-/// A 64-character hex string as 32 bytes, or `None` for anything else —
-/// including a `uri` that is a locator rather than a hash. The storage
-/// layer's parser, with its error (which names a dataset, not a document)
-/// folded to `None`.
-fn hash_from_hex(s: &str) -> Option<[u8; 32]> {
-    crate::storage::common::hex_to_hash(s).ok()
-}
-
 fn parse_period(s: &str, field: &str) -> Result<crate::types::period::Period> {
     crate::types::period::Period::from_iso8601(s)
         .map_err(|e| wire_err(format!("{field} {s:?} is not an ISO-8601 duration: {e}")))
@@ -553,13 +545,15 @@ impl RawTsRow {
                 self.name,
             )));
         };
-        hash_from_hex(locator).map(Some).ok_or_else(|| {
-            wire_err(format!(
-                "row '{}': timestamps_uri {locator:?} is not a 64-character hex hash, and this \
+        crate::hash::hash_from_hex(locator)
+            .map(Some)
+            .ok_or_else(|| {
+                wire_err(format!(
+                    "row '{}': timestamps_uri {locator:?} is not a 64-character hex hash, and this \
                  import resolves time axes by content hash",
-                self.name,
-            ))
-        })
+                    self.name,
+                ))
+            })
     }
 
     /// The 32-byte array hash this row names.
@@ -573,7 +567,7 @@ impl RawTsRow {
             ("uri", Some(&*self.uri)),
         ] {
             let Some(value) = value else { continue };
-            if let Some(hash) = hash_from_hex(value) {
+            if let Some(hash) = crate::hash::hash_from_hex(value) {
                 return Ok(hash);
             }
             if field == "data_hash" {

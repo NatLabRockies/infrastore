@@ -19,8 +19,8 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, catalog_sqlite_path,
-    create_store,
+    Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray,
+    catalog_sqlite_path,
 };
 use infrastore_proto::pb::{GetCountsReq, catalog_store_client::CatalogStoreClient};
 use tonic::metadata::MetadataValue;
@@ -41,7 +41,7 @@ impl Drop for ServerProcess {
 /// Build a small on-disk store and return its HDF5 path.
 fn write_store(dir: &Path) -> PathBuf {
     let path = dir.join("store.h5");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
     store

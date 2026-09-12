@@ -9,7 +9,7 @@ use std::time::Duration as StdDuration;
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Deterministic, Features, OwnerCategory, Period, Probabilistic, Scenarios, Store,
-    TimeSeriesData, TypedArray, create_store,
+    TimeSeriesData, TypedArray,
 };
 use infrastore_server::client::RemoteClient;
 use infrastore_server::service::CatalogStoreService;
@@ -131,7 +131,7 @@ async fn owner_ids(client: &RemoteClient, owner: i64) -> Vec<infrastore_core::Ti
 
 #[tokio::test]
 async fn deterministic_full_round_trip_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_det_forecast(&mut store);
 
     let addr = spawn_server(store).await;
@@ -157,7 +157,7 @@ async fn deterministic_full_round_trip_over_grpc() {
 
 #[tokio::test]
 async fn deterministic_time_range_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_det_forecast(&mut store);
 
     let addr = spawn_server(store).await;
@@ -188,7 +188,7 @@ async fn deterministic_time_range_over_grpc() {
 
 #[tokio::test]
 async fn probabilistic_full_round_trip_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_prob_forecast(&mut store);
 
     let addr = spawn_server(store).await;
@@ -210,7 +210,7 @@ async fn probabilistic_full_round_trip_over_grpc() {
 
 #[tokio::test]
 async fn probabilistic_time_range_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_prob_forecast(&mut store);
 
     let addr = spawn_server(store).await;
@@ -241,7 +241,7 @@ async fn probabilistic_time_range_over_grpc() {
 
 #[tokio::test]
 async fn scenarios_full_round_trip_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_scen_forecast(&mut store);
 
     let addr = spawn_server(store).await;
@@ -263,7 +263,7 @@ async fn scenarios_full_round_trip_over_grpc() {
 
 #[tokio::test]
 async fn scenarios_time_range_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_scen_forecast(&mut store);
 
     let addr = spawn_server(store).await;
@@ -294,7 +294,7 @@ async fn scenarios_time_range_over_grpc() {
 
 #[tokio::test]
 async fn forecast_parameters_over_grpc() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_det_forecast(&mut store);
 
     let addr = spawn_server(store).await;
@@ -309,7 +309,7 @@ async fn forecast_parameters_over_grpc() {
 
 #[tokio::test]
 async fn forecast_parameters_empty_store_over_grpc() {
-    let store = create_store(None, true).unwrap();
+    let store = Store::create(None, true).unwrap();
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
@@ -323,7 +323,7 @@ async fn forecast_parameters_empty_store_over_grpc() {
 
 #[tokio::test]
 async fn the_deterministic_family_resolves_to_its_concrete_row_over_grpc() {
-    let mut store = infrastore_core::create_store(None, true).unwrap();
+    let mut store = infrastore_core::Store::create(None, true).unwrap();
     add_det_forecast(&mut store); // owner 1, "price", Deterministic
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();

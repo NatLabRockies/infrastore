@@ -9,9 +9,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    CatalogMode, Compression, Features, ListFilter, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesError, TypedArray, catalog_sqlite_path, create_store,
-    create_store_with_catalog, open_store, open_store_with_catalog,
+    CatalogMode, Compression, Features, ListFilter, OwnerCategory, SingleTimeSeries, Store,
+    TimeSeriesData, TimeSeriesError, TypedArray, catalog_sqlite_path,
 };
 
 fn series(base: f64) -> SingleTimeSeries {
@@ -60,7 +59,7 @@ fn keys_for(store: &infrastore_core::Store, owner: i64) -> usize {
 }
 
 fn scratch_store(path: &std::path::Path) -> infrastore_core::Store {
-    create_store_with_catalog(
+    Store::create_with_catalog(
         Some(path),
         false,
         Compression::default(),
@@ -112,7 +111,7 @@ fn an_in_memory_catalog_discards_changes_when_the_store_is_dropped() {
     // file, and the paired-stamp check refuses that rather than presenting the
     // arrays as an empty store — an abandoned scratch half-artifact is exactly
     // the case where "opens fine, contains nothing" is the wrong answer.
-    let err = open_store(&scratch, false)
+    let err = Store::open(&scratch, false)
         .err()
         .expect("a half-artifact must not open");
     assert!(
@@ -127,18 +126,18 @@ fn an_attached_catalog_is_durable_without_persist() {
     let path = dir.path().join("store.h5");
 
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         add(&mut store, 1, 100.0);
         store.flush().unwrap();
     }
 
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(read_values(&store, 1).len(), 24);
 }
 
 #[test]
 fn an_in_memory_backend_rejects_an_attached_catalog() {
-    let err = create_store_with_catalog(None, true, Compression::default(), CatalogMode::Attached)
+    let err = Store::create_with_catalog(None, true, Compression::default(), CatalogMode::Attached)
         .err()
         .expect("there is no file for an attached catalog to sit beside");
     assert!(
@@ -160,7 +159,7 @@ fn opening_with_an_in_memory_catalog_requires_the_catalog_file() {
     // Unlike an attached open, which creates an empty catalog when one is
     // missing, loading into memory has nothing to read.
     assert!(
-        open_store_with_catalog(&scratch, false, CatalogMode::InMemory).is_err(),
+        Store::open_with_catalog(&scratch, false, CatalogMode::InMemory).is_err(),
         "no catalog file to load"
     );
 }
@@ -182,7 +181,7 @@ fn a_scratch_store_persists_and_reopens_with_its_data() {
         store.persist_to(&dest).unwrap();
     }
 
-    let store = open_store(&dest, true).unwrap();
+    let store = Store::open(&dest, true).unwrap();
     assert_eq!(read_values(&store, 1)[0], 100.0);
     assert_eq!(read_values(&store, 2)[0], 200.0);
 }
@@ -194,20 +193,20 @@ fn a_saved_store_loads_into_memory_and_saves_again() {
     let second = dir.path().join("second.h5");
 
     {
-        let mut store = create_store(Some(&first), false).unwrap();
+        let mut store = Store::create(Some(&first), false).unwrap();
         add(&mut store, 1, 100.0);
         store.flush().unwrap();
     }
 
     // Load the pair into RAM, mutate, and save elsewhere.
     {
-        let mut store = open_store_with_catalog(&first, false, CatalogMode::InMemory).unwrap();
+        let mut store = Store::open_with_catalog(&first, false, CatalogMode::InMemory).unwrap();
         assert_eq!(store.catalog_mode(), CatalogMode::InMemory);
         add(&mut store, 2, 200.0);
         store.persist_to(&second).unwrap();
     }
 
-    let saved = open_store(&second, true).unwrap();
+    let saved = Store::open(&second, true).unwrap();
     assert_eq!(read_values(&saved, 1)[0], 100.0);
     assert_eq!(read_values(&saved, 2)[0], 200.0);
 }
@@ -227,7 +226,7 @@ fn persisting_twice_to_one_destination_replaces_the_pair() {
 
     // The second save must not leave the first save's catalog beside the second
     // save's arrays — that is exactly the pairing the stamp guards.
-    let saved = open_store(&dest, true).unwrap();
+    let saved = Store::open(&dest, true).unwrap();
     assert_eq!(read_values(&saved, 1)[0], 100.0);
     assert_eq!(read_values(&saved, 2)[0], 200.0);
 }
@@ -279,7 +278,7 @@ fn persisting_an_attached_catalog_onto_its_own_path_is_a_no_op() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
 
-    let mut store = create_store(Some(&path), false).unwrap();
+    let mut store = Store::create(Some(&path), false).unwrap();
     add(&mut store, 1, 100.0);
     store.persist_to(&path).unwrap();
 
@@ -287,7 +286,7 @@ fn persisting_an_attached_catalog_onto_its_own_path_is_a_no_op() {
     add(&mut store, 2, 200.0);
     drop(store);
 
-    let reopened = open_store(&path, true).expect("the store survived saving onto itself");
+    let reopened = Store::open(&path, true).expect("the store survived saving onto itself");
     assert_eq!(read_values(&reopened, 1)[0], 100.0);
     assert_eq!(
         read_values(&reopened, 2)[0],
@@ -313,7 +312,7 @@ fn persisting_an_in_memory_catalog_onto_its_own_path_writes_the_sidecar() {
         catalog_sqlite_path(&path).exists(),
         "the save wrote a catalog"
     );
-    let reopened = open_store(&path, true).unwrap();
+    let reopened = Store::open(&path, true).unwrap();
     assert_eq!(read_values(&reopened, 1)[0], 100.0);
 }
 
@@ -332,7 +331,7 @@ fn persist_clears_a_stale_wal_beside_the_destination() {
     let wal = sqlite_sidecar(&catalog_sqlite_path(&dest), "-wal");
     let hoarded = dir.path().join("hoarded-wal");
     {
-        let mut victim = create_store(Some(&dest), false).unwrap();
+        let mut victim = Store::create(Some(&dest), false).unwrap();
         add(&mut victim, 99, 900.0);
         std::fs::copy(&wal, &hoarded).expect("an attached catalog journals through a -wal");
     }
@@ -347,7 +346,7 @@ fn persist_clears_a_stale_wal_beside_the_destination() {
         !wal.exists(),
         "the swap must not leave the replaced catalog's -wal"
     );
-    let saved = open_store(&dest, true).expect("the saved pair opens");
+    let saved = Store::open(&dest, true).expect("the saved pair opens");
     assert_eq!(read_values(&saved, 1)[0], 100.0);
     assert_eq!(
         keys_for(&saved, 99),
@@ -400,7 +399,7 @@ fn compaction_still_pairs_with_an_in_memory_catalog() {
         generation_attr(&scratch).is_some(),
         "the rewrite carried the stamp across"
     );
-    let store = open_store(&scratch, true)
+    let store = Store::open(&scratch, true)
         .expect("the rewritten arrays pair with the catalog checkpointed after them");
     assert_eq!(read_values(&store, 1)[0], 100.0);
     assert_eq!(keys_for(&store, 2), 0);
@@ -429,7 +428,7 @@ fn a_rollback_under_an_in_memory_catalog_takes_its_arrays_with_it() {
         store.persist_catalog().unwrap();
     }
 
-    let mut store = open_store(&scratch, false).unwrap();
+    let mut store = Store::open(&scratch, false).unwrap();
     assert_eq!(read_values(&store, 1)[0], 100.0);
     assert_eq!(keys_for(&store, 2), 0);
     assert!(
@@ -487,7 +486,7 @@ fn a_dropped_bulk_add_writes_no_arrays() {
 fn saving_writes_the_live_set_whichever_backend_holds_it() {
     let dir = tempfile::tempdir().unwrap();
     let reclaimable = |dest: &std::path::Path| {
-        let mut saved = open_store(dest, false).unwrap();
+        let mut saved = Store::open(dest, false).unwrap();
         assert!(saved.verify_integrity().unwrap().ok());
         assert_eq!(saved.num_distinct_arrays().unwrap(), 1);
         let report = saved.compact().unwrap();
@@ -498,7 +497,7 @@ fn saving_writes_the_live_set_whichever_backend_holds_it() {
     let src = dir.path().join("src.h5");
     let from_disk = dir.path().join("from-disk.h5");
     {
-        let mut store = create_store(Some(&src), false).unwrap();
+        let mut store = Store::create(Some(&src), false).unwrap();
         add(&mut store, 1, 100.0);
         add(&mut store, 2, 200.0);
         store
@@ -520,7 +519,7 @@ fn saving_writes_the_live_set_whichever_backend_holds_it() {
     // Arrays in memory: the same live set, the same way.
     let from_memory = dir.path().join("from-memory.h5");
     {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         add(&mut store, 1, 100.0);
         add(&mut store, 2, 200.0);
         store
@@ -545,7 +544,7 @@ fn a_read_only_store_can_still_save_elsewhere() {
     let src = dir.path().join("src.h5");
     let dest = dir.path().join("dest.h5");
     {
-        let mut store = create_store(Some(&src), false).unwrap();
+        let mut store = Store::create(Some(&src), false).unwrap();
         add(&mut store, 1, 100.0);
     }
     let (before_len, before_stamp) = (
@@ -553,7 +552,7 @@ fn a_read_only_store_can_still_save_elsewhere() {
         generation_attr(&src),
     );
 
-    let mut store = open_store(&src, true).unwrap();
+    let mut store = Store::open(&src, true).unwrap();
     store.persist_to(&dest).unwrap();
     drop(store);
 
@@ -568,7 +567,7 @@ fn a_read_only_store_can_still_save_elsewhere() {
         before_stamp,
         "a save mints its own stamp, so the copy is not mistaken for the source"
     );
-    assert_eq!(read_values(&open_store(&dest, true).unwrap(), 1)[0], 100.0);
+    assert_eq!(read_values(&Store::open(&dest, true).unwrap(), 1)[0], 100.0);
 }
 
 /// The arrays-only half of the same asymmetry. `persist_arrays_to` writes the
@@ -580,7 +579,7 @@ fn a_read_only_store_can_still_save_its_arrays_elsewhere() {
     let src = dir.path().join("src.h5");
     let bundle = dir.path().join("bundle.h5");
     {
-        let mut store = create_store(Some(&src), false).unwrap();
+        let mut store = Store::create(Some(&src), false).unwrap();
         add(&mut store, 1, 100.0);
     }
     let (before_len, before_stamp) = (
@@ -588,7 +587,7 @@ fn a_read_only_store_can_still_save_its_arrays_elsewhere() {
         generation_attr(&src),
     );
 
-    let mut store = open_store(&src, true).unwrap();
+    let mut store = Store::open(&src, true).unwrap();
     store.persist_arrays_to(&bundle).unwrap();
     drop(store);
 
@@ -626,13 +625,13 @@ fn a_read_only_in_memory_catalog_writes_nothing_back() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         add(&mut store, 1, 100.0);
     }
     let sqlite = catalog_sqlite_path(&path);
     let before = std::fs::read(&sqlite).unwrap();
 
-    let mut store = open_store_with_catalog(&path, true, CatalogMode::InMemory).unwrap();
+    let mut store = Store::open_with_catalog(&path, true, CatalogMode::InMemory).unwrap();
     assert_eq!(store.catalog_mode(), CatalogMode::InMemory);
     assert_eq!(read_values(&store, 1)[0], 100.0);
 
@@ -685,7 +684,7 @@ fn a_store_on_read_only_media_still_opens() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         add(&mut store, 1, 100.0);
     }
     // The clean close checkpointed and removed the sidecars, which is what
@@ -702,11 +701,11 @@ fn a_store_on_read_only_media_still_opens() {
         if !enforced {
             return;
         }
-        let attached = open_store(&path, true).expect("a read-only attached open");
+        let attached = Store::open(&path, true).expect("a read-only attached open");
         assert_eq!(read_values(&attached, 1)[0], 100.0);
         drop(attached);
 
-        let loaded = open_store_with_catalog(&path, true, CatalogMode::InMemory)
+        let loaded = Store::open_with_catalog(&path, true, CatalogMode::InMemory)
             .expect("a read-only load into memory");
         assert_eq!(read_values(&loaded, 1)[0], 100.0);
     });
@@ -734,14 +733,14 @@ fn a_catalog_from_a_different_save_is_rejected() {
     let (a, b) = (dir.path().join("a.h5"), dir.path().join("b.h5"));
 
     for (path, base) in [(&a, 100.0), (&b, 200.0)] {
-        let mut store = create_store(Some(path), false).unwrap();
+        let mut store = Store::create(Some(path), false).unwrap();
         add(&mut store, 1, base);
         store.flush().unwrap();
     }
 
     transplant_catalog(&b, &a);
 
-    let err = open_store(&a, true)
+    let err = Store::open(&a, true)
         .err()
         .expect("mismatched halves must not open");
     assert!(
@@ -767,8 +766,8 @@ fn each_save_mints_a_fresh_stamp() {
         "two saves reusing one stamp would make an interrupted re-save undetectable"
     );
     // Each save is internally consistent even though they differ from each other.
-    open_store(&first, true).unwrap();
-    open_store(&second, true).unwrap();
+    Store::open(&first, true).unwrap();
+    Store::open(&second, true).unwrap();
 }
 
 #[test]
@@ -776,7 +775,7 @@ fn an_unstamped_artifact_still_opens() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         add(&mut store, 1, 100.0);
         store.flush().unwrap();
     }
@@ -787,7 +786,7 @@ fn an_unstamped_artifact_still_opens() {
     delete_generation_attr(&path);
     delete_catalog_generation(&path);
 
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(read_values(&store, 1)[0], 100.0);
 }
 
@@ -805,7 +804,7 @@ fn one_stamped_half_is_a_mismatch() {
     for strip_h5 in [true, false] {
         let path = dir.path().join(format!("store{strip_h5}.h5"));
         {
-            let mut store = create_store(Some(&path), false).unwrap();
+            let mut store = Store::create(Some(&path), false).unwrap();
             add(&mut store, 1, 100.0);
             store.flush().unwrap();
         }
@@ -815,7 +814,7 @@ fn one_stamped_half_is_a_mismatch() {
             delete_catalog_generation(&path);
         }
 
-        let err = open_store(&path, true)
+        let err = Store::open(&path, true)
             .err()
             .expect("a half-stamped pair must not open");
         assert!(
@@ -840,13 +839,13 @@ fn an_unstamped_artifact_that_lost_its_catalog_opens_empty() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         add(&mut store, 1, 100.0);
     }
     delete_generation_attr(&path);
     std::fs::remove_file(catalog_sqlite_path(&path)).unwrap();
 
-    let store = open_store(&path, false).expect("both halves unstamped, so the pair agrees");
+    let store = Store::open(&path, false).expect("both halves unstamped, so the pair agrees");
     assert!(
         store
             .list_metadata(ListFilter::default())
@@ -866,7 +865,7 @@ fn compaction_preserves_the_stamp() {
     let path = dir.path().join("store.h5");
 
     let before = {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         add(&mut store, 1, 100.0);
         add(&mut store, 2, 200.0);
         store
@@ -880,7 +879,7 @@ fn compaction_preserves_the_stamp() {
     // Compaction rewrites only the HDF5 half. Minting a new stamp there would
     // unpair it from the untouched catalog.
     assert!(before.is_some(), "the rewritten file kept a stamp");
-    open_store(&path, true).expect("the pair still matches after compaction");
+    Store::open(&path, true).expect("the pair still matches after compaction");
 }
 
 // ---------------------------------------------------------------------------

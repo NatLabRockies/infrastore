@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, Deterministic, FeatureValue, Features, ListFilter, OwnerCategory, Period,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesId, TimeSeriesMetadata,
-    TimeSeriesType, TypedArray, UnitSystem, create_store,
+    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesError, TimeSeriesId, TimeSeriesMetadata,
+    TimeSeriesType, TypedArray, UnitSystem,
 };
 
 mod common;
@@ -47,7 +47,7 @@ fn det(name: &str, base: f64) -> Deterministic {
 
 #[test]
 fn store_add_preserves_application_data() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let mut features: Features = BTreeMap::new();
     features.insert("scenario".into(), FeatureValue::Str("base".into()));
 
@@ -76,7 +76,7 @@ fn store_add_preserves_application_data() {
 
 #[test]
 fn bulk_push_preserves_application_data() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let keys = {
         let mut bulk = store.bulk_add();
         bulk.push(AddRequest::new(
@@ -153,7 +153,7 @@ fn write_paths_reject_reserved_feature_names() {
         "owner_id",
         "application_data",
     ] {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
 
         assert_reserved_err(store.add(request(name, "load")).unwrap_err(), name);
         assert_reserved_err(
@@ -192,7 +192,7 @@ fn write_paths_reject_reserved_feature_names() {
 /// it — the same all-or-nothing contract every other bulk failure has.
 #[test]
 fn a_reserved_feature_name_rolls_back_the_whole_batch() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let valid = AddRequest::new(
         1,
         "Generator",
@@ -220,7 +220,7 @@ fn a_reserved_feature_name_rolls_back_the_whole_batch() {
 /// name still goes in, and reads back unchanged.
 #[test]
 fn near_miss_feature_names_are_accepted() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let mut features: Features = BTreeMap::new();
     features.insert("Name".into(), FeatureValue::Str("load".into()));
     features.insert("resolution_hours".into(), FeatureValue::Int(1));
@@ -247,7 +247,7 @@ fn near_miss_feature_names_are_accepted() {
 
 #[test]
 fn remove_by_filter_empty_match_is_ok_zero() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add(AddRequest::new(
             1,
@@ -267,7 +267,7 @@ fn remove_by_filter_empty_match_is_ok_zero() {
 
 #[test]
 fn bulk_read_range_matches_per_key_get_time_series() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let k1 = store
         .add(AddRequest::new(
             1,
@@ -330,7 +330,7 @@ fn period_serializes_as_iso8601_string() {
 
 #[test]
 fn metadata_and_data_json_round_trip() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = store
         .add(AddRequest::new(
             1,
@@ -672,7 +672,7 @@ fn missing_identity() -> infrastore_core::TimeSeriesId {
 
 #[test]
 fn reading_a_stale_id_is_not_found() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let missing = missing_identity();
     assert!(matches!(
         store.read_by_id(missing, infrastore_core::ReadWindow::full()),
@@ -712,7 +712,7 @@ fn selecting_the_wrong_time_series_type_matches_nothing() {
     // exist. A read cannot express this -- an id names one concrete row,
     // whatever its type -- so the mismatch lives entirely in the identify half,
     // which is where it belongs.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = add_sts(&mut store, 1, "load", 10.0);
 
     let by_type = |t| {
@@ -755,7 +755,7 @@ fn selecting_the_wrong_time_series_type_matches_nothing() {
 
 #[test]
 fn has_any_time_series_answers_owner_level_existence() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_sts(&mut store, 1, "load", 10.0);
 
     let by_owner = |id| {
@@ -797,7 +797,7 @@ fn has_any_time_series_answers_owner_level_existence() {
 
 #[test]
 fn existence_probes_distinguish_features() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let mut high: Features = BTreeMap::new();
     high.insert("scenario".into(), FeatureValue::Str("high".into()));
     let mut low: Features = BTreeMap::new();
@@ -852,7 +852,7 @@ fn existence_probes_distinguish_features() {
 
 #[test]
 fn has_any_time_series_feature_subset_probe() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let mut stored: Features = BTreeMap::new();
     stored.insert("scenario".into(), FeatureValue::Str("high".into()));
     stored.insert("model_year".into(), FeatureValue::Int(2030));
@@ -953,7 +953,7 @@ fn has_any_time_series_feature_subset_probe() {
 
 #[test]
 fn empty_key_lists_are_no_ops_not_errors() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_sts(&mut store, 1, "load", 10.0);
 
     assert!(
@@ -982,7 +982,7 @@ fn empty_key_lists_are_no_ops_not_errors() {
 
 #[test]
 fn get_array_by_hash_miss_is_not_found() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = add_sts(&mut store, 1, "load", 10.0);
     let meta = store.get_metadata_by_id(key).unwrap().unwrap();
 
@@ -1047,7 +1047,7 @@ fn replace_owner_moves_every_series_of_that_owner() {
 
 #[test]
 fn replace_owner_for_an_owner_with_no_series_is_zero() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_sts(&mut store, 1, "load", 10.0);
     assert_eq!(
         store
@@ -1074,7 +1074,7 @@ fn replace_owner_for_an_owner_with_no_series_is_zero() {
 
 #[test]
 fn replace_owner_onto_itself_is_a_no_op() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = add_sts(&mut store, 1, "load", 10.0);
     let moved = store.replace_owner(1, 1, OwnerCategory::Component).unwrap();
     assert_eq!(moved, 1, "the row is rewritten with the same value");
@@ -1092,7 +1092,7 @@ fn replace_owner_into_a_colliding_identity_is_a_duplicate() {
     // identity. The unique index rejects it and the error surfaces as a typed
     // `DuplicateTimeSeries`, not a raw SQLite failure; because the whole call
     // runs in one transaction, nothing moves.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let k1 = add_sts(&mut store, 1, "load", 10.0);
     let k2 = add_sts(&mut store, 2, "load", 20.0);
 
@@ -1122,11 +1122,11 @@ fn replace_owner_is_rejected_on_a_read_only_store() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
+        let mut store = infrastore_core::Store::create(Some(path.as_path()), false).unwrap();
         add_sts(&mut store, 1, "load", 10.0);
         store.flush().unwrap();
     }
-    let mut store = infrastore_core::open_store(path.as_path(), true).unwrap();
+    let mut store = infrastore_core::Store::open(path.as_path(), true).unwrap();
     assert!(matches!(
         store.replace_owner(1, 2, OwnerCategory::Component),
         Err(TimeSeriesError::ReadOnlyStore)
@@ -1138,7 +1138,7 @@ fn replace_owner_is_rejected_on_a_read_only_store() {
 #[test]
 fn read_only_and_path_accessors_report_each_store_state() {
     // 1. In-memory: writable, no path.
-    let mem = create_store(None, true).unwrap();
+    let mem = Store::create(None, true).unwrap();
     assert!(!mem.read_only());
     assert_eq!(mem.file_path(), None);
 
@@ -1147,7 +1147,7 @@ fn read_only_and_path_accessors_report_each_store_state() {
 
     // 2. Created on disk: writable, path is the file it was created at.
     {
-        let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
+        let mut store = infrastore_core::Store::create(Some(path.as_path()), false).unwrap();
         assert!(!store.read_only());
         assert_eq!(store.file_path(), Some(path.as_path()));
         add_sts(&mut store, 1, "load", 10.0);
@@ -1155,12 +1155,12 @@ fn read_only_and_path_accessors_report_each_store_state() {
     }
 
     // 3. Reopened read-write, then read-only.
-    let rw = infrastore_core::open_store(path.as_path(), false).unwrap();
+    let rw = infrastore_core::Store::open(path.as_path(), false).unwrap();
     assert!(!rw.read_only());
     assert_eq!(rw.file_path(), Some(path.as_path()));
     drop(rw);
 
-    let ro = infrastore_core::open_store(path.as_path(), true).unwrap();
+    let ro = infrastore_core::Store::open(path.as_path(), true).unwrap();
     assert!(ro.read_only());
     assert_eq!(ro.file_path(), Some(path.as_path()));
 }
@@ -1170,12 +1170,12 @@ fn a_read_only_store_rejects_every_write_entry_point() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
+        let mut store = infrastore_core::Store::create(Some(path.as_path()), false).unwrap();
         let key = add_sts(&mut store, 1, "load", 10.0);
         store.flush().unwrap();
         key
     };
-    let mut store = infrastore_core::open_store(path.as_path(), true).unwrap();
+    let mut store = infrastore_core::Store::open(path.as_path(), true).unwrap();
 
     let is_ro = |r: infrastore_core::Result<()>| matches!(r, Err(TimeSeriesError::ReadOnlyStore));
 
@@ -1404,7 +1404,7 @@ fn forecast_descriptors_round_trip_on_the_struct() {
 /// field names is still stored once.
 #[test]
 fn component_field_is_descriptive_not_identity() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     let key = store
         .add(AddRequest::new(
@@ -1450,7 +1450,7 @@ fn component_field_is_descriptive_not_identity() {
 /// values seen through a forecast window.
 #[test]
 fn transformed_view_inherits_component_field() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add(AddRequest::new(
             1,
@@ -1494,7 +1494,7 @@ fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
     // `transform_single_time_series` and `build_static_reader` all then work off
     // the wrong grid. `NonSequentialTimeSeries` enforces the equivalent rule.
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     let mut series = SingleTimeSeries::new(
         initial,
@@ -1567,7 +1567,7 @@ fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
     // A store whose owner 1 holds a SingleTimeSeries "load" and the DST derived
     // from it.
     let seeded = || {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         let vals: Vec<f64> = (0..24).map(f64::from).collect();
         store
             .add(AddRequest::new(
@@ -1684,7 +1684,7 @@ fn reader_columns_are_ordered_by_features_when_nothing_else_separates_them() {
     let scenarios = [3i64, 1, 2]; // deliberately not inserted in sorted order
 
     let column_order = |insertion: &[i64]| -> Vec<i64> {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         for &s in insertion {
             let mut features = Features::new();
             features.insert("scenario".into(), FeatureValue::Int(s));

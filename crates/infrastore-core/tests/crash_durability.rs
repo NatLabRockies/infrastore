@@ -9,7 +9,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, ListFilter, OwnerCategory, ReadWindow, SingleTimeSeries, Store, TimeSeriesData,
-    TypedArray, create_store, open_store,
+    TypedArray,
 };
 
 fn request(owner: i64, base: f64) -> AddRequest {
@@ -53,7 +53,7 @@ fn first_value(store: &Store, owner: i64) -> f64 {
 #[test]
 fn writes_are_durable_before_they_return() {
     if let Ok(path) = std::env::var("INFRASTORE_CRASH_CHILD") {
-        let mut store = open_store(std::path::Path::new(&path), false).unwrap();
+        let mut store = Store::open(std::path::Path::new(&path), false).unwrap();
         store.begin_transaction().unwrap();
         add(&mut store, 2, 10.0);
         store.commit_transaction().unwrap();
@@ -66,7 +66,7 @@ fn writes_are_durable_before_they_return() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("crash.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         add(&mut store, 1, 0.0);
     }
     let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -78,7 +78,7 @@ fn writes_are_durable_before_they_return() {
         .unwrap();
     assert!(!status.success(), "the child is meant to abort");
 
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(first_value(&store, 1), 0.0);
     assert_eq!(first_value(&store, 2), 10.0);
     assert_eq!(first_value(&store, 3), 20.0);

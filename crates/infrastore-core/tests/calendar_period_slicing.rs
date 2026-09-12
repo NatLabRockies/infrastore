@@ -26,7 +26,6 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, Deterministic, ListFilter, OwnerCategory, Period, ReadWindow, SingleTimeSeries,
     Store, TimeRange, TimeReference, TimeSeriesData, TimeSeriesType, TransformPolicy, TypedArray,
-    create_store,
 };
 
 /// 2024-01-31: the first of the month ends, so `add_to` clamps at February.
@@ -83,7 +82,7 @@ fn reported_grid(s: &SingleTimeSeries) -> Vec<DateTime<Utc>> {
 /// come back exact.
 #[test]
 fn a_window_slice_never_invents_a_grid() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let length = 14;
     let stored = grid(month_end_anchor(), Period::Months(1), length);
     let id = monthly_series(&mut store, month_end_anchor(), length, "monthly");
@@ -136,7 +135,7 @@ fn a_window_slice_never_invents_a_grid() {
 /// every slice is exact. This is the guard against over-refusing.
 #[test]
 fn a_window_slice_of_an_unclamped_monthly_series_always_works() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let length = 14;
     let stored = grid(safe_anchor(), Period::Months(1), length);
     let id = monthly_series(&mut store, safe_anchor(), length, "monthly");
@@ -163,7 +162,7 @@ fn a_window_slice_of_an_unclamped_monthly_series_always_works() {
 /// land in re-importable CSV.
 #[test]
 fn a_range_slice_never_invents_a_grid() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let length = 8;
     let stored = grid(month_end_anchor(), Period::Months(1), length);
     let id = monthly_series(&mut store, month_end_anchor(), length, "monthly");
@@ -201,7 +200,7 @@ fn a_range_slice_never_invents_a_grid() {
 /// otherwise a caller cannot page through a series with the answers it is given.
 #[test]
 fn every_reported_timestamp_is_readable_again() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let length = 8;
     let stored = grid(month_end_anchor(), Period::Months(1), length);
     let id = monthly_series(&mut store, month_end_anchor(), length, "monthly");
@@ -226,7 +225,7 @@ fn every_reported_timestamp_is_readable_again() {
 /// A forecast whose windows step by a calendar month follows the same rule.
 #[test]
 fn a_forecast_window_slice_never_invents_a_grid() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let (h, count) = (3usize, 8usize);
     let mut d = Deterministic::new(
         month_end_anchor(),
@@ -279,7 +278,7 @@ fn a_forecast_window_slice_never_invents_a_grid() {
 /// before it writes, rather than producing a row that mislabels on every read.
 #[test]
 fn a_derived_forecast_over_a_clamped_source_is_refused() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     monthly_series(&mut store, month_end_anchor(), 12, "monthly");
 
     let err = store
@@ -311,7 +310,7 @@ fn a_derived_forecast_over_a_clamped_source_is_refused() {
 /// window labels its steps with the source's own grid.
 #[test]
 fn a_derived_forecast_over_an_unclamped_source_labels_the_source_grid() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let length = 12;
     let source = grid(safe_anchor(), Period::Months(1), length);
     monthly_series(&mut store, safe_anchor(), length, "monthly");
@@ -355,7 +354,7 @@ fn a_derived_forecast_over_an_unclamped_source_labels_the_source_grid() {
 /// cover instead of failing, so one forecast does not fail a whole batch.
 #[test]
 fn a_range_wider_than_a_forecast_clips_instead_of_erroring() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap();
 
     let mut s = SingleTimeSeries::new(initial, Duration::hours(1), ramp(24), "load");

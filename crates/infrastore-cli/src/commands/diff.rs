@@ -291,7 +291,7 @@ fn load(
     let mut out = BTreeMap::new();
     for key in rows {
         let hash = key.data_hash;
-        out.insert(identity_key(&key), (key, fields::hash_hex(&hash)));
+        out.insert(identity_key(&key), (key, infrastore_core::hash_hex(&hash)));
     }
     Ok(out)
 }

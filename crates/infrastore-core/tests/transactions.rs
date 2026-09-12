@@ -19,7 +19,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Features, ListFilter, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesId,
-    TypedArray, create_store, open_store,
+    TypedArray,
 };
 
 fn t0() -> DateTime<Utc> {
@@ -59,13 +59,13 @@ fn count(store: &Store) -> usize {
 /// every guarantee here is asserted twice.
 fn each_backend(body: impl Fn(&mut Store, &str)) {
     {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         body(&mut store, "memory");
     }
     {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.h5");
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         body(&mut store, "disk");
     }
 }
@@ -345,7 +345,7 @@ fn a_failed_operation_does_not_abort_the_transaction() {
 /// still fails, and the transaction survives the failure.
 #[test]
 fn dst_guard_still_applies_inside_a_transaction() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let k1 = add(&mut store, 1, 0.0);
     store
         .transform_single_time_series(
@@ -374,7 +374,7 @@ fn dst_guard_still_applies_inside_a_transaction() {
 fn compact_is_rejected_while_a_transaction_is_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     store.begin_transaction().unwrap();
     assert!(store.compact().is_err());
     store.rollback_transaction().unwrap();
@@ -383,7 +383,7 @@ fn compact_is_rejected_while_a_transaction_is_open() {
 
 #[test]
 fn commit_or_rollback_without_a_transaction_is_an_error() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     assert!(store.commit_transaction().is_err());
     assert!(store.rollback_transaction().is_err());
     assert!(!store.in_transaction());
@@ -394,11 +394,11 @@ fn a_read_only_store_cannot_begin_a_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         add(&mut store, 1, 0.0);
         store.flush().unwrap();
     }
-    let mut store = open_store(path.as_path(), true).unwrap();
+    let mut store = Store::open(path.as_path(), true).unwrap();
     assert!(store.begin_transaction().is_err());
 }
 
@@ -411,7 +411,7 @@ fn rollback_survives_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let k1 = add(&mut store, 1, 0.0);
 
         store.begin_transaction().unwrap();
@@ -420,7 +420,7 @@ fn rollback_survives_a_reopen() {
         store.rollback_transaction().unwrap();
         store.flush().unwrap();
     }
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     assert_eq!(count(&store), 1);
     let keys = store.list_metadata(ListFilter::new()).unwrap();
     let restored = store

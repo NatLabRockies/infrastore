@@ -17,7 +17,7 @@ use std::time::Duration as StdDuration;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Deterministic, Features, OwnerCategory, Period, SingleTimeSeries, Store, TimeSeriesData,
-    TimeSeriesError, TimeSeriesType, TypedArray, create_store,
+    TimeSeriesError, TimeSeriesType, TypedArray,
 };
 use infrastore_proto::pb::{
     self, GetIntervalsReq, GetResolutionsReq, HasAnyTimeSeriesReq, ListMetadataReq,
@@ -102,7 +102,7 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) {
 
 /// One SingleTimeSeries owned by 42.
 fn populated_store() -> Store {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(
         &mut store,
         42,
@@ -112,7 +112,7 @@ fn populated_store() -> Store {
 }
 
 fn empty_store() -> Store {
-    create_store(None, true).unwrap()
+    Store::create(None, true).unwrap()
 }
 
 /// The catalog id of the one series in `populated_store`.
@@ -601,7 +601,7 @@ async fn read_by_ids_with_an_empty_id_list_returns_no_items() {
 
 #[tokio::test]
 async fn read_by_ids_fails_the_whole_batch_on_one_stale_id() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(
         &mut store,
         1,
@@ -671,7 +671,7 @@ async fn read_by_ids_returns_a_repeated_id_once_each_in_place() {
 
 #[tokio::test]
 async fn a_time_range_applies_to_every_key_in_a_bulk_read() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add(
         &mut store,
         1,
@@ -740,7 +740,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
     // lost the distinction would silently turn a monthly series into a
     // fixed-span one. Nothing else exercises a calendar period over gRPC.
     let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let values: Vec<f64> = (0..12).map(|i| 100.0 + i as f64).collect();
     add(
         &mut store,

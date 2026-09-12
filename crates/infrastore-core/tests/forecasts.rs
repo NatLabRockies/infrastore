@@ -15,7 +15,7 @@ use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Deterministic, Dtype, Features, ListFilter, OwnerCategory, Period, Probabilistic, ReadWindow,
     Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesError, TimeSeriesId,
-    TimeSeriesMetadata, TimeSeriesType, TypedArray, create_store, open_store,
+    TimeSeriesMetadata, TimeSeriesType, TypedArray,
 };
 
 mod common;
@@ -814,7 +814,7 @@ fn get_forecast_parameters_real() {
 
 #[test]
 fn get_forecast_parameters_empty_when_no_forecasts() {
-    let store = create_store(None, true).unwrap();
+    let store = Store::create(None, true).unwrap();
     let params = store.get_forecast_parameters(None, None).unwrap();
     assert!(params.horizon.is_none());
     assert!(params.interval.is_none());
@@ -1014,7 +1014,7 @@ fn resolve_deterministic_matches_dst() {
 
 #[test]
 fn resolve_deterministic_not_found_is_not_masked() {
-    let store = create_store(None, true).unwrap();
+    let store = Store::create(None, true).unwrap();
     let err = resolve_one(
         &store,
         ListFilter::new()
@@ -1037,7 +1037,7 @@ fn resolve_deterministic_ambiguous_by_interval_errors() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(2);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     // Two Deterministic forecasts of one variable at the same resolution but
     // different intervals (e.g. day-ahead vs intra-day). Interval is part of the
@@ -1114,7 +1114,7 @@ fn deterministic_and_dst_are_mutually_exclusive() {
     // Adding a Deterministic when a DST view of the same family exists is
     // rejected: a DST is a synthetic view of a SingleTimeSeries and the two may
     // never coexist.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_forecast(
         &mut store,
         3,
@@ -1156,7 +1156,7 @@ fn deterministic_and_dst_are_mutually_exclusive() {
 
     // The reverse: transforming a SingleTimeSeries into a DST is rejected when a
     // Deterministic of the same family already exists.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_forecast(
         &mut store,
         5,
@@ -1206,7 +1206,7 @@ fn transform_honors_owner_category_and_resolution_filters() {
     let horizon = Duration::hours(2);
     let interval = Duration::hours(1);
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let vals = f64_arr(vec![8], &dst_source_vals());
     let add_sts = |store: &mut Store, owner: i64, cat: OwnerCategory, res: Duration| {
         store
@@ -1306,7 +1306,7 @@ fn transform_rejects_horizon_change_at_same_interval() {
     let resolution = Duration::hours(1);
     let interval = Duration::hours(1);
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_time_series(
             1,
@@ -1380,7 +1380,7 @@ fn count_array_references_counts_sts_and_dst() {
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(2);
     let interval = Duration::hours(1);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     // Transforming an STS leaves an STS and a DST sharing one underlying array.
     let dst_key = add_forecast(
@@ -1551,7 +1551,7 @@ fn monthly_deterministic_end_of_month_initial_timestamp() {
     // 2024-03-31. `steps_between` verifies the exact landing, so the clamped
     // window boundary must be addressable and the "unclamped" 03-29 must not be.
     let initial = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = store
         .add_time_series(
             9,
@@ -1608,7 +1608,7 @@ fn transform_single_time_series_on_a_monthly_grid() {
     // months k..k+3 and the last valid window is `length - H`.
     let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
     let values: Vec<f64> = (0..12).map(|i| 100.0 + i as f64).collect();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_time_series(
             4,
@@ -1690,7 +1690,7 @@ fn forecast_reader_sweeps_a_monthly_grid() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("monthly_forecast.h5");
     {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 9,
@@ -1702,7 +1702,7 @@ fn forecast_reader_sweeps_a_monthly_grid() {
             .unwrap();
         store.flush().unwrap();
     }
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let mut reader = store
         .build_forecast_reader(
             ListFilter::new()
@@ -1748,7 +1748,7 @@ fn monthly_and_fixed_periods_never_over_match() {
     // catalog keys even though their spans coincide for some months. This is
     // what keeps a monthly series from being served to a fixed-span query.
     let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     for (res, name) in [
         (Period::Months(1), "monthly"),
         (Period::fixed(Duration::days(30)), "thirty_day"),
@@ -1822,7 +1822,7 @@ fn non_positive_forecast_periods_are_rejected_through_the_add_path() {
 
     // `transform_single_time_series` is the other forecast-creating entry
     // point; it must reject a non-positive horizon/interval too.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_time_series(
             1,
@@ -2034,7 +2034,7 @@ fn single_window_transform_stores_the_requested_interval_and_stays_idempotent() 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(8);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_time_series(
             1,
@@ -2095,7 +2095,7 @@ fn single_window_transform_at_a_smaller_interval_keeps_it() {
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(8); // spans the whole series => count == 1
     let interval = Duration::hours(1);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store
         .add_time_series(
             1,
@@ -2182,7 +2182,7 @@ fn is_policy() -> infrastore_core::TransformPolicy {
 fn normalize_single_window_stores_the_zero_interval() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let horizon = Duration::hours(8);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_hourly_sts(&mut store, 1, "load", initial, Duration::hours(1), 8);
 
     let outcome = store
@@ -2223,7 +2223,7 @@ fn normalize_single_window_stores_the_zero_interval() {
 #[test]
 fn an_interval_longer_than_the_horizon_is_rejected() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_hourly_sts(&mut store, 1, "load", initial, Duration::hours(1), 24);
 
     let err = store
@@ -2251,7 +2251,7 @@ fn uniform_grid_policy_rejects_a_count_mismatch_with_a_stored_forecast() {
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(4);
     let interval = Duration::hours(1);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     // A real Deterministic with 2 windows.
     add_forecast(
@@ -2291,7 +2291,7 @@ fn uniform_grid_policy_rejects_a_count_mismatch_with_a_stored_forecast() {
 #[test]
 fn uniform_grid_policy_rejects_resolutions_that_derive_different_counts() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // 24 hourly points and 24 two-hourly points: same horizon, different counts.
     add_hourly_sts(&mut store, 1, "hourly", initial, Duration::hours(1), 24);
     add_hourly_sts(&mut store, 2, "two_hourly", initial, Duration::hours(2), 24);
@@ -2334,7 +2334,7 @@ fn uniform_grid_policy_rejects_resolutions_that_derive_different_counts() {
 fn a_divergent_static_grid_is_rejected() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_hourly_sts(&mut store, 1, "a", initial, resolution, 24);
     add_hourly_sts(&mut store, 2, "b", initial, resolution, 12);
 
@@ -2368,7 +2368,7 @@ fn a_divergent_static_grid_is_rejected() {
 /// tell "nothing to do" from "something was wrong".
 #[test]
 fn a_store_with_no_single_time_series_reports_zero_sources() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let outcome = store
         .transform_single_time_series(
             Duration::hours(4),
@@ -2390,7 +2390,7 @@ fn a_store_with_no_single_time_series_reports_zero_sources() {
 fn the_grid_check_is_scoped_to_the_owner_category() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_hourly_sts(&mut store, 1, "component", initial, resolution, 24);
     let vals: Vec<f64> = (0..12).map(|i| i as f64).collect();
     store
@@ -2428,7 +2428,7 @@ fn the_grid_check_is_scoped_to_the_owner_category() {
 #[test]
 fn a_dry_run_validates_without_writing() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     add_hourly_sts(&mut store, 1, "load", initial, Duration::hours(1), 24);
 
     let policy = infrastore_core::TransformPolicy {
@@ -2502,7 +2502,7 @@ fn a_failed_window_read_invalidates_the_block_cache() {
     const COUNT: usize = 5;
     let vals: Vec<f64> = (0..H * COUNT).map(|i| i as f64).collect();
 
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     let key = store
         .add_time_series(
             1,
@@ -2568,7 +2568,7 @@ fn a_failed_window_read_invalidates_the_block_cache() {
 #[test]
 fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     // Single window, zero interval.
     let single = Deterministic::new(
@@ -2651,7 +2651,7 @@ fn a_zero_width_range_returns_an_empty_forecast_for_either_interval_encoding() {
 #[test]
 fn identical_bytes_under_different_element_types_do_not_share_a_slot() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
 
     // One array, declared two ways. Both are physically f64 with per-step dims
     // [2], so nothing but the element type distinguishes them.

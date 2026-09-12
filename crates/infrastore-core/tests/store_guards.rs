@@ -26,7 +26,7 @@ use infrastore_core::types::array::Dtype;
 use infrastore_core::{
     AddRequest, Deterministic, ListFilter, OwnerCategory, ReadWindow, SingleTimeSeries, Store,
     TimeReference, TimeSeriesData, TimeSeriesError, TimeSeriesId, TimeSeriesType, TransformPolicy,
-    TypedArray, create_store,
+    TypedArray,
 };
 
 fn t0() -> DateTime<Utc> {
@@ -36,13 +36,13 @@ fn t0() -> DateTime<Utc> {
 /// Run `body` against a fresh writable store on each backend.
 fn each_backend(body: impl Fn(&mut Store, &str)) {
     {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         body(&mut store, "memory");
     }
     {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.h5");
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         body(&mut store, "disk");
     }
 }

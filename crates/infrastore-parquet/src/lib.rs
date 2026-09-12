@@ -35,9 +35,9 @@
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use infrastore_core::{ListFilter, ReadWindow, open_store};
+//! use infrastore_core::{ListFilter, ReadWindow, Store};
 //!
-//! let store = open_store(Path::new("demo.h5"), true)?;
+//! let store = Store::open(Path::new("demo.h5"), true)?;
 //! let rows = store.list_metadata(ListFilter::new())?;
 //! let ids: Vec<_> = rows.iter().filter_map(|r| r.id).collect();
 //! let values = store.read_by_ids(&ids, ReadWindow::full())?;

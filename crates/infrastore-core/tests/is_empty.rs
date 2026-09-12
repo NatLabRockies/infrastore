@@ -9,9 +9,8 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    ListFilter, OwnerCategory, ParentChildAssociation, ParentChildFilter, SingleTimeSeries,
+    ListFilter, OwnerCategory, ParentChildAssociation, ParentChildFilter, SingleTimeSeries, Store,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, TimeSeriesData, TypedArray,
-    create_store,
 };
 
 mod common;
@@ -126,7 +125,7 @@ fn parent_child_associations_alone_make_the_store_non_empty() {
 /// one is drained — no single table short-circuits the answer.
 #[test]
 fn emptiness_returns_only_after_the_last_table_drains() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     assert!(store.is_empty().unwrap());
 
     store

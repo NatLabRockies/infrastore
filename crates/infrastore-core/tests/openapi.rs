@@ -13,7 +13,6 @@ use infrastore_core::{
     Dtype, ElementType, FeatureValue, Features, ListFilter, OwnerCategory, Period, Scenarios,
     SingleTimeSeries, Store, SupplementalAttributeAssociation, TimeReference, TimeSeriesData,
     TimeSeriesError, TimeSeriesId, TimeSeriesType, TransformPolicy, TypedArray, UnitSystem,
-    create_store,
 };
 
 // ---- shared helpers ---------------------------------------------------------
@@ -82,7 +81,7 @@ fn fixture(name: &str) -> serde_json::Value {
 /// the six fixtures in file order (3-8, skipping the SA fixture which lives in
 /// a different table).
 fn build_fixture_store() -> Store {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
 
     // DST source: owner 7, "max_active_power", no features or component_field,
     // 24 hourly points from 2030-01-01 -- exactly enough for a 2h horizon / 1h
@@ -311,7 +310,7 @@ fn export_reproduces_every_time_series_fixture() {
 /// call.
 #[test]
 fn a_persistent_row_is_omitted_from_the_export_while_the_rest_travels() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let persistent = infrastore_core::PersistentTimeSeries::new(
         (0..4).map(|i| ts(2030, 1 + i * 3, 1, 0, 0, 0)).collect(),
         TypedArray::from_f64(vec![4], &[3.5, 4.25, 5.0, 4.75]),
@@ -379,7 +378,7 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
     // Insert the same six rows as `build_fixture_store`, but shuffled: forecast
     // types before statics, and reversed within a couple of groups. The sorted
     // export must come out identical regardless.
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let scenarios = Scenarios::new(
         ts(2030, 6, 15, 0, 0, 0),
         Duration::hours(1),
@@ -458,7 +457,7 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
         serde_json::from_str(&shuffled).expect("export is a JSON array");
 
     // Same three rows, inserted in ascending identity order this time.
-    let mut ordered = create_store(None, true).expect("in-memory store should initialize");
+    let mut ordered = Store::create(None, true).expect("in-memory store should initialize");
     let single_b = SingleTimeSeries::new(
         ts(2030, 1, 1, 0, 0, 0),
         Duration::hours(1),
@@ -557,7 +556,7 @@ fn export_sort_order_does_not_depend_on_insertion_order() {
 
 #[test]
 fn export_reproduces_the_supplemental_attribute_fixture() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     store
         .add_supplemental_attribute_association(SupplementalAttributeAssociation {
             component_id: 7,
@@ -577,7 +576,7 @@ fn export_reproduces_the_supplemental_attribute_fixture() {
 
 #[test]
 fn supplemental_attribute_export_import_round_trips_byte_equal() {
-    let mut source = create_store(None, true).expect("in-memory store should initialize");
+    let mut source = Store::create(None, true).expect("in-memory store should initialize");
     source
         .add_supplemental_attribute_associations(vec![
             SupplementalAttributeAssociation {
@@ -601,7 +600,7 @@ fn supplemental_attribute_export_import_round_trips_byte_equal() {
         .export_supplemental_attribute_associations_openapi()
         .expect("export should succeed");
 
-    let mut target = create_store(None, true).expect("in-memory store should initialize");
+    let mut target = Store::create(None, true).expect("in-memory store should initialize");
     let inserted = target
         .import_supplemental_attribute_associations_openapi(&exported)
         .expect("import should succeed");
@@ -617,7 +616,7 @@ fn supplemental_attribute_export_import_round_trips_byte_equal() {
 
 #[test]
 fn sa_import_rejects_malformed_json() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let err = store
         .import_supplemental_attribute_associations_openapi("{not valid json")
         .unwrap_err();
@@ -630,7 +629,7 @@ fn sa_import_rejects_malformed_json() {
 /// line/column went, so the error has to name the row itself.
 #[test]
 fn sa_import_rejects_unknown_fields() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let json = r#"[{"component_id":1,"component_type":"Generator","attribute_id":100,
         "attribute_type":"GeographicInfo"},
         {"component_id":2,"component_type":"Generator","attribute_id":101,
@@ -646,7 +645,7 @@ fn sa_import_rejects_unknown_fields() {
 
 #[test]
 fn sa_import_rolls_back_a_duplicate_within_the_batch() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let json = r#"[
         {"component_id":1,"component_type":"Generator","attribute_id":100,"attribute_type":"GeographicInfo"},
         {"component_id":1,"component_type":"Generator","attribute_id":100,"attribute_type":"GeographicInfo"}
@@ -669,7 +668,7 @@ fn sa_import_rolls_back_a_duplicate_within_the_batch() {
 
 #[test]
 fn add_rejects_single_time_series_length_mismatch_and_leaves_store_untouched() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let mut single = SingleTimeSeries::new(
         ts(2030, 1, 1, 0, 0, 0),
         Duration::hours(1),
@@ -700,7 +699,7 @@ fn add_rejects_single_time_series_length_mismatch_and_leaves_store_untouched() {
 
 #[test]
 fn add_rejects_deterministic_shape_mismatch_and_leaves_store_untouched() {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let mut deterministic = infrastore_core::Deterministic::new(
         ts(2030, 1, 1, 0, 0, 0),
         Duration::hours(1),
@@ -738,7 +737,7 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
     // A batch of two: a clean row and a mismatched one. The mismatch must
     // reject the whole batch, including the row that would otherwise have
     // added cleanly.
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let clean = SingleTimeSeries::new(
         ts(2030, 1, 1, 0, 0, 0),
         Duration::hours(1),
@@ -982,7 +981,7 @@ fn full_surface_rows() -> Vec<(i64, &'static str, TimeSeriesData, Features)> {
 /// are assigned rather than chosen, so the way to place a document's rows above
 /// an importing store's mark is to advance the exporter's counter.
 fn full_surface_source() -> Store {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     advance_ids(&mut store, 1000);
     let mut rows = full_surface_rows().into_iter();
 
@@ -1028,7 +1027,7 @@ fn full_surface_source() -> Store {
 /// which is how the assertions tell the pre-existing rows from the imported
 /// ones in the target's own export.
 fn full_surface_anchor_target() -> Store {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     for (index, (_, _, data, _)) in full_surface_rows().into_iter().enumerate() {
         store
             .add(infrastore_core::AddRequest::new(

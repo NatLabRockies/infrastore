@@ -38,7 +38,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use hdf5_metno as h5;
 use infrastore_core::{
     AddRequest, ListFilter, NonSequentialTimeSeries, OwnerCategory, PersistentTimeSeries,
-    ReadWindow, SingleTimeSeries, Store, TimeSeriesData, TypedArray, create_store, open_store,
+    ReadWindow, SingleTimeSeries, Store, TimeSeriesData, TypedArray,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -99,7 +99,7 @@ fn packed_layout(path: &Path) -> BTreeMap<String, (Vec<usize>, Option<Vec<usize>
 
 /// Add `owners` one at a time inside one transaction, then close the store.
 fn add_singly_in_a_transaction(path: &Path, owners: std::ops::Range<i64>) {
-    let mut store = create_store(Some(path), false).unwrap();
+    let mut store = Store::create(Some(path), false).unwrap();
     store.begin_transaction().unwrap();
     for owner in owners {
         store.add(request(owner, owner as f64 * 100.0)).unwrap();
@@ -120,7 +120,7 @@ fn single_adds_in_a_transaction_match_a_bulk_add_of_the_same_items() {
 
     add_singly_in_a_transaction(&looped, 1..8);
     {
-        let mut store = create_store(Some(&bulked), false).unwrap();
+        let mut store = Store::create(Some(&bulked), false).unwrap();
         store
             .add_time_series_bulk((1..8).map(|o| request(o, o as f64 * 100.0)).collect())
             .unwrap();
@@ -138,7 +138,7 @@ fn single_adds_in_a_transaction_match_a_bulk_add_of_the_same_items() {
     );
 
     // And the values survive the reshuffle in the order the adds arrived.
-    let store = open_store(&looped, true).unwrap();
+    let store = Store::open(&looped, true).unwrap();
     for owner in 1..8 {
         assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
     }
@@ -154,7 +154,7 @@ fn a_single_add_outside_a_transaction_still_fills_a_growth_pool() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("grown.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         for owner in 1..4 {
             store.add(request(owner, owner as f64 * 100.0)).unwrap();
         }
@@ -185,7 +185,7 @@ fn one_item_bulk_adds_fill_a_slot_outside_a_transaction_and_coalesce_inside_one(
 
     let loose = dir.path().join("loose.h5");
     {
-        let mut store = create_store(Some(&loose), false).unwrap();
+        let mut store = Store::create(Some(&loose), false).unwrap();
         for owner in 1..4 {
             store
                 .add_time_series_bulk(vec![request(owner, owner as f64 * 100.0)])
@@ -199,7 +199,7 @@ fn one_item_bulk_adds_fill_a_slot_outside_a_transaction_and_coalesce_inside_one(
 
     let spanned = dir.path().join("spanned.h5");
     {
-        let mut store = create_store(Some(&spanned), false).unwrap();
+        let mut store = Store::create(Some(&spanned), false).unwrap();
         store.begin_transaction().unwrap();
         for owner in 1..4 {
             store
@@ -232,7 +232,7 @@ fn a_one_item_bulk_add_guard_fills_a_slot_outside_a_transaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("guarded.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         for owner in 1..4 {
             let mut batch = store.bulk_add();
             batch.push(request(owner, owner as f64 * 100.0));
@@ -276,13 +276,13 @@ fn a_pool_with_one_array_in_a_bulk_add_fills_a_slot() {
     let dir = tempfile::tempdir().unwrap();
     let loose = dir.path().join("loose.h5");
     {
-        let mut store = create_store(Some(&loose), false).unwrap();
+        let mut store = Store::create(Some(&loose), false).unwrap();
         store.add_time_series_bulk(batch()).unwrap();
         store.flush().unwrap();
     }
     let spanned = dir.path().join("spanned.h5");
     {
-        let mut store = create_store(Some(&spanned), false).unwrap();
+        let mut store = Store::create(Some(&spanned), false).unwrap();
         store.begin_transaction().unwrap();
         store.add_time_series_bulk(batch()).unwrap();
         store.commit_transaction().unwrap();
@@ -320,7 +320,7 @@ fn a_transaction_around_one_add_fills_a_slot_rather_than_sizing_a_dataset() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("one_at_a_time.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         for owner in 1..6 {
             store.begin_transaction().unwrap();
             store.add(request(owner, owner as f64 * 100.0)).unwrap();
@@ -340,7 +340,7 @@ fn a_transaction_around_one_add_fills_a_slot_rather_than_sizing_a_dataset() {
         "five one-add transactions share one pool, not five datasets"
     );
 
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 5);
     for owner in 1..6 {
         assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
@@ -375,13 +375,13 @@ fn a_repeated_hash_across_pools_goes_to_its_first_request() {
     let dir = tempfile::tempdir().unwrap();
     let loose = dir.path().join("loose.h5");
     {
-        let mut store = create_store(Some(&loose), false).unwrap();
+        let mut store = Store::create(Some(&loose), false).unwrap();
         store.add_time_series_bulk(batch()).unwrap();
         store.flush().unwrap();
     }
     let spanned = dir.path().join("spanned.h5");
     {
-        let mut store = create_store(Some(&spanned), false).unwrap();
+        let mut store = Store::create(Some(&spanned), false).unwrap();
         store.begin_transaction().unwrap();
         store.add_time_series_bulk(batch()).unwrap();
         store.commit_transaction().unwrap();
@@ -399,7 +399,7 @@ fn a_repeated_hash_across_pools_goes_to_its_first_request() {
         "the hourly pool holds both arrays; the five-minute pool wrote nothing"
     );
 
-    let store = open_store(&loose, true).unwrap();
+    let store = Store::open(&loose, true).unwrap();
     assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 3);
     assert_eq!(
         first_value(&store, 3),
@@ -421,7 +421,7 @@ fn an_array_added_and_removed_in_one_span_stays_out_of_the_block() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("added_and_removed.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         store.begin_transaction().unwrap();
         store.add(request(1, 100.0)).unwrap();
         let doomed = store.add(request(2, 200.0)).unwrap();
@@ -440,7 +440,7 @@ fn an_array_added_and_removed_in_one_span_stays_out_of_the_block() {
         )]),
         "the survivor is a block of one and fills a slot"
     );
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
     assert_eq!(first_value(&store, 1), 100.0);
     assert!(store.verify_integrity().unwrap().ok());
@@ -528,7 +528,7 @@ fn irregular_singles_in_a_span_pool_like_a_bulk_add_of_them() {
     let looped = dir.path().join("looped.h5");
     let bulked = dir.path().join("bulked.h5");
     {
-        let mut store = create_store(Some(&looped), false).unwrap();
+        let mut store = Store::create(Some(&looped), false).unwrap();
         store.begin_transaction().unwrap();
         for owner in 1..7 {
             store.add(irregular(owner, owner as f64 * 100.0)).unwrap();
@@ -537,7 +537,7 @@ fn irregular_singles_in_a_span_pool_like_a_bulk_add_of_them() {
         store.flush().unwrap();
     }
     {
-        let mut store = create_store(Some(&bulked), false).unwrap();
+        let mut store = Store::create(Some(&bulked), false).unwrap();
         store
             .add_time_series_bulk((1..7).map(|o| irregular(o, o as f64 * 100.0)).collect())
             .unwrap();
@@ -554,7 +554,7 @@ fn irregular_singles_in_a_span_pool_like_a_bulk_add_of_them() {
     assert_eq!(layout["nsts"][0], vec![12, 6]);
     assert!(!layout.contains_key("arr"), "nothing left standalone");
 
-    let store = open_store(&looped, true).unwrap();
+    let store = Store::open(&looped, true).unwrap();
     for owner in 1..7 {
         assert_eq!(first_irregular_value(&store, owner), owner as f64 * 100.0);
     }
@@ -569,7 +569,7 @@ fn the_two_irregular_types_share_one_buffered_cohort() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mixed.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         store.begin_transaction().unwrap();
         store.add(irregular(1, 100.0)).unwrap();
         store.add(persistent(2, 200.0)).unwrap();
@@ -595,7 +595,7 @@ fn a_lone_irregular_series_in_a_span_stays_standalone() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lone.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         store.begin_transaction().unwrap();
         store.add(irregular(1, 100.0)).unwrap();
         store.commit_transaction().unwrap();
@@ -613,7 +613,7 @@ fn a_lone_irregular_series_joins_a_pool_the_file_already_holds() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("join.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         store
             .add_time_series_bulk(vec![irregular(1, 100.0), irregular(2, 200.0)])
             .unwrap();
@@ -621,7 +621,7 @@ fn a_lone_irregular_series_joins_a_pool_the_file_already_holds() {
     }
     assert_eq!(kinds(&path)["nsts"], vec![vec![12, 2]]);
     {
-        let mut store = open_store(&path, false).unwrap();
+        let mut store = Store::open(&path, false).unwrap();
         store.begin_transaction().unwrap();
         store.add(irregular(3, 300.0)).unwrap();
         store.commit_transaction().unwrap();
@@ -631,7 +631,7 @@ fn a_lone_irregular_series_joins_a_pool_the_file_already_holds() {
     assert!(!layout.contains_key("arr"), "joined the pool: {layout:?}");
     assert_eq!(layout["nsts"].len(), 2, "a sibling of the same pool");
 
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(first_irregular_value(&store, 3), 300.0);
     assert!(store.verify_integrity().unwrap().ok());
 }
@@ -660,7 +660,7 @@ fn first_value(store: &Store, owner: i64) -> f64 {
 fn a_deferred_add_reads_back_before_the_transaction_commits() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rw.h5");
-    let mut store = create_store(Some(&path), false).unwrap();
+    let mut store = Store::create(Some(&path), false).unwrap();
 
     store.begin_transaction().unwrap();
     let a = store.add(request(1, 100.0)).unwrap();
@@ -725,7 +725,7 @@ fn a_deferred_add_reads_back_before_the_transaction_commits() {
 fn a_repeated_array_is_buffered_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dedup.h5");
-    let mut store = create_store(Some(&path), false).unwrap();
+    let mut store = Store::create(Some(&path), false).unwrap();
 
     store.begin_transaction().unwrap();
     let first = store.add(request(1, 100.0)).unwrap();
@@ -766,7 +766,7 @@ fn rollback_of_a_buffered_span_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rolled.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         store.begin_transaction().unwrap();
         for owner in 1..5 {
             store.add(request(owner, owner as f64 * 100.0)).unwrap();
@@ -788,7 +788,7 @@ fn rollback_of_a_buffered_span_writes_nothing() {
 fn an_inner_rollback_drops_only_its_own_arrays_from_the_block() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.h5");
-    let mut store = create_store(Some(&path), false).unwrap();
+    let mut store = Store::create(Some(&path), false).unwrap();
 
     store.begin_transaction().unwrap();
     store.add(request(1, 100.0)).unwrap();
@@ -833,13 +833,13 @@ fn an_abandoned_transaction_leaves_no_orphan_arrays() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("abandoned.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         store.add(request(1, 100.0)).unwrap();
         store.flush().unwrap();
     }
     let before = packed_layout(&path);
     {
-        let mut store = open_store(&path, false).unwrap();
+        let mut store = Store::open(&path, false).unwrap();
         store.begin_transaction().unwrap();
         for owner in 2..6 {
             store.add(request(owner, owner as f64 * 100.0)).unwrap();
@@ -851,7 +851,7 @@ fn an_abandoned_transaction_leaves_no_orphan_arrays() {
         before,
         "the abandoned span wrote nothing"
     );
-    let store = open_store(&path, true).unwrap();
+    let store = Store::open(&path, true).unwrap();
     assert_eq!(store.list_metadata(ListFilter::new()).unwrap().len(), 1);
     assert_eq!(first_value(&store, 1), 100.0);
     assert!(store.verify_integrity().unwrap().ok());
@@ -895,7 +895,7 @@ fn a_scalar_span_wider_than_the_growth_pool_stays_one_block() {
 
     let bulked = dir.path().join("bulked.h5");
     {
-        let mut store = create_store(Some(&bulked), false).unwrap();
+        let mut store = Store::create(Some(&bulked), false).unwrap();
         store
             .add_time_series_bulk(
                 (1..TOTAL + 1)
@@ -907,7 +907,7 @@ fn a_scalar_span_wider_than_the_growth_pool_stays_one_block() {
     }
     assert_eq!(packed_layout(&bulked), expected);
 
-    let store = open_store(&looped, true).unwrap();
+    let store = Store::open(&looped, true).unwrap();
     assert_eq!(
         store.list_metadata(ListFilter::new()).unwrap().len(),
         TOTAL as usize
@@ -939,13 +939,13 @@ fn a_bulk_add_inside_a_transaction_writes_the_dataset_it_writes_outside_one() {
     let dir = tempfile::tempdir().unwrap();
     let outside = dir.path().join("outside.h5");
     {
-        let mut store = create_store(Some(&outside), false).unwrap();
+        let mut store = Store::create(Some(&outside), false).unwrap();
         store.add_time_series_bulk(items()).unwrap();
         store.flush().unwrap();
     }
     let inside = dir.path().join("inside.h5");
     {
-        let mut store = create_store(Some(&inside), false).unwrap();
+        let mut store = Store::create(Some(&inside), false).unwrap();
         store.begin_transaction().unwrap();
         store.add_time_series_bulk(items()).unwrap();
         // The binding flushes between its batches; a flush inside the span
@@ -969,7 +969,7 @@ fn a_bulk_add_inside_a_transaction_writes_the_dataset_it_writes_outside_one() {
         "one batch-wide dataset, not growth-pool-sized pieces"
     );
 
-    let store = open_store(&inside, true).unwrap();
+    let store = Store::open(&inside, true).unwrap();
     for owner in [1, 1_000, 1_001, TOTAL] {
         assert_eq!(first_value(&store, owner), owner as f64 * 100.0);
     }
@@ -1000,7 +1000,7 @@ fn a_pending_block_spills_at_the_width_the_block_writer_spills_at() {
     let dir = tempfile::tempdir().unwrap();
     let looped = dir.path().join("looped.h5");
     {
-        let mut store = create_store(Some(&looped), false).unwrap();
+        let mut store = Store::create(Some(&looped), false).unwrap();
         store.begin_transaction().unwrap();
         for owner in 1..=TOTAL as i64 {
             store.add(wide(owner)).unwrap();
@@ -1028,7 +1028,7 @@ fn a_pending_block_spills_at_the_width_the_block_writer_spills_at() {
     // Which is exactly how the bulk path splits the same batch.
     let bulked = dir.path().join("bulked.h5");
     {
-        let mut store = create_store(Some(&bulked), false).unwrap();
+        let mut store = Store::create(Some(&bulked), false).unwrap();
         store
             .add_time_series_bulk((1..=TOTAL as i64).map(wide).collect())
             .unwrap();
@@ -1054,7 +1054,7 @@ fn the_write_buffer_budget_decides_how_wide_a_span_writes() {
 
     let narrow = dir.path().join("narrow.h5");
     {
-        let mut store = create_store(Some(&narrow), false).unwrap();
+        let mut store = Store::create(Some(&narrow), false).unwrap();
         store.set_write_buffer_bytes(COLUMN_BYTES * 4).unwrap();
         assert_eq!(store.write_buffer_bytes(), COLUMN_BYTES * 4);
         store.begin_transaction().unwrap();
@@ -1081,7 +1081,7 @@ fn the_write_buffer_budget_decides_how_wide_a_span_writes() {
     // dataset the bulk add of those items writes.
     let wide = dir.path().join("wide.h5");
     {
-        let mut store = create_store(Some(&wide), false).unwrap();
+        let mut store = Store::create(Some(&wide), false).unwrap();
         store.set_write_buffer_bytes(COLUMN_BYTES * 64).unwrap();
         store.begin_transaction().unwrap();
         for owner in 1..=10 {
@@ -1092,7 +1092,7 @@ fn the_write_buffer_budget_decides_how_wide_a_span_writes() {
     }
     let bulked = dir.path().join("bulked.h5");
     {
-        let mut store = create_store(Some(&bulked), false).unwrap();
+        let mut store = Store::create(Some(&bulked), false).unwrap();
         store
             .add_time_series_bulk((1..=10).map(|o| request(o, o as f64 * 100.0)).collect())
             .unwrap();
@@ -1112,7 +1112,7 @@ fn lowering_the_budget_writes_out_what_is_already_buffered() {
     const COLUMN_BYTES: usize = 24 * 8;
     let path = dir.path().join("evicted.h5");
     {
-        let mut store = create_store(Some(&path), false).unwrap();
+        let mut store = Store::create(Some(&path), false).unwrap();
         store.set_write_buffer_bytes(COLUMN_BYTES * 64).unwrap();
         store.begin_transaction().unwrap();
         for owner in 1..=6 {
@@ -1145,7 +1145,7 @@ fn lowering_the_budget_writes_out_what_is_already_buffered() {
 #[test]
 fn a_zero_write_buffer_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = create_store(Some(&dir.path().join("s.h5")), false).unwrap();
+    let mut store = Store::create(Some(&dir.path().join("s.h5")), false).unwrap();
     let before = store.write_buffer_bytes();
     assert!(matches!(
         store.set_write_buffer_bytes(0),
@@ -1163,7 +1163,7 @@ fn a_zero_write_buffer_is_refused() {
 /// backend it was handed does not get an answer it never wrote.
 #[test]
 fn an_in_memory_store_records_the_budget_without_acting_on_it() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     store.set_write_buffer_bytes(4096).unwrap();
     assert_eq!(store.write_buffer_bytes(), 4096);
     store.begin_transaction().unwrap();
@@ -1187,7 +1187,7 @@ fn a_backend_swap_keeps_the_budget_the_caller_set() {
     let dir = tempfile::tempdir().unwrap();
     const COLUMN_BYTES: usize = 24 * 8;
     let path = dir.path().join("s.h5");
-    let mut store = create_store(Some(&path), false).unwrap();
+    let mut store = Store::create(Some(&path), false).unwrap();
     store.set_write_buffer_bytes(COLUMN_BYTES * 4).unwrap();
     store.add(request(1, 100.0)).unwrap();
 

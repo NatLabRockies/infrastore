@@ -4,7 +4,7 @@
 //! integration-test file is its own crate, unused helpers here would trip
 //! `dead_code`; every item therefore carries `#[allow(dead_code)]`.
 
-use infrastore_core::{Store, create_store, open_store};
+use infrastore_core::Store;
 
 /// Run `populate` to write data, then `verify` to read it back, once per
 /// backend. For HDF5 the store is flushed, dropped, and reopened read-only
@@ -16,7 +16,7 @@ use infrastore_core::{Store, create_store, open_store};
 pub fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&Store, &T, &str)) {
     // In-memory backend: same store instance for write and read.
     {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         let state = populate(&mut store);
         verify(&store, &state, "memory");
     }
@@ -25,12 +25,12 @@ pub fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.h5");
         let state = {
-            let mut store = create_store(Some(path.as_path()), false).unwrap();
+            let mut store = Store::create(Some(path.as_path()), false).unwrap();
             let state = populate(&mut store);
             store.flush().unwrap();
             state
         };
-        let store = open_store(path.as_path(), true).unwrap();
+        let store = Store::open(path.as_path(), true).unwrap();
         verify(&store, &state, "disk");
     }
 }
@@ -47,7 +47,7 @@ pub fn for_each_backend_mut<T>(
 ) {
     // In-memory backend: same store instance for write and read.
     {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         let state = populate(&mut store);
         verify(&mut store, &state, "memory");
     }
@@ -56,12 +56,12 @@ pub fn for_each_backend_mut<T>(
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.h5");
         let state = {
-            let mut store = create_store(Some(path.as_path()), false).unwrap();
+            let mut store = Store::create(Some(path.as_path()), false).unwrap();
             let state = populate(&mut store);
             store.flush().unwrap();
             state
         };
-        let mut store = open_store(path.as_path(), false).unwrap();
+        let mut store = Store::open(path.as_path(), false).unwrap();
         verify(&mut store, &state, "disk");
     }
 }

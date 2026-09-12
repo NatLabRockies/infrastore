@@ -341,6 +341,9 @@ pub(crate) fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize
     Ok((dtype, element_shape, length, group))
 }
 
+/// [`crate::hash::hash_from_hex`] with this layer's error: a bad hash here came
+/// off a dataset name or a hash row, so it is an integrity failure rather than
+/// a bad argument.
 pub(crate) fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
     if s.len() != 64 {
         return Err(TimeSeriesError::IntegrityError(format!(
@@ -348,18 +351,8 @@ pub(crate) fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
             s.len()
         )));
     }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        // `get` rather than indexing: 64 *bytes* of non-ASCII can split a
-        // character, and that is a bad hex string, not a panic.
-        *byte = s
-            .get(i * 2..i * 2 + 2)
-            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-            .ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!("bad hex byte at {i} in {s}"))
-            })?;
-    }
-    Ok(out)
+    crate::hash::hash_from_hex(s)
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad hex in {s}")))
 }
 
 #[cfg(test)]

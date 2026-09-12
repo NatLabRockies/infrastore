@@ -14,8 +14,8 @@ use std::path::Path;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Dtype, ElementType, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, Period,
-    PersistentTimeSeries, SingleTimeSeries, TimeReference, TimeSeriesData, TimeSeriesMetadata,
-    TypedArray, create_store,
+    PersistentTimeSeries, SingleTimeSeries, Store, TimeReference, TimeSeriesData,
+    TimeSeriesMetadata, TypedArray,
 };
 use infrastore_parquet::read::{ImportOptions, ImportedSeries};
 use infrastore_parquet::{PartitionFiles, partitions, read_partition, write_partitions};
@@ -81,7 +81,7 @@ fn round_trip(
 fn stored(
     items: Vec<(i64, TimeSeriesData, Features)>,
 ) -> Vec<(TimeSeriesMetadata, TimeSeriesData)> {
-    let mut store = create_store(None, true).expect("in-memory store should initialize");
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
     let mut out = Vec::new();
     for (owner, data, features) in items {
         let id = store
@@ -639,7 +639,7 @@ fn a_thousand_series_share_one_array() {
         "every series names the same array"
     );
 
-    let mut store = create_store(None, true).expect("in-memory store");
+    let mut store = Store::create(None, true).expect("in-memory store");
     for one in back {
         store
             .add_time_series(

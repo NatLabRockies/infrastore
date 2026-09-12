@@ -198,6 +198,30 @@ pub fn hash_hex(hash: &[u8; 32]) -> String {
     String::from_utf8(out.to_vec()).expect("hex digits are ASCII")
 }
 
+/// The inverse of [`hash_hex`]: 64 lowercase-or-uppercase hex characters as 32
+/// bytes, or `None` for anything else.
+///
+/// The one decoder, so a hash rejected by one layer is rejected by all of them.
+/// Callers wrap the `None` in whatever error their layer reports — an integrity
+/// error naming a dataset, a wire error naming a field, a Python exception —
+/// which is the only thing that ever differed between the copies of this.
+///
+/// Compares over bytes rather than `&str` slices: 64 *bytes* of multi-byte
+/// characters would otherwise slice through a character boundary and panic on
+/// what is merely a bad hex string.
+pub fn hash_from_hex(s: &str) -> Option<[u8; 32]> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let pair = std::str::from_utf8(&bytes[i * 2..i * 2 + 2]).ok()?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

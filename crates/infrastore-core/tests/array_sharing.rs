@@ -11,7 +11,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData,
-    TimeSeriesType, TypedArray, create_store, open_store,
+    TimeSeriesType, TypedArray,
 };
 
 fn t0() -> DateTime<Utc> {
@@ -46,7 +46,7 @@ fn add_sts(store: &mut Store, owner: i64) -> infrastore_core::TimeSeriesId {
 
 #[test]
 fn count_array_references_multiple_sts_then_decrements() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     // Two SingleTimeSeries with identical data share one array; no DST exists.
     let k1 = add_sts(&mut store, 1);
     let k2 = add_sts(&mut store, 2);
@@ -68,7 +68,7 @@ fn count_array_references_multiple_sts_then_decrements() {
 
 #[test]
 fn removing_the_last_sts_backing_a_dst_is_refused() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let sts_key = add_sts(&mut store, 5);
 
     // Derive a single DST view sharing the STS's array.
@@ -116,7 +116,7 @@ fn removing_the_last_sts_backing_a_dst_is_refused() {
 
 #[test]
 fn bulk_remove_of_dst_and_backing_sts_is_order_independent() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let sts_key = add_sts(&mut store, 5);
     store
         .transform_single_time_series(
@@ -173,7 +173,7 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
     let sts_id;
     let ns_id;
     {
-        let mut store = create_store(None, true).unwrap();
+        let mut store = Store::create(None, true).unwrap();
         let sts_key = store
             .add_time_series(
                 1,
@@ -217,7 +217,7 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
         store.persist_to(path.as_path()).unwrap();
     }
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 
     let sts_got = store
@@ -249,7 +249,7 @@ fn locate_array_names_the_dataset_and_column_of_a_packed_array() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let hashes = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         // Two different arrays, so at least one lands past column 0.
         let mut hashes = Vec::new();
         for (i, owner) in [1i64, 2].iter().enumerate() {
@@ -275,7 +275,7 @@ fn locate_array_names_the_dataset_and_column_of_a_packed_array() {
         hashes
     };
 
-    let mut store = open_store(path.as_path(), true).unwrap();
+    let mut store = Store::open(path.as_path(), true).unwrap();
     let mut columns = Vec::new();
     for hash in &hashes {
         match store.locate_array(hash).unwrap() {
@@ -310,7 +310,7 @@ fn locate_array_names_the_standalone_dataset_of_a_lone_irregular_series() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let hash = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let ns = NonSequentialTimeSeries::new(
             vec![t0(), t0() + Duration::hours(3)],
             TypedArray::from_f64(vec![2], &[1.0, 2.0]),
@@ -331,7 +331,7 @@ fn locate_array_names_the_standalone_dataset_of_a_lone_irregular_series() {
         hash
     };
 
-    let mut store = open_store(path.as_path(), true).unwrap();
+    let mut store = Store::open(path.as_path(), true).unwrap();
     match store.locate_array(&hash).unwrap() {
         ArrayLocation::Standalone { dataset } => assert!(
             dataset.starts_with("/time_series/single/arr_"),
@@ -355,7 +355,7 @@ fn irregular_series_sharing_a_time_axis_are_packed_into_one_cohort_dataset() {
     // timestamps and not merely by shape.
     let other_stamps = vec![t0(), t0() + Duration::hours(4), t0() + Duration::hours(11)];
 
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut store = Store::create(Some(path.as_path()), false).unwrap();
     let mut bulk = store.bulk_add();
     for owner in 1..=3 {
         let ns = NonSequentialTimeSeries::new(
@@ -416,7 +416,7 @@ fn irregular_series_sharing_a_time_axis_are_packed_into_one_cohort_dataset() {
     // Every value survives the packing, across a reopen that rebuilds the pool
     // index from the dataset names.
     drop(store);
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     for (owner, key) in keys.iter().enumerate().take(3) {
         match store
             .read_by_id(*key, infrastore_core::ReadWindow::full())
@@ -439,7 +439,7 @@ fn irregular_series_sharing_a_time_axis_are_packed_into_one_cohort_dataset() {
 fn locate_array_reports_no_on_disk_location_for_an_in_memory_store() {
     use infrastore_core::ArrayLocation;
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = store
         .add_time_series(
             1,
@@ -464,7 +464,7 @@ fn a_forecast_sharing_a_packed_array_reads_through_the_forecast_reader() {
     use infrastore_core::{Deterministic, ListFilter};
     for forecast_first in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = create_store(Some(&dir.path().join("shared.h5")), false).unwrap();
+        let mut store = Store::create(Some(&dir.path().join("shared.h5")), false).unwrap();
         let values: Vec<f64> = (0..24 * 7).map(|i| i as f64).collect();
         // A length-24 series with element shape [7] and a 24-step forecast
         // with 7 windows both store a `[24, 7]` f64 array.

@@ -174,6 +174,64 @@ typedef struct InfraStore InfraStore;
 typedef struct InfraStoreStaticReaderHandle InfraStoreStaticReaderHandle;
 
 /**
+ * Every catalog filter the ABI accepts, as one record.
+ *
+ * Passed by pointer to each filter-taking export in place of the seventeen
+ * positional arguments they used to carry. A null pointer, and equally an
+ * all-zero record, is the empty filter: it matches everything. So a C caller
+ * writes `InfraStoreFilter f = {0};` and sets only the fields it cares about,
+ * and adding a filter later does not change any existing signature.
+ *
+ * Each optional scalar is a `has_*` flag beside its value, because 0 is a
+ * legitimate owner id, category, and length. Each optional string is null when
+ * unset. The struct borrows its strings: they must outlive the call, and
+ * nothing here is freed.
+ */
+typedef struct InfraStoreFilter {
+  bool has_owner_id;
+  int64_t owner_id;
+  bool has_owner_category;
+  /**
+   * 0 = Component, 1 = SupplementalAttribute.
+   */
+  int32_t owner_category;
+  bool has_time_series_type;
+  int32_t time_series_type;
+  const char *name;
+  /**
+   * SQLite `GLOB` pattern over the name.
+   */
+  const char *name_glob;
+  /**
+   * ISO-8601 period.
+   */
+  const char *resolution;
+  /**
+   * ISO-8601 period.
+   */
+  const char *interval;
+  /**
+   * JSON object whose values are int, float, bool, or string.
+   */
+  const char *features_json;
+  /**
+   * Match `features_json` as the row's whole feature set rather than as a
+   * subset it must contain.
+   */
+  bool features_exact;
+  const char *component_field;
+  bool has_zoneless;
+  /**
+   * Which timestamp-spelling coherence group to match.
+   */
+  bool zoneless;
+  bool has_initial_timestamp;
+  int64_t initial_timestamp_ms;
+  bool has_length;
+  uint64_t length;
+} InfraStoreFilter;
+
+/**
  * Initialize the Rust tracing subscriber.
  *
  * `filter` is a null-terminated UTF-8 [`EnvFilter`] directive string, e.g.
@@ -358,126 +416,6 @@ int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *
  * The handle must not be used after this call.
  */
 void infrastore_store_free(struct InfraStore *handle);
-
-/**
- * Add a SingleTimeSeries to the store.
- *
- * `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
- * bool, or string. `application_data`, `units`, `quantity_kind`, `unit_system`,
- * `time_reference`, and `component_field` are optional; `component_field` names the field on
- * the owning component whose value these values are the time-varying form of, and
- * `time_reference` records how the timestamps were spelled (`utc`, `zoneless`, a fixed
- * offset such as `-07:00`, or an IANA zone name such as `America/Denver`).
- *
- * `time_range_zoneless` on the read side carries the same distinction for query bounds: a
- * bound has to be spelled the way the series is, and a mismatch is refused rather than
- * coerced.
- *
- * # Safety
- *
- * Required string pointers must reference null-terminated UTF-8 strings; optional string
- * pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims` is nonzero;
- * `data_ptr` must reference `data_byte_len` bytes. `out_key`, when non-null, must be valid
- * for writing one pointer.
- * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
- * id the row was filed under.
- */
-int32_t infrastore_store_add_single(struct InfraStore *handle,
-                                    int64_t owner_id,
-                                    const char *owner_type,
-                                    int32_t owner_category,
-                                    const char *name,
-                                    int64_t initial_ts_unix_ms,
-                                    const char *resolution,
-                                    const char *element_type,
-                                    uint64_t ndims,
-                                    const uint64_t *dims_ptr,
-                                    const uint8_t *data_ptr,
-                                    uint64_t data_byte_len,
-                                    const char *application_data,
-                                    const char *features_json,
-                                    const char *units,
-                                    const char *quantity_kind,
-                                    const char *unit_system,
-                                    const char *time_reference,
-                                    const char *component_field,
-                                    int64_t *out_id);
-
-/**
- * Add a NonSequentialTimeSeries to the store.
- *
- * # Safety
- *
- * Required string pointers must reference null-terminated UTF-8 strings; optional string
- * pointers may be null. `timestamps_unix_ms` must reference `timestamps_len` elements,
- * `dims_ptr` must reference `ndims` elements when `ndims` is nonzero; `data_ptr` must
- * reference `data_byte_len` bytes. `out_key`, when non-null, must be valid for writing one
- * pointer.
- * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
- * id the row was filed under.
- */
-int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
-                                            int64_t owner_id,
-                                            const char *owner_type,
-                                            int32_t owner_category,
-                                            const char *name,
-                                            const int64_t *timestamps_unix_ms,
-                                            uint64_t timestamps_len,
-                                            const char *element_type,
-                                            uint64_t ndims,
-                                            const uint64_t *dims_ptr,
-                                            const uint8_t *data_ptr,
-                                            uint64_t data_byte_len,
-                                            const char *application_data,
-                                            const char *features_json,
-                                            const char *units,
-                                            const char *quantity_kind,
-                                            const char *unit_system,
-                                            const char *time_reference,
-                                            const char *component_field,
-                                            int64_t *out_id);
-
-/**
- * Add a `PersistentTimeSeries` to the store.
- *
- * The arguments are exactly those of `infrastore_store_add_non_sequential`,
- * because the two types carry the same payload: `timestamps_unix_ms` is a
- * strictly increasing vector of breakpoints and the array holds one value per
- * breakpoint. What differs is what a *read* of the result means — the value at
- * breakpoint `i` stays in force until breakpoint `i + 1`, and past the last
- * one forever, while a `NonSequentialTimeSeries` has no value between its
- * timestamps at all. There is no value before the first breakpoint, and asking
- * for one is an error rather than a clamp.
- *
- * # Safety
- *
- * `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
- * pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
- * `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr` must reference `ndims`
- * elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
- * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog id the
- * row was filed under.
- */
-int32_t infrastore_store_add_persistent(struct InfraStore *handle,
-                                        int64_t owner_id,
-                                        const char *owner_type,
-                                        int32_t owner_category,
-                                        const char *name,
-                                        const int64_t *timestamps_unix_ms,
-                                        uint64_t timestamps_len,
-                                        const char *element_type,
-                                        uint64_t ndims,
-                                        const uint64_t *dims_ptr,
-                                        const uint8_t *data_ptr,
-                                        uint64_t data_byte_len,
-                                        const char *application_data,
-                                        const char *features_json,
-                                        const char *units,
-                                        const char *quantity_kind,
-                                        const char *unit_system,
-                                        const char *time_reference,
-                                        const char *component_field,
-                                        int64_t *out_id);
 
 /**
  * Remove many associations named by their catalog `id`, in one all-or-nothing
@@ -990,73 +928,25 @@ int32_t infrastore_store_association_exists(const struct InfraStore *handle,
                                             bool *out_present);
 
 /**
- * True iff a SingleTimeSeries with the given attributes exists.
+ * True iff at least one association matches the filter — the one existence
+ * probe, over the full `infrastore_store_list_metadata` filter surface
+ * (all-optional, independent predicates). It answers "is there any series like
+ * this?" without hydrating or serializing a single row, so it is safe for hot
+ * per-component loops.
+ *
+ * Set `features_exact` to compare `features_json` as the row's whole feature
+ * set: that is a content-hash comparison and stays on an index, where the
+ * default subset match cannot be answered from one and falls back to a full
+ * listing internally. A hot loop testing a complete feature set wants the
+ * exact form.
  *
  * # Safety
  *
- * `features_json` may be null.
- */
-int32_t infrastore_store_has_by_attrs(const struct InfraStore *handle,
-                                      int64_t owner_id,
-                                      int32_t owner_category,
-                                      const char *name,
-                                      const char *resolution,
-                                      const char *features_json,
-                                      bool *out_present);
-
-/**
- * True iff `owner_id` has any time series, optionally filtered to a single
- * time series type (`use_type` selects whether `ts_type` is applied). Answers
- * the name-less `has_time_series(owner)` / `has_time_series(owner, T)` queries.
- *
- * # Safety
- *
- * `owner_id` is a plain integer and `owner_category` (`0` = Component, `1` =
- * SupplementalAttribute) identifies the owner category; `out_present` valid for writing one
- * bool.
- */
-int32_t infrastore_store_has_for_owner(const struct InfraStore *handle,
-                                       int64_t owner_id,
-                                       int32_t owner_category,
-                                       int32_t ts_type,
-                                       bool use_type,
-                                       bool *out_present);
-
-/**
- * True iff at least one association matches the filter — the existence probe
- * over the full `infrastore_store_list_metadata` filter surface (all-optional,
- * independent predicates; `features_json` is a subset match). Unlike
- * `infrastore_store_has_typed`, which matches one exact key identity (its
- * feature set compared by content hash), this answers "is there any series
- * like this?" without hydrating or serializing a single row, so it is safe
- * for hot per-component loops. The one exception is a non-empty
- * `features_json`: the subset match cannot be answered from an index and
- * falls back to a full listing internally, so callers testing an exact
- * feature set in a hot loop should prefer `infrastore_store_has_typed`.
- *
- * # Safety
- *
- * The scalar filter flags/values are plain scalars. `name`, `name_glob`, `resolution`,
- * `interval`; `features_json` must each be null or a null-terminated UTF-8 string.
+ * `filter` must be null or a valid [`InfraStoreFilter`]; see its docs for the
+ * per-field requirements.
  */
 int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
-                                           bool has_owner,
-                                           int64_t owner_id,
-                                           bool has_owner_category,
-                                           int32_t owner_category,
-                                           bool has_time_series_type,
-                                           int32_t time_series_type,
-                                           const char *name,
-                                           const char *name_glob,
-                                           const char *resolution,
-                                           const char *interval,
-                                           const char *features_json,
-                                           const char *component_field,
-                                           int32_t zoneless,
-                                           bool has_initial_timestamp,
-                                           int64_t initial_timestamp_ms,
-                                           bool has_length,
-                                           uint64_t length,
+                                           const struct InfraStoreFilter *filter,
                                            bool *out_present);
 
 /**
@@ -1095,84 +985,6 @@ int32_t infrastore_store_count_array_references(const struct InfraStore *handle,
                                                 uint64_t *out_dst);
 
 /**
- * Add a dense forecast. `data_ptr`/`data_byte_len` is the flattened storage
- * array (Deterministic: `[H, count, *E]`; Scenarios: `[scenario_count, H,
- * count, *E]`). `ts_type` must be 2=Deterministic or 5=Scenarios;
- * `DeterministicSingleTimeSeries` is not directly addable and is derived from a
- * stored `SingleTimeSeries` via `infrastore_store_transform_single_time_series`.
- *
- * # Safety
- *
- * Optional strings may be null. `data_ptr` must reference `data_len` elements and `out_key`
- * must be valid for writing one pointer.
- * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
- * id the row was filed under.
- */
-int32_t infrastore_store_add_forecast(struct InfraStore *handle,
-                                      int64_t owner_id,
-                                      const char *owner_type,
-                                      int32_t owner_category,
-                                      const char *name,
-                                      int32_t ts_type,
-                                      int64_t initial_ts_unix_ms,
-                                      const char *resolution,
-                                      const char *horizon,
-                                      const char *interval,
-                                      uint64_t count,
-                                      const char *element_type,
-                                      uint64_t ndims,
-                                      const uint64_t *dims_ptr,
-                                      const uint8_t *data_ptr,
-                                      uint64_t data_byte_len,
-                                      const char *application_data,
-                                      const char *features_json,
-                                      const char *units,
-                                      const char *quantity_kind,
-                                      const char *unit_system,
-                                      const char *time_reference,
-                                      const char *component_field,
-                                      int64_t *out_id);
-
-/**
- * Add a `Probabilistic` forecast. `data` is the flattened 3-D storage array
- * `(percentile_count, horizon_count, count)` column-major; `percentiles` is the
- * percentile vector.
- *
- * # Safety
- *
- * Optional strings may be null. `percentiles_ptr` and `data_ptr` must reference their
- * respective element counts. `out_key`, when non-null, must be valid for writing one
- * pointer.
- * `out_id`, when non-null, must be valid for writing one `i64`, and receives the catalog
- * id the row was filed under.
- */
-int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
-                                           int64_t owner_id,
-                                           const char *owner_type,
-                                           int32_t owner_category,
-                                           const char *name,
-                                           int64_t initial_ts_unix_ms,
-                                           const char *resolution,
-                                           const char *horizon,
-                                           const char *interval,
-                                           uint64_t count,
-                                           const double *percentiles_ptr,
-                                           uint64_t percentiles_len,
-                                           const char *element_type,
-                                           uint64_t ndims,
-                                           const uint64_t *dims_ptr,
-                                           const uint8_t *data_ptr,
-                                           uint64_t data_byte_len,
-                                           const char *application_data,
-                                           const char *features_json,
-                                           const char *units,
-                                           const char *quantity_kind,
-                                           const char *unit_system,
-                                           const char *time_reference,
-                                           const char *component_field,
-                                           int64_t *out_id);
-
-/**
  * Create an empty add-batch. Building a batch performs no store I/O.
  *
  * # Safety
@@ -1193,10 +1005,12 @@ struct InfraStoreBatch *infrastore_batch_new(void);
 void infrastore_batch_free(struct InfraStoreBatch *batch);
 
 /**
- * Append a SingleTimeSeries to a batch. Arguments match
- * `infrastore_store_add_single` (minus the store handle and `out_key`); the data is
- * copied into the batch, so the caller's buffers need only stay valid for
- * this call.
+ * Append a SingleTimeSeries to a batch. The data is copied into the batch, so
+ * the caller's buffers need only stay valid for this call.
+ *
+ * A batch is the only write path across this ABI: build one with
+ * `infrastore_batch_new`, append to it, then commit it with
+ * `infrastore_store_add_batch`, which hands back one id per item in order.
  *
  * # Safety
  *
@@ -1225,8 +1039,8 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                                     const char *component_field);
 
 /**
- * Append a NonSequentialTimeSeries to a batch. Arguments match
- * `infrastore_store_add_non_sequential` (minus the store handle and `out_key`).
+ * Append a NonSequentialTimeSeries to a batch. Commit it with
+ * `infrastore_store_add_batch`.
  *
  * # Safety
  *
@@ -1256,8 +1070,8 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *component_field);
 
 /**
- * Append a `PersistentTimeSeries` to a batch. Arguments match
- * `infrastore_store_add_persistent` (minus the store handle and `out_id`).
+ * Append a `PersistentTimeSeries` to a batch. Commit it with
+ * `infrastore_store_add_batch`.
  *
  * # Safety
  *
@@ -1289,8 +1103,7 @@ int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch,
 
 /**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
- * batch. Arguments match `infrastore_store_add_forecast` (minus the store handle and
- * `out_key`).
+ * batch. Commit it with `infrastore_store_add_batch`.
  *
  * # Safety
  *
@@ -1323,8 +1136,8 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                                       const char *component_field);
 
 /**
- * Append a `Probabilistic` forecast to a batch. Arguments match
- * `infrastore_store_add_probabilistic` (minus the store handle and `out_key`).
+ * Append a `Probabilistic` forecast to a batch. Commit it with
+ * `infrastore_store_add_batch`.
  *
  * # Safety
  *
@@ -1818,23 +1631,7 @@ int32_t infrastore_store_list_metadata_by_ids(const struct InfraStore *handle,
  * must be released exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_list_metadata(const struct InfraStore *handle,
-                                       bool has_owner,
-                                       int64_t owner_id,
-                                       bool has_owner_category,
-                                       int32_t owner_category,
-                                       bool has_time_series_type,
-                                       int32_t time_series_type,
-                                       const char *name,
-                                       const char *name_glob,
-                                       const char *resolution,
-                                       const char *interval,
-                                       const char *features_json,
-                                       const char *component_field,
-                                       int32_t zoneless,
-                                       bool has_initial_timestamp,
-                                       int64_t initial_timestamp_ms,
-                                       bool has_length,
-                                       uint64_t length,
+                                       const struct InfraStoreFilter *filter,
                                        char **out_json,
                                        uint64_t *out_len);
 
@@ -1848,23 +1645,7 @@ int32_t infrastore_store_list_metadata(const struct InfraStore *handle,
  * Identical to `infrastore_store_list_metadata`.
  */
 int32_t infrastore_store_list_names(const struct InfraStore *handle,
-                                    bool has_owner,
-                                    int64_t owner_id,
-                                    bool has_owner_category,
-                                    int32_t owner_category,
-                                    bool has_time_series_type,
-                                    int32_t time_series_type,
-                                    const char *name,
-                                    const char *name_glob,
-                                    const char *resolution,
-                                    const char *interval,
-                                    const char *features_json,
-                                    const char *component_field,
-                                    int32_t zoneless,
-                                    bool has_initial_timestamp,
-                                    int64_t initial_timestamp_ms,
-                                    bool has_length,
-                                    uint64_t length,
+                                    const struct InfraStoreFilter *filter,
                                     char **out_json,
                                     uint64_t *out_len);
 
@@ -1878,23 +1659,7 @@ int32_t infrastore_store_list_names(const struct InfraStore *handle,
  * Identical to `infrastore_store_list_metadata`.
  */
 int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
-                                          bool has_owner,
-                                          int64_t owner_id,
-                                          bool has_owner_category,
-                                          int32_t owner_category,
-                                          bool has_time_series_type,
-                                          int32_t time_series_type,
-                                          const char *name,
-                                          const char *name_glob,
-                                          const char *resolution,
-                                          const char *interval,
-                                          const char *features_json,
-                                          const char *component_field,
-                                          int32_t zoneless,
-                                          bool has_initial_timestamp,
-                                          int64_t initial_timestamp_ms,
-                                          bool has_length,
-                                          uint64_t length,
+                                          const struct InfraStoreFilter *filter,
                                           char **out_json,
                                           uint64_t *out_len);
 
@@ -1908,23 +1673,7 @@ int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
  * The filter args match `infrastore_store_list_metadata`.
  */
 int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
-                                          bool has_owner,
-                                          int64_t owner_id,
-                                          bool has_owner_category,
-                                          int32_t owner_category,
-                                          bool has_time_series_type,
-                                          int32_t time_series_type,
-                                          const char *name,
-                                          const char *name_glob,
-                                          const char *resolution,
-                                          const char *interval,
-                                          const char *features_json,
-                                          const char *component_field,
-                                          int32_t zoneless,
-                                          bool has_initial_timestamp,
-                                          int64_t initial_timestamp_ms,
-                                          bool has_length,
-                                          uint64_t length,
+                                          const struct InfraStoreFilter *filter,
                                           uint64_t *out_removed);
 
 /**
@@ -1936,23 +1685,6 @@ int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
  * have been freed previously and must not be used after this call.
  */
 void infrastore_buffer_free_u64(uint64_t *ptr, uint64_t len);
-
-/**
- * True iff a time series of `ts_type` with the given attributes exists.
- *
- * # Safety
- *
- * `features_json` may be null.
- */
-int32_t infrastore_store_has_typed(const struct InfraStore *handle,
-                                   int64_t owner_id,
-                                   int32_t owner_category,
-                                   const char *name,
-                                   int32_t ts_type,
-                                   const char *resolution,
-                                   const char *interval,
-                                   const char *features_json,
-                                   bool *out_present);
 
 /**
  * Copy the association filed under `src_id` onto another owner, optionally
@@ -2429,22 +2161,7 @@ int32_t infrastore_store_remove_store_attribute(struct InfraStore *handle,
  * success `*out_json` must be released exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_export_time_series_associations_openapi(const struct InfraStore *handle,
-                                                                 bool has_owner,
-                                                                 int64_t owner_id,
-                                                                 bool has_owner_category,
-                                                                 int32_t owner_category,
-                                                                 bool has_time_series_type,
-                                                                 int32_t time_series_type,
-                                                                 const char *name,
-                                                                 const char *resolution,
-                                                                 const char *interval,
-                                                                 const char *features_json,
-                                                                 const char *component_field,
-                                                                 int32_t zoneless,
-                                                                 bool has_initial_timestamp,
-                                                                 int64_t initial_timestamp_ms,
-                                                                 bool has_length,
-                                                                 uint64_t length,
+                                                                 const struct InfraStoreFilter *filter,
                                                                  char **out_json,
                                                                  uint64_t *out_len);
 
@@ -2600,20 +2317,7 @@ int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *nee
  */
 int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                              int32_t time_series_type,
-                                             bool has_owner,
-                                             int64_t owner_id,
-                                             bool has_owner_category,
-                                             int32_t owner_category,
-                                             const char *name,
-                                             const char *name_glob,
-                                             const char *resolution,
-                                             const char *features_json,
-                                             const char *component_field,
-                                             int32_t zoneless,
-                                             bool has_initial_timestamp,
-                                             int64_t initial_timestamp_ms,
-                                             bool has_length,
-                                             uint64_t length,
+                                             const struct InfraStoreFilter *filter,
                                              bool has_window_start,
                                              int64_t window_start_ms,
                                              bool window_start_zoneless,
@@ -2848,21 +2552,8 @@ void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
  * of the call. Free the result with `infrastore_forecast_reader_free`.
  */
 int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
-                                               bool has_owner,
-                                               int64_t owner_id,
-                                               bool has_owner_category,
-                                               int32_t owner_category,
                                                int32_t time_series_type,
-                                               const char *name,
-                                               const char *name_glob,
-                                               const char *resolution,
-                                               const char *features_json,
-                                               const char *component_field,
-                                               int32_t zoneless,
-                                               bool has_initial_timestamp,
-                                               int64_t initial_timestamp_ms,
-                                               bool has_length,
-                                               uint64_t length,
+                                               const struct InfraStoreFilter *filter,
                                                struct InfraStoreForecastReaderHandle **out_reader);
 
 /**

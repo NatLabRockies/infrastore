@@ -158,7 +158,10 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     obj.insert("type".into(), json!(m.time_series_type.as_str()));
     obj.insert("name".into(), json!(m.name));
     obj.insert("features".into(), fields::features_json(&m.features));
-    obj.insert("data_hash".into(), json!(fields::hash_hex(&m.data_hash)));
+    obj.insert(
+        "data_hash".into(),
+        json!(infrastore_core::hash_hex(&m.data_hash)),
+    );
     obj.insert("element_type".into(), json!(m.element_type.to_string()));
     obj.insert("element_shape".into(), json!(m.element_shape));
     obj.insert(
@@ -588,7 +591,10 @@ pub fn info(
     // look at the same bytes with h5dump/h5py, which the hash alone cannot do
     // because a packed array is one column of a shared, possibly spilled
     // dataset.
-    rows.push(("data_hash".into(), json!(fields::hash_hex(&meta.data_hash))));
+    rows.push((
+        "data_hash".into(),
+        json!(infrastore_core::hash_hex(&meta.data_hash)),
+    ));
     match store.locate_array(&meta.data_hash) {
         Ok(loc) => {
             rows.push(("location".into(), json!(loc.to_string())));
@@ -1135,7 +1141,10 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
         obj.insert("percentiles".into(), json!(p));
     }
     obj.insert("features".into(), fields::features_json(&meta.features));
-    obj.insert("data_hash".into(), json!(fields::hash_hex(&meta.data_hash)));
+    obj.insert(
+        "data_hash".into(),
+        json!(infrastore_core::hash_hex(&meta.data_hash)),
+    );
 }
 
 /// Numeric stats over the decoded array.

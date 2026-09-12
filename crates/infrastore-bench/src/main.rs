@@ -162,7 +162,7 @@ struct StoreHandle {
     store_path: Option<PathBuf>,
 }
 
-fn create_store(common: &CommonArgs, suffix: &str) -> Result<StoreHandle, Error> {
+fn bench_store(common: &CommonArgs, suffix: &str) -> Result<StoreHandle, Error> {
     if common.in_memory {
         return Ok(StoreHandle {
             store: Store::create(None, true)?,
@@ -402,7 +402,7 @@ fn run_add(args: &AddArgs) -> Result<(), Error> {
     let sts_reqs = make_sts_requests(c.count, c.length);
     let t_build = t.elapsed();
 
-    let mut handle = create_store(c, "add_sts")?;
+    let mut handle = bench_store(c, "add_sts")?;
     let t = Instant::now();
     add_requests(&mut handle.store, sts_reqs, args.transaction)?;
     let t_add = t.elapsed();
@@ -432,7 +432,7 @@ fn run_add(args: &AddArgs) -> Result<(), Error> {
     let det_reqs = make_det_requests(c.count, c.length);
     let t_build = t.elapsed();
 
-    let mut handle = create_store(c, "add_det")?;
+    let mut handle = bench_store(c, "add_det")?;
     let t = Instant::now();
     add_requests(&mut handle.store, det_reqs, args.transaction)?;
     let t_add = t.elapsed();
@@ -487,7 +487,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
     }
 
     let sts_reqs = make_sts_requests(c.count, c.length);
-    let mut handle = create_store(c, "read_sts")?;
+    let mut handle = bench_store(c, "read_sts")?;
     let _ = handle.store.add_time_series_bulk(sts_reqs)?;
     let handle = if c.in_memory {
         handle.store.flush()?;
@@ -549,7 +549,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
     }
 
     let det_reqs = make_det_requests(c.count, c.length);
-    let mut handle = create_store(c, "read_det")?;
+    let mut handle = bench_store(c, "read_det")?;
     let _ = handle.store.add_time_series_bulk(det_reqs)?;
     let handle = if c.in_memory {
         handle.store.flush()?;

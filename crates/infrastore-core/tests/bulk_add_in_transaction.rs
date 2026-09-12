@@ -16,8 +16,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, CatalogMode, Compression, Features, ListFilter, OwnerCategory, SingleTimeSeries,
-    SupplementalAttributeAssociation, TimeSeriesData, TimeSeriesId, TypedArray,
-    create_store_with_catalog,
+    Store, SupplementalAttributeAssociation, TimeSeriesData, TimeSeriesId, TypedArray,
 };
 use std::time::Instant;
 
@@ -43,7 +42,7 @@ fn requests(batch: usize) -> Vec<AddRequest> {
 }
 
 fn scratch_store(dir: &tempfile::TempDir) -> infrastore_core::Store {
-    create_store_with_catalog(
+    Store::create_with_catalog(
         Some(&dir.path().join("scratch.h5")),
         false,
         Compression::None,

@@ -62,17 +62,18 @@ outright) and the import rejects one a foreign document carries. `Deterministic`
 `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading values across the
 Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`, `Probabilistic`,
 `Scenarios`) are written through the generic `add_time_series` by passing the matching forecast
-object across the Rust core, Python, and Julia (the C ABI keeps per-type
-`infrastore_store_add_forecast` / `infrastore_store_add_probabilistic` as low-level transport);
-`DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
-`transform_single_time_series` rather than added directly. Forecast writes are not exposed over the
-read-only gRPC server. Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every
-binding, including Python) and may have multidimensional per-timestep values. The columnar
-simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia,
-and Python; `StaticReader` covers all three static types, sweeping a `SingleTimeSeries` grid, a
-cohort of `NonSequentialTimeSeries` sharing one timestamp vector, or a set of `PersistentTimeSeries`
-(its `resolution()` is `None` for both irregular kinds). The persistent case is the **one exception
-to "one timeline per reader"**: a step function has a value at every instant from its own first
+object across the Rust core, Python, and Julia (the C ABI's one write path is a batch —
+`infrastore_batch_new` / `infrastore_batch_add_*` / `infrastore_store_add_batch` — so a single add
+is a one-item batch and there are no per-type store-level adds); `DeterministicSingleTimeSeries` is
+derived from stored `SingleTimeSeries` via `transform_single_time_series` rather than added
+directly. Forecast writes are not exposed over the read-only gRPC server. Arrays are dtype-generic
+(`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every binding, including Python) and may have
+multidimensional per-timestep values. The columnar simulation readers
+(`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia, and Python;
+`StaticReader` covers all three static types, sweeping a `SingleTimeSeries` grid, a cohort of
+`NonSequentialTimeSeries` sharing one timestamp vector, or a set of `PersistentTimeSeries` (its
+`resolution()` is `None` for both irregular kinds). The persistent case is the **one exception to
+"one timeline per reader"**: a step function has a value at every instant from its own first
 breakpoint on, so its columns may hold independent breakpoint vectors. Such a reader interns the
 distinct vectors, gives each column the id of the one it resolves against, and takes their sorted
 **union** as its public axis; `index_at` then reports a position on that union and is _not_ a
@@ -242,10 +243,10 @@ catalog/metadata/summary query results as structs (`TimeSeriesMetadata`, `Static
 (`==`/`hash`/`show`/`length`/`iterate` on the value types), and offers do-block `Store`/`open_store`
 forms. It also carries the **element-value codec** — `encode_element_values`/`decode_element_values`
 over `LinearFunction`, `QuadraticFunction`, `PiecewiseLinear`, `PiecewiseStep` — held to
-`conformance/element_type_vectors.json` like the Python and TypeScript ones. Its value types are
-permissive where a consumer's domain types are strict (a zero- or one-point curve is a row the store
-accepts, so the codec must represent it), and named for the wire vocabulary so they cannot clash
-with InfrastructureSystems.jl's; a consumer decodes straight into its own types through the `types`
+`conformance/element_type_vectors.json` like the Python one. Its value types are permissive where a
+consumer's domain types are strict (a zero- or one-point curve is a row the store accepts, so the
+codec must represent it), and named for the wire vocabulary so they cannot clash with
+InfrastructureSystems.jl's; a consumer decodes straight into its own types through the `types`
 keyword and extends `element_type_tag`/`element_row_width`/`write_element_row!` to encode from them.
 The write and read paths use it, so a series of domain values round-trips as those values: a
 constructor names the `element_type` from what it is given (a contradicting `element_type=` is an

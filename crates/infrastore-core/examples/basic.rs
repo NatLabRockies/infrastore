@@ -5,11 +5,11 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, create_store,
+    Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut store = create_store(None, true)?;
+    let mut store = Store::create(None, true)?;
 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);

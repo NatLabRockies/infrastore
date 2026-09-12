@@ -23,7 +23,6 @@ vendored = ["infrastore-core/vendored"]
 
 [dependencies]
 chrono = { workspace = true }
-ndarray = { workspace = true }
 # For the `Serialize`/`DeserializeOwned` bounds on the association transport
 # helpers; the values themselves are (de)serialized by serde_json.
 serde = { workspace = true }

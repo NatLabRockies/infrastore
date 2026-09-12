@@ -15,7 +15,6 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, Deterministic, Dtype, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
     Probabilistic, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesId, TypedArray,
-    create_store, open_store,
 };
 
 mod common;
@@ -228,7 +227,7 @@ fn zero_length_single_time_series_is_pinned() {
     assert_eq!(empty.length(), 0);
     assert!(empty.bytes.is_empty());
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let key = add(&mut store, 1, sts("empty", empty.clone()));
     let got = store
         .read_by_id(key, infrastore_core::ReadWindow::full())
@@ -252,13 +251,13 @@ fn zero_length_single_time_series_on_disk_is_pinned() {
     let empty = TypedArray::from_slice(vec![0], &[] as &[f64]).unwrap();
 
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let key = add(&mut store, 1, sts("empty", empty));
         store.flush().unwrap();
         key
     };
 
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let got = store
         .read_by_id(key, infrastore_core::ReadWindow::full())
         .unwrap();
@@ -573,7 +572,7 @@ const HOSTILE_NAMES: &[&str] = &[
 
 #[test]
 fn hostile_names_round_trip_and_match_exactly() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
 
     let mut keys = Vec::new();
@@ -618,7 +617,7 @@ fn name_glob_follows_sqlite_glob_semantics() {
     // There is no escaping API: a literal `*` in a name is NOT addressable by
     // an exact `name_glob`, and callers who need literal matching must use
     // `ListFilter::name`.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
     for (i, name) in [
         "a*b",
@@ -664,7 +663,7 @@ fn name_glob_follows_sqlite_glob_semantics() {
 #[test]
 fn empty_string_name_is_pinned() {
     // PIN: the empty name is accepted. Nothing validates non-emptiness.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
     let key = add(&mut store, 1, sts("", data));
     assert_eq!(store.get_metadata_by_id(key).unwrap().unwrap().name, "");
@@ -690,12 +689,12 @@ fn ten_kilobyte_name_is_pinned() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let key = add(&mut store, 1, sts(&name, data));
         store.flush().unwrap();
         key
     };
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let meta = store.get_metadata_by_id(key).unwrap().unwrap();
     assert_eq!(meta.name.len(), 10_240);
     assert_eq!(meta.name, name);
@@ -703,7 +702,7 @@ fn ten_kilobyte_name_is_pinned() {
 
 #[test]
 fn hostile_owner_type_units_and_ext_round_trip() {
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
     let owner_type = "Générateur[1]*'\"";
     let units = "MW·h⁻¹ (‰)";
@@ -743,7 +742,7 @@ fn hostile_owner_type_units_and_ext_round_trip() {
 fn application_data_is_stored_verbatim_even_when_not_valid_json() {
     // PIN: `application_data` is an opaque TEXT blob. The core never parses it, so
     // syntactically invalid JSON is stored and returned unchanged.
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
     let garbage = "{not json at all: ]]}\0trailing";
 
@@ -775,7 +774,7 @@ fn one_megabyte_ext_round_trips_through_disk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let key = store
             .add(AddRequest::new(
                 1,
@@ -787,7 +786,7 @@ fn one_megabyte_ext_round_trips_through_disk() {
         store.flush().unwrap();
         key
     };
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     assert_eq!(
         store
             .get_metadata_by_id(key)
@@ -801,7 +800,7 @@ fn one_megabyte_ext_round_trips_through_disk() {
 #[test]
 fn hostile_feature_keys_and_values_round_trip_and_disambiguate() {
     use infrastore_core::FeatureValue;
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
 
     let mut features = Features::new();
@@ -857,7 +856,7 @@ fn hostile_names_survive_a_non_sequential_disk_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let key = {
-        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let series = NonSequentialTimeSeries::new(timestamps.clone(), data.clone(), name).unwrap();
         let key = add(
             &mut store,
@@ -867,7 +866,7 @@ fn hostile_names_survive_a_non_sequential_disk_round_trip() {
         store.flush().unwrap();
         key
     };
-    let store = open_store(path.as_path(), true).unwrap();
+    let store = Store::open(path.as_path(), true).unwrap();
     let got = store
         .read_by_id(key, infrastore_core::ReadWindow::full())
         .unwrap();
@@ -885,7 +884,7 @@ fn a_nan_feature_value_is_rejected_and_leaves_the_catalog_readable() {
     // *whole* store, including series sharing nothing with it, and survive a
     // reopen because the bad row is on disk. So it fails on the way in.
     use infrastore_core::FeatureValue;
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
 
     store
@@ -1160,7 +1159,7 @@ fn malformed_inputs_report_errors_rather_than_panicking() {
     //    the bulk one included, where an unchecked slice index would panic after
     //    the dataset had already been created.
     let dir = tempfile::tempdir().unwrap();
-    let mut store = create_store(Some(dir.path().join("bad.h5").as_path()), false).unwrap();
+    let mut store = Store::create(Some(dir.path().join("bad.h5").as_path()), false).unwrap();
     let mismatched = TypedArray {
         dtype: Dtype::F64,
         shape: vec![4],

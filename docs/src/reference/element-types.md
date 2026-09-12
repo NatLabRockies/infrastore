@@ -3,10 +3,9 @@
 Every stored array carries an **`element_type`**: what its elements mean, and — for the composite
 kinds — how one timestep's values are laid out across the array's trailing dimensions.
 
-It is a first-class, store-owned concept, not a binding convention. A Julia `PiecewiseLinearData`, a
-Python list of `{"x": …, "y": …}` dicts, and a TypeScript `{x, y}[]` are all `piecewise_linear`
-here, so a consumer written in any of those languages can decode an array without knowing which
-language wrote it.
+It is a first-class, store-owned concept, not a binding convention. A Julia `PiecewiseLinearData`
+and a Python list of `{"x": …, "y": …}` dicts are both `piecewise_linear` here, so a consumer
+written in either language can decode an array without knowing which language wrote it.
 
 `element_type` **replaces** a separate physical `dtype` column: the dtype of the stored bytes is
 derived from it. `TypedArray` still carries a `dtype`, because it describes bytes; the element type
@@ -124,8 +123,6 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   `values`, or rows that are all empty and read equally as a pointless curve or a zero-arity tuple —
   and without it those are refused, naming the remedy. The one series no declaration reaches is an
   empty `tuple(N,f64)`, whose arity lives in rows it does not have.
-- **TypeScript** — `@infrastore/codec`, which decodes a gRPC response's `value_bytes` + `shape` +
-  `element_type` directly into plottable values.
 - **Julia** — `InfraStore.encode_element_values` / `decode_element_values`, over the value types
   `LinearFunction`, `QuadraticFunction`, `PiecewiseLinear` and `PiecewiseStep`. Decode takes a
   `types` keyword, so a consumer with its own domain types — InfrastructureSystems.jl's

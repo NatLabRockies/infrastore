@@ -2,10 +2,11 @@
 //! its [`ElementType`] describes.
 //!
 //! The encodings are specified in [`crate::types::element_type`]; this module is
-//! the executable form of that spec, and [`conformance`] is the shared corpus
-//! every other binding's codec is tested against. Nothing in the write path
-//! depends on it — a producer may build the flat array itself — but a consumer
-//! that goes through here never has to know the row layouts.
+//! the executable form of that spec. The shared corpus every other binding's
+//! codec is tested against lives in `tests/element_type_conformance.rs`, which
+//! also exports it to `conformance/element_type_vectors.json`. Nothing in the
+//! write path depends on this — a producer may build the flat array itself —
+//! but a consumer that goes through here never has to know the row layouts.
 //!
 //! Only `f64`-backed arrays carry logical structure. Everything else decodes to
 //! [`DecodedValues::Raw`]: the stored elements already *are* the values, and the
@@ -16,8 +17,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, TimeSeriesError};
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::element_type::ElementType;
-
-pub mod conformance;
 
 /// One `(x, y)` point of a piecewise-linear curve.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

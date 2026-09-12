@@ -28,16 +28,16 @@ the API speaks.
 
 ```rust
 use std::path::Path;
-use infrastore_core::{create_store, open_store};
+use infrastore_core::Store;
 
 // In-memory (tests, scratch work): no filesystem I/O.
-let mut store = create_store(None, true)?;
+let mut store = Store::create(None, true)?;
 
 // On disk: writes system.h5 and system.h5.sqlite.
-let mut store = create_store(Some(Path::new("system.h5")), false)?;
+let mut store = Store::create(Some(Path::new("system.h5")), false)?;
 
 // Reopen later, read-only.
-let store = open_store(Path::new("system.h5"), /* read_only */ true)?;
+let store = Store::open(Path::new("system.h5"), /* read_only */ true)?;
 ```
 
 ## Add a Series
@@ -650,10 +650,10 @@ store.flush()?;   // H5Fflush; afterwards system.h5 + system.h5.sqlite can be co
 `persist_to` writes the whole store to a new path — both halves of the artifact, `path` and
 `<path>.sqlite`, overwriting anything already there. It works for an on-disk store (it flushes and
 copies the pair) _and_ for an in-memory store, which is how you materialize a scratch store built
-with `create_store(None, true)`:
+with `Store::create(None, true)`:
 
 ```rust
-let mut store = create_store(None, true)?;   // in-memory
+let mut store = Store::create(None, true)?;   // in-memory
 // ... add series ...
 store.persist_to(Path::new("system.h5"))?;   // writes system.h5 + system.h5.sqlite
 ```

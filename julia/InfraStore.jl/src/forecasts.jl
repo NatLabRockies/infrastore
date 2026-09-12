@@ -145,23 +145,19 @@ function has_time_series(
     interval::Union{Nothing, Period}=nothing,
     features::Union{Nothing, AbstractDict}=nothing,
 ) where {T}
-    resolution_iso = _period_to_cstr(resolution)
-    interval_iso = _period_to_cstr(interval)
-    features_json = _features_arg(features)
-    out = Ref{Bool}(false)
-    code = @ccall libinfrastore.infrastore_store_has_typed(
-        store::Ptr{Cvoid},
-        Int64(owner_id)::Int64,
-        _category_int(owner_category)::Int32,
-        name::Cstring,
-        Int32(_type_code(T))::Int32,
-        resolution_iso::Cstring,
-        interval_iso::Cstring,
-        features_json::Cstring,
-        out::Ref{Bool},
-    )::Int32
-    _check(code)
-    return out[]
+    # `features_exact`: this is the key-identity probe, so `features` is the
+    # row's whole feature set, not a subset it must contain.
+    return has_any_time_series(
+        store;
+        owner_id=owner_id,
+        owner_category=owner_category,
+        time_series_type=T,
+        name=name,
+        resolution=resolution,
+        interval=interval,
+        features=features,
+        features_exact=true,
+    )
 end
 
 """

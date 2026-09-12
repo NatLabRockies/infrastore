@@ -7,7 +7,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     DecodedValues, Deterministic, ElementType, Features, OwnerCategory, Period, ReadWindow,
-    SingleTimeSeries, TimeSeriesData, XyPoint, create_store,
+    SingleTimeSeries, Store, TimeSeriesData, XyPoint,
 };
 
 #[test]
@@ -37,7 +37,7 @@ fn the_rust_guide_element_value_snippets_work() {
         .unwrap();
     assert_eq!(ts.element_type, ElementType::PiecewiseLinear);
 
-    let mut store = create_store(None, true).unwrap();
+    let mut store = Store::create(None, true).unwrap();
     let ts_id = store
         .add_time_series(
             42,

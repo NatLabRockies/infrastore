@@ -19,7 +19,6 @@ vendored = ["infrastore-core/vendored"]
 
 [dependencies]
 chrono = { workspace = true }
-ndarray = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 thiserror = { workspace = true }

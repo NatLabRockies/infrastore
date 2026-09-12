@@ -1095,16 +1095,17 @@ conjunction; with none set the whole store is listed:
 ```julia
 has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
                     name=nothing, name_glob=nothing, resolution=nothing, interval=nothing,
-                    features=Dict(), component_field=nothing) -> Bool
+                    features=Dict(), features_exact=false, component_field=nothing) -> Bool
 ```
 
 `has_any_time_series` is the existence probe over the same filters: true iff `list_metadata` with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
-marshaling any rows, so it is safe for hot per-component loops. `features` is a **subset** match
-here, unlike the exact-key `has_time_series` forms, which compare the whole feature set by content
-hash. A `features` filter still stays on indexes: the requested set is probed as an exact set by
-hash first (one covering seek when the caller passes the complete feature set), with an indexed
-per-feature fallback for genuinely partial lists.
+marshaling any rows, so it is safe for hot per-component loops. `features` is a **subset** match by
+default, unlike the exact-key `has_time_series` forms, which compare the whole feature set by
+content hash — and which are this function with `features_exact=true`. A subset `features` filter
+still stays on indexes: the requested set is probed as an exact set by hash first (one covering seek
+when the caller passes the complete feature set), with an indexed per-feature fallback for genuinely
+partial lists.
 
 The two matching rules are the thing to keep straight when a parent package resolves user queries:
 the exact-identity `has_time_series` forms must be given the **complete** feature map or they miss,
