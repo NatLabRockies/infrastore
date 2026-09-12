@@ -43,6 +43,10 @@ pub type ReferencedTimestamps = (HashSet<[u8; 32]>, Vec<String>);
 /// raw storage id, and only the reader build path wants the hash.
 pub(crate) type IdentifiedRow = (i64, TimeSeriesMetadata, Option<[u8; 32]>);
 
+/// The hash every featureless row carries, which names no `feature_sets` rows.
+static EMPTY_FEATURES_HASH: std::sync::LazyLock<[u8; 32]> =
+    std::sync::LazyLock::new(|| features_hash(&Features::new()));
+
 /// A SQLite value's storage class, for a diagnostic that has to describe a
 /// column holding the wrong kind of thing.
 fn value_kind(value: &rusqlite::types::Value) -> &'static str {
@@ -55,8 +59,8 @@ fn value_kind(value: &rusqlite::types::Value) -> &'static str {
     }
 }
 /// Ids per `IN (...)` list in [`MetadataStore::list_by_ids`]. Well under
-/// SQLite's default 32766 bound variables even with the predicate bound three
-/// times, and large enough that a chunk is a bulk read in its own right.
+/// SQLite's default 32766 bound variables, and large enough that a chunk is a
+/// bulk read in its own right.
 const IDS_PER_QUERY: usize = 500;
 
 /// Pages copied per step by [`MetadataStore::open_path_into_memory`]. The
@@ -1679,33 +1683,36 @@ impl MetadataStore {
             }
         }
 
-        // Hydrate features in one query rather than one per row. Because feature
-        // sets are content-addressed, this fetches each DISTINCT set once, no
-        // matter how many matched rows share it — listing 50k series that all
-        // carry the same two features reads two rows here, not 100k.
+        // Hydrate features with one primary-key seek per DISTINCT set. Feature
+        // sets are content-addressed, so listing 50k series that share one set
+        // reads it once, not 50k times.
         //
-        // Re-running the row predicate as a subquery (rather than binding an
-        // `IN (...)` list of hashes) keeps this to two statements regardless of
-        // match count, and sidesteps SQLite's bound-parameter ceiling on a large
-        // store. Rows whose feature set is empty simply get no group.
-        let feat_sql = format!(
-            "SELECT fs.features_hash, fs.key, fs.value_kind, fs.value_int, fs.value_float,
-                    fs.value_bool, fs.value_str
-             FROM feature_sets fs
-             WHERE fs.features_hash IN
-                   (SELECT features_hash FROM time_series_associations {where_clause})"
-        );
-        let mut feat_stmt = self.conn.prepare_cached(&feat_sql)?;
+        // This replaced re-running the row predicate as an `IN (subquery)`,
+        // which paid for a second evaluation of the whole filter plus a bloom
+        // filter build: measured on 50k rows, per-set seeks are ~25% faster for a
+        // by-id read and ~17% faster listing 50k distinct sets. The empty set
+        // writes no rows (`insert_feature_set`), so it is never looked up, and a
+        // featureless listing issues no second statement at all.
         let mut by_hash: HashMap<[u8; 32], Features> = HashMap::new();
-        let mut feat_rows = feat_stmt.query(rusqlite::params_from_iter(&params_vec))?;
-        while let Some(row) = feat_rows.next()? {
-            let hash = bytes_to_hash32(&row.get::<_, Vec<u8>>(0)?).ok_or_else(|| {
-                TimeSeriesError::IntegrityError("features_hash is not 32 bytes".into())
-            })?;
-            let (key, value) = parse_feature_row(row)?;
-            // `Features` is a BTreeMap, so it orders keys itself; the query does
-            // not need an ORDER BY.
-            by_hash.entry(hash).or_default().insert(key, value);
+        let mut feat_stmt = None;
+        for (f_hash, _) in &rows {
+            if *f_hash == *EMPTY_FEATURES_HASH || by_hash.contains_key(f_hash) {
+                continue;
+            }
+            let stmt = match &mut feat_stmt {
+                Some(stmt) => stmt,
+                None => feat_stmt.insert(self.conn.prepare_cached(
+                    "SELECT features_hash, key, value_kind, value_int, value_float, value_bool,
+                            value_str
+                     FROM feature_sets WHERE features_hash = ?1",
+                )?),
+            };
+            // `Features` is a BTreeMap, so it orders keys itself; the query
+            // does not need an ORDER BY.
+            let features = stmt
+                .query_map([f_hash.as_slice()], parse_feature_row)?
+                .collect::<std::result::Result<Features, _>>()?;
+            by_hash.insert(*f_hash, features);
         }
 
         let mut out = Vec::with_capacity(rows.len());
@@ -1958,8 +1965,7 @@ impl MetadataStore {
         ids: &[i64],
         mut list: impl FnMut(&MetadataFilter) -> Result<Vec<TimeSeriesMetadata>>,
     ) -> Result<Vec<TimeSeriesMetadata>> {
-        // Each id is one bound `?`, and `list_inner` binds the predicate more
-        // than once per statement, so a model-sized set (tens of thousands of
+        // Each id is one bound `?`, so a model-sized set (tens of thousands of
         // references) would trip SQLite's variable limit — and every distinct
         // set size would be a distinct statement in the prepare cache. Sorted
         // and deduplicated first, so the chunks concatenate in id order (which
@@ -3511,24 +3517,40 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
 // Allow Connection-level lookups through a transaction for reads (used by the
 // `Store` layer where a tx is already in-flight for atomicity). Implemented as
 // helper free fns so we don't have two parallel Send/Sync wrappers.
-pub fn references_to_in_tx(tx: &Connection, data_hash: &[u8; 32]) -> Result<i64> {
-    let count: i64 = tx
-        .prepare_cached("SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1")?
-        .query_row(params![data_hash.as_slice()], |row| row.get(0))?;
-    Ok(count)
+
+/// Whether any association references the array `data_hash`, inside an
+/// in-flight transaction.
+///
+/// An existence probe, not a count: a content-addressed array can be shared by
+/// every component in a model, and counting 200k `idx_hash` entries to learn
+/// "not zero" made removing one such series ~5 ms.
+pub fn array_is_referenced_in_tx(tx: &Connection, data_hash: &[u8; 32]) -> Result<bool> {
+    Ok(tx
+        .prepare_cached("SELECT 1 FROM time_series_associations WHERE data_hash = ?1 LIMIT 1")?
+        .query_row(params![data_hash.as_slice()], |_| Ok(()))
+        .optional()?
+        .is_some())
 }
 
-/// Count the associations sitting on the explicit time axis `timestamps_hash`,
+/// Whether any association sits on the explicit time axis `timestamps_hash`,
 /// inside an in-flight transaction.
 ///
-/// The timestamp-vector counterpart of [`references_to_in_tx`], and the reason
-/// it is a separate function rather than a parameter: an axis is referenced
-/// through its own column, so an array's reference count says nothing about it.
-pub fn timestamp_references_in_tx(tx: &Connection, timestamps_hash: &[u8; 32]) -> Result<i64> {
-    let count: i64 = tx
-        .prepare_cached("SELECT COUNT(*) FROM time_series_associations WHERE timestamps_hash = ?1")?
-        .query_row(params![timestamps_hash.as_slice()], |row| row.get(0))?;
-    Ok(count)
+/// The timestamp-vector counterpart of [`array_is_referenced_in_tx`], and the
+/// reason it is a separate function rather than a parameter: an axis is
+/// referenced through its own column, so an array's references say nothing
+/// about it. The column is unindexed, so a miss scans the table; this only runs
+/// when a transaction commits a removal or rolls back a write.
+pub fn timestamps_are_referenced_in_tx(
+    tx: &Connection,
+    timestamps_hash: &[u8; 32],
+) -> Result<bool> {
+    Ok(tx
+        .prepare_cached(
+            "SELECT 1 FROM time_series_associations WHERE timestamps_hash = ?1 LIMIT 1",
+        )?
+        .query_row(params![timestamps_hash.as_slice()], |_| Ok(()))
+        .optional()?
+        .is_some())
 }
 
 /// Does an association of `conflicting_type` already exist sharing the
@@ -3559,7 +3581,7 @@ pub fn forecast_family_conflict(
         .prepare_cached(
             "SELECT 1 FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
-               AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
+               AND resolution IS ?5
                AND features_hash = ?6
              LIMIT 1",
         )?
@@ -3608,7 +3630,7 @@ pub fn forecast_family_conflict_on_array(
         .prepare_cached(
             "SELECT 1 FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
-               AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
+               AND resolution IS ?5
                AND features_hash = ?6 AND data_hash = ?7
              LIMIT 1",
         )?
@@ -3675,8 +3697,7 @@ pub fn forecast_family_conflict_on_owner_move(
                ON existing.owner_id = ?2
               AND existing.owner_category = moving.owner_category
               AND existing.name = moving.name
-              AND ((moving.resolution IS NULL AND existing.resolution IS NULL)
-                   OR existing.resolution = moving.resolution)
+              AND existing.resolution IS moving.resolution
               AND existing.features_hash = moving.features_hash
               AND existing.time_series_type = CASE moving.time_series_type
                                                 WHEN ?4 THEN ?5
@@ -3969,6 +3990,20 @@ mod index_plan_tests {
                AND COALESCE(interval, '') = ? AND features_hash = ?",
             "uq_ts_assoc_coalesced",
         );
+    }
+
+    #[test]
+    fn the_forecast_family_probe_seeks_through_resolution() {
+        // `resolution IS ?` is an index equality; the `(? IS NULL AND
+        // resolution IS NULL) OR resolution = ?` it replaced stopped the seek
+        // at `name`.
+        let p = plan(
+            &schema_conn(),
+            "SELECT 1 FROM time_series_associations
+             WHERE owner_id = ? AND owner_category = ? AND time_series_type = ? AND name = ?
+               AND resolution IS ? AND features_hash = ? LIMIT 1",
+        );
+        assert!(p.contains("name=? AND resolution=?"), "{p}");
     }
 
     #[test]

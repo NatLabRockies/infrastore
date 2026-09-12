@@ -12,7 +12,8 @@ use crate::hash::array_hash;
 use crate::metadata::{
     AssociationIdentity, MetadataFilter, MetadataStore, ParentChildAssociation, ParentChildFilter,
     SeriesFamily, SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
-    SupplementalAttributeSummaryRow, TypeMatch, references_to_in_tx, timestamp_references_in_tx,
+    SupplementalAttributeSummaryRow, TypeMatch, array_is_referenced_in_tx,
+    timestamps_are_referenced_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
@@ -1002,21 +1003,21 @@ struct Mark {
     timestamps: usize,
 }
 
-/// The distinct hashes in `candidates` that `count` says no catalog row
-/// references, counted inside the caller's savepoint.
+/// The distinct hashes in `candidates` that `referenced` says no catalog row
+/// references, probed inside the caller's savepoint.
 ///
-/// `count` is what "references" means for the kind of hash: an array is
+/// `referenced` is what "references" means for the kind of hash: an array is
 /// referenced through `data_hash`, an explicit time axis through
 /// `timestamps_hash`.
 fn unreferenced_in(
     tx: &rusqlite::Connection,
     candidates: &[[u8; 32]],
-    count: impl Fn(&rusqlite::Connection, &[u8; 32]) -> Result<i64>,
+    referenced: impl Fn(&rusqlite::Connection, &[u8; 32]) -> Result<bool>,
 ) -> Result<Vec<[u8; 32]>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for hash in candidates {
-        if seen.insert(*hash) && count(tx, hash)? == 0 {
+        if seen.insert(*hash) && !referenced(tx, hash)? {
             out.push(*hash);
         }
     }
@@ -1031,8 +1032,8 @@ fn unreferenced(metadata: &mut MetadataStore, candidates: &FileObjects) -> Resul
     }
     let tx = metadata.savepoint()?;
     let out = FileObjects {
-        arrays: unreferenced_in(&tx, &candidates.arrays, references_to_in_tx)?,
-        timestamps: unreferenced_in(&tx, &candidates.timestamps, timestamp_references_in_tx)?,
+        arrays: unreferenced_in(&tx, &candidates.arrays, array_is_referenced_in_tx)?,
+        timestamps: unreferenced_in(&tx, &candidates.timestamps, timestamps_are_referenced_in_tx)?,
     };
     tx.commit()?;
     Ok(out)
@@ -2636,7 +2637,7 @@ impl Store {
             // rows removed in the same batch is reclaimed as well.
             Self::check_no_orphaned_dst(tx, removed_sts)?;
             let garbage = FileObjects {
-                arrays: unreferenced_in(tx, &removed_hashes, references_to_in_tx)?,
+                arrays: unreferenced_in(tx, &removed_hashes, array_is_referenced_in_tx)?,
                 timestamps: Vec::new(),
             };
             Ok((removed_hashes.len(), garbage))
@@ -2684,7 +2685,7 @@ impl Store {
             };
             Ok((
                 removed.len(),
-                unreferenced_in(tx, &removed, references_to_in_tx)?,
+                unreferenced_in(tx, &removed, array_is_referenced_in_tx)?,
             ))
         })?;
         // Clearing is the one removal that reclaims time axes eagerly, for the
