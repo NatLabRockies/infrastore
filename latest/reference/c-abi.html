@@ -258,12 +258,8 @@ output they are owned <code>char *</code> strings — free each with <code>infra
 </tbody></table>
 </div>
 <h2 id="lifecycle"><a class="header" href="#lifecycle">Lifecycle</a></h2>
-<pre><code class="language-c">int32_t infrastore_store_create(const char *path, bool in_memory, struct InfraStore **out);
-/* compression_kind: 0 = none, 1 = DEFLATE (deflate_level 0-9 + shuffle). */
-int32_t infrastore_store_create_with_compression(const char *path, bool in_memory, uint8_t compression_kind,
-                                         uint8_t deflate_level, bool shuffle, struct InfraStore **out);
-int32_t infrastore_store_open(const char *path, bool read_only, struct InfraStore **out);
-/* catalog_mode: 0 = attached (&lt;path&gt;.sqlite), 1 = in memory (written only by
+<pre><code class="language-c">/* compression_kind: 0 = none, 1 = DEFLATE (deflate_level 0-9 + shuffle); 1, 3, true is the
+   default policy. catalog_mode: 0 = attached (&lt;path&gt;.sqlite), 1 = in memory (written only by
    infrastore_store_persist). in_memory=true admits only catalog_mode=1. */
 int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, uint8_t compression_kind,
                                          uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
@@ -275,7 +271,7 @@ int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uin
    to a store shipped as arrays plus an OpenAPI document. Replay the rows with
    infrastore_store_import_time_series_associations_openapi and its supplemental-attribute
    counterpart. INFRASTORE_ERR_STORE_EXISTS when &lt;path&gt;.sqlite is already there; that store wants
-   infrastore_store_open. Never read-only. */
+   infrastore_store_open_with_catalog. Never read-only. */
 int32_t infrastore_store_open_without_catalog(const char *path, uint8_t catalog_mode,
                                          struct InfraStore **out);
 /* The create entry points above fail with INFRASTORE_ERR_STORE_EXISTS when either half of a
@@ -347,8 +343,8 @@ int32_t infrastore_store_association_exists(const struct InfraStore *handle,
 <h2 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries">NonSequentialTimeSeries</a></h2>
 <p><code>infrastore_batch_add_non_sequential</code> takes an explicit <code>int64_t</code> Unix-millisecond timestamp array
 alongside the typed data buffer. It is read like every other type — by id, through
-<code>infrastore_store_read_by_id</code> and then <code>infrastore_bulk_result_get_non_sequential</code>, which returns
-owned timestamp, shape, and raw-byte buffers (free with <code>infrastore_buffer_free_i64</code>,
+<code>infrastore_store_read_by_id</code> and then <code>infrastore_bulk_result_get_irregular</code>, which returns owned
+timestamp, shape, and raw-byte buffers (free with <code>infrastore_buffer_free_i64</code>,
 <code>infrastore_buffer_free_i64</code>, and <code>infrastore_buffer_free_u8</code>) plus the dtype code and, in
 <code>out_element_type</code>, the canonical element-type string. The shape is the full
 <code>[length, *element_shape]</code> array shape (the first dim is time, so callers can recover an
@@ -368,6 +364,17 @@ silent truncation.</p>
                                     const char *quantity_kind, const char *unit_system,
                                     const char *time_reference,
                                     const char *component_field);
+/* Reads a NonSequentialTimeSeries or PersistentTimeSeries slot; any other type is
+   INFRASTORE_ERR_INVALID_PARAMETER. */
+int32_t infrastore_bulk_result_get_irregular(const struct InfraStoreBulkReadHandle *result, uint64_t index,
+                                    int64_t **out_timestamps, uint64_t *out_timestamps_len,
+                                    int32_t *out_dtype,
+                                    int64_t **out_shape, uint64_t *out_shape_len,
+                                    uint8_t **out_data, uint64_t *out_data_byte_len,
+                                    char **out_application_data, char **out_element_type,
+                                    char **out_units, char **out_quantity_kind,
+                                    char **out_unit_system, char **out_time_reference,
+                                    char **out_component_field);
 </code></pre>
 <h2 id="persistenttimeseries"><a class="header" href="#persistenttimeseries">PersistentTimeSeries</a></h2>
 <p><code>infrastore_batch_add_persistent</code> takes <strong>exactly</strong> the argument list of
@@ -375,10 +382,9 @@ silent truncation.</p>
 owned buffers, the same ownership and free rules. The two types carry the same payload; <code>timestamps</code>
 is the breakpoint vector, and what differs is what a read <em>between</em> those instants means.</p>
 <pre><code class="language-c">int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch, /* ...as add_non_sequential... */);
-int32_t infrastore_bulk_result_get_persistent(const struct InfraStoreBulkReadHandle *result, uint64_t index, /* ...as _non_sequential... */);
 </code></pre>
 <p>It is read like every other type — by id, through <code>infrastore_store_read_by_id</code> /
-<code>infrastore_store_read_by_ids</code>, then <code>infrastore_bulk_result_get_persistent</code> on the slot whose
+<code>infrastore_store_read_by_ids</code>, then <code>infrastore_bulk_result_get_irregular</code> on the slot whose
 <code>infrastore_bulk_result_item_type</code> is <code>6</code>.</p>
 <p>The value at <code>out_timestamps[i]</code> is in force from that instant until the next breakpoint, and past
 the last one forever. There is <strong>no value before the first breakpoint</strong>: a range read whose start
@@ -775,9 +781,9 @@ under the timestamp-major layout. <code>infrastore_store_read_by_id</code> is th
 takes a window; <code>infrastore_store_read_by_ids_range</code> is the bounds form, which clips.</p>
 <p>Every read returns its results in an <code>InfraStoreBulkRead</code> handle — a single read holds exactly one
 item — in the order the ids were given, repeats included. Elements are read out with
-<code>infrastore_bulk_result_get_single</code> / <code>..._get_non_sequential</code> / <code>..._get_forecast</code>, chosen by the
-type <code>infrastore_bulk_result_item_type</code> reports. The caller owns the returned strings and buffers
-and frees them with <code>infrastore_string_free</code>, <code>infrastore_buffer_free_i64</code>, and
+<code>infrastore_bulk_result_get_single</code> / <code>..._get_irregular</code> / <code>..._get_forecast</code>, chosen by the type
+<code>infrastore_bulk_result_item_type</code> reports. The caller owns the returned strings and buffers and
+frees them with <code>infrastore_string_free</code>, <code>infrastore_buffer_free_i64</code>, and
 <code>infrastore_buffer_free_u8</code>. The handle is not consumed by a read (elements may be read more than
 once) and must be released with <code>infrastore_bulk_result_free</code>.</p>
 <pre><code class="language-c">int32_t infrastore_store_read_by_ids(const struct InfraStore *handle,
@@ -787,7 +793,6 @@ int32_t infrastore_store_read_by_ids_range(const struct InfraStore *handle,
                              const int64_t *ids, uint64_t n,
                              bool zoneless, int64_t start_ms, int64_t end_ms,
                              struct InfraStoreBulkRead **out_result);
-int64_t infrastore_bulk_result_len(const struct InfraStoreBulkRead *result);   /* -1 if null */
 int32_t infrastore_bulk_result_item_type(const struct InfraStoreBulkRead *result, uint64_t index,
                                  int32_t *out_type);
 int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkRead *result, uint64_t index, ...);

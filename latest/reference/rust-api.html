@@ -1900,7 +1900,6 @@ pub enum TimeSeriesError {
     IntegrityError(String),
     ReadOnlyStore,
     ConnectionError(String),
-    IncompatibleForecast,
     /// The store on disk was written in a different, incompatible on-disk
     /// format. There is no in-place upgrade; see the file-format reference.
     IncompatibleFormat { found: String, expected: &amp;'static str },
