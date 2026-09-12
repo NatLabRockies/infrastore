@@ -13,6 +13,13 @@ Install mdBook and the Mermaid preprocessor:
 cargo install mdbook mdbook-mermaid
 ```
 
+Then, once, from the `docs/` directory, write the Mermaid bundle (`mermaid.min.js` is not checked
+in):
+
+```bash
+mdbook-mermaid install .
+```
+
 ### Build Commands
 
 **Build the documentation:**
