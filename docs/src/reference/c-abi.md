@@ -839,12 +839,17 @@ int32_t infrastore_store_list_metadata(const struct InfraStore *handle,
 Every filter-taking export — `infrastore_store_list_metadata`, `list_names`, `list_owner_types`,
 `has_any_by_filter`, `remove_by_filter`, `export_time_series_associations_openapi`, and both reader
 builders — takes the catalog filter as one `const struct InfraStoreFilter *` rather than as
-positional arguments, so adding a filter changes no signature.
+positional arguments.
 
 **A NULL pointer, and equally an all-zero record, is the empty filter: it matches everything.** So a
 caller writes `InfraStoreFilter f = {0};` and sets only the fields it cares about. The predicates
 are independent and ANDed. The record borrows its strings — they must outlive the call, and nothing
 in it is freed.
+
+**The layout is part of the ABI.** The record buys one filter parser and no churn across the eight
+call sites when a predicate is added; it does not make the ABI forward-compatible. A caller compiled
+against an older header allocates the older `sizeof(InfraStoreFilter)`, so appending a field is a
+breaking change like any other — rebuild against the regenerated header.
 
 ```c
 typedef struct InfraStoreFilter {
