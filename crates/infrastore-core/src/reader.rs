@@ -83,8 +83,6 @@ pub struct StaticReader {
     /// so a sweep allocates nothing, matching the buffer-reuse discipline the
     /// groups already follow. Empty and untouched for the other timelines.
     per_vector: Vec<usize>,
-    /// Timestamp of the last successful [`Store::static_read`], for diagnostics.
-    last_read: Option<DateTime<Utc>>,
 }
 
 /// The shared time axis of a [`StaticReader`], in the two shapes a static series
@@ -396,17 +394,15 @@ impl StaticReader {
         &self.groups
     }
 
-    /// Drop every group's buffer and the timestamp they were read at.
+    /// Drop every group's buffer.
     ///
     /// A read is one operation over the whole reader, so its failure has to
     /// leave the whole reader empty. `StaticGroup::fill` already clears the
     /// group it is filling, but that is per group, and it is the groups it does
     /// *not* reach that are the problem: a failure part way through would leave
     /// the groups already filled holding the **new** timestamp's values while
-    /// the rest still hold the **previous** read's, with the recorded read
-    /// timestamp still naming the previous one — so a caller that ignored the
-    /// error would read two different instants side by side, both labeled as
-    /// the earlier one. Resolving the timestamp can fail before any group is
+    /// the rest still hold the **previous** read's — so a caller that ignored
+    /// the error would read two different instants side by side. Resolving the timestamp can fail before any group is
     /// touched at all, which is the same hazard with none of them updated.
     ///
     /// [`Store::static_read`] therefore calls this on the error path of
@@ -420,7 +416,6 @@ impl StaticReader {
     /// caller the same empty reader that a refusal inside [`Store::static_read`]
     /// produces.
     pub fn invalidate(&mut self) {
-        self.last_read = None;
         for group in &mut self.groups {
             group.filled = false;
         }
@@ -560,7 +555,6 @@ impl StaticReader {
             timeline,
             groups,
             per_vector,
-            last_read,
             ..
         } = self;
         match timeline {
@@ -595,7 +589,6 @@ impl StaticReader {
                 }
             }
         }
-        *last_read = Some(at);
         Ok(())
     }
 }
@@ -1161,7 +1154,6 @@ fn build_groups_inner(
         time_reference,
         groups,
         per_vector,
-        last_read: None,
     })
 }
 
@@ -1193,7 +1185,6 @@ pub struct ForecastReader {
     /// Per-key entries; each indexes into `slots`. Multiple entries may share a
     /// slot when their forecasts reference the same array and read plan.
     entries: Vec<ForecastEntry>,
-    last_read: Option<DateTime<Utc>>,
 }
 
 /// How an entry's window is read from storage. Dense forecasts slice a
@@ -1498,11 +1489,7 @@ impl ForecastReader {
         &self.slots[self.entries[i].slot]
     }
 
-    pub(crate) fn mark_read(&mut self, at: DateTime<Utc>) {
-        self.last_read = Some(at);
-    }
-
-    /// Drop every slot's window and the timestamp they were read at, for the
+    /// Drop every slot's window, for the
     /// reason [`StaticReader::invalidate`] gives.
     ///
     /// The slots' cached *blocks* are deliberately kept: `cached` is the I/O
@@ -1514,7 +1501,6 @@ impl ForecastReader {
     ///
     /// Public for the reason [`StaticReader::invalidate`] gives.
     pub fn invalidate(&mut self) {
-        self.last_read = None;
         for slot in &mut self.slots {
             slot.filled = false;
         }
@@ -1556,38 +1542,6 @@ impl ForecastReader {
                 .expect("timestamp on the forecast timeline is representable")
         })
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_parts(
-        time_series_type: TimeSeriesType,
-        time_reference: Option<TimeReference>,
-        initial_timestamp: DateTime<Utc>,
-        resolution: Period,
-        interval: Period,
-        count: usize,
-        slots: Vec<WindowSlot>,
-        entries: Vec<ForecastEntry>,
-    ) -> Self {
-        Self {
-            time_series_type,
-            time_reference,
-            initial_timestamp,
-            resolution,
-            interval,
-            count,
-            slots,
-            entries,
-            last_read: None,
-        }
-    }
-}
-
-/// Whether a stored forecast of concrete type `concrete` belongs in a reader
-/// built for `reported` — the shared request rule, so a `Deterministic` reader
-/// admits a `DeterministicSingleTimeSeries` (read into an identical `[H, *E]`
-/// window) without restating it here.
-fn type_accepted(reported: TimeSeriesType, concrete: TimeSeriesType) -> bool {
-    reported.accepts(concrete)
 }
 
 /// Derive one entry's `(window_shape, read)` from its stored shape, concrete
@@ -1729,7 +1683,7 @@ pub(crate) fn build_forecast_entries(
     let mut slot_of: HashMap<([u8; 32], WindowRead, ElementType), usize> = HashMap::new();
     let mut entries = Vec::with_capacity(items.len());
     for (m, shape) in items {
-        if !type_accepted(reported, m.time_series_type) {
+        if !reported.accepts(m.time_series_type) {
             return Err(TimeSeriesError::IntegrityError(format!(
                 "ForecastReader for {} cannot hold {} '{}'",
                 reported.as_str(),
@@ -1786,16 +1740,16 @@ pub(crate) fn build_forecast_entries(
     }
 
     let (initial, resolution, interval, count) = timeline;
-    Ok(ForecastReader::from_parts(
-        reported,
+    Ok(ForecastReader {
+        time_series_type: reported,
         time_reference,
-        initial,
+        initial_timestamp: initial,
         resolution,
         interval,
         count,
         slots,
         entries,
-    ))
+    })
 }
 
 /// `(initial_timestamp, resolution, length)` of a `SingleTimeSeries` row, or an

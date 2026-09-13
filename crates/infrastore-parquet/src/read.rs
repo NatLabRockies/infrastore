@@ -285,23 +285,6 @@ pub fn read_partition_with(
     }
 }
 
-/// [`read_partition_with`], collecting.
-///
-/// For a caller that wants the partition in hand — a test, a dry run over a
-/// small pair. A load should stream instead: this holds every series until the
-/// end.
-pub fn read_partition(
-    files: &PartitionFiles,
-    options: &ImportOptions,
-) -> Result<Vec<ImportedSeries>> {
-    let mut out = Vec::new();
-    read_partition_with(files, options, &mut |series| {
-        out.push(series);
-        Ok(())
-    })?;
-    Ok(out)
-}
-
 /// Read a **foreign** values file: one with no series file beside it, and so no
 /// catalog rows at all. One series per distinct key if the key columns are
 /// there, one series in total if they are not.
@@ -843,7 +826,11 @@ fn build(
         unit_system: match options.unit_system {
             Some(system) => Some(system),
             None => optional(&row.unit_system)
-                .map(|text| schema::decode_unit_system(&text).map_err(unsupported))
+                .map(|text| {
+                    UnitSystem::parse(&text).ok_or_else(|| {
+                        unsupported(format!("unknown {} {text:?}", schema::UNIT_SYSTEM))
+                    })
+                })
                 .transpose()?,
         },
         time_reference: reference,
@@ -870,12 +857,28 @@ fn build(
         owner_category: match &options.owner_category {
             Some(c) => *c,
             None if row.owner_category.is_empty() => OwnerCategory::Component,
-            None => schema::decode_owner_category(&row.owner_category).map_err(unsupported)?,
+            None => OwnerCategory::parse(&row.owner_category).ok_or_else(|| {
+                unsupported(format!(
+                    "unknown {} {:?}",
+                    schema::OWNER_CATEGORY,
+                    row.owner_category
+                ))
+            })?,
         },
         features: match &options.features {
             Some(f) => f.clone(),
             None if row.features.is_empty() => Features::new(),
-            None => schema::decode_features(&row.features).map_err(unsupported)?,
+            // The plain `{"model_year":2030}` form, each value's kind inferred
+            // from its JSON type — the inverse of `schema::encode_features`.
+            None => {
+                let value: serde_json::Value = serde_json::from_str(&row.features)
+                    .map_err(|e| unsupported(format!("{} is not JSON: {e}", schema::FEATURES)))?;
+                let object = value.as_object().ok_or_else(|| {
+                    unsupported(format!("{} must be a JSON object", schema::FEATURES))
+                })?;
+                infrastore_core::features_from_plain(object)
+                    .map_err(|e| unsupported(e.to_string()))?
+            }
         },
         data,
     })
@@ -1028,7 +1031,13 @@ fn resolve_reference(
         Some(row.time_reference.clone())
     };
     match text {
-        Some(text) => schema::decode_time_reference(&text).map_err(unsupported),
+        // Unspecified is the absence of a reference, so it is decoded here
+        // rather than in `TimeReference::parse`, which must keep refusing the
+        // literal -- see `schema::UNSPECIFIED_REFERENCE`.
+        Some(text) if text == schema::UNSPECIFIED_REFERENCE => Ok(None),
+        Some(text) => TimeReference::parse(&text)
+            .map(Some)
+            .map_err(|e| unsupported(format!("{} {text:?}: {e}", schema::TIME_REFERENCE))),
         // A foreign file: the column's zone is all there is, and it does say
         // something — a naive column is a wall clock, a zoned one names its
         // spelling. Only the literal `unspecified` means *none*.

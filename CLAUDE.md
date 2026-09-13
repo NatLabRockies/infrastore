@@ -432,7 +432,7 @@ hand-edit the header. Any change to an exported `extern "C"` function must:
 
 ```bash
 cp examples/server.toml my_server.toml
-# edit my_server.toml: point [data].files at your .h5, set [authentication]
+# edit my_server.toml: point [data].file at your .h5, set [authentication]
 cargo run -p infrastore-server -- --config my_server.toml
 ```
 

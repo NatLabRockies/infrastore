@@ -118,8 +118,7 @@ pub fn attributes(
                 .collect();
             output::print_items(f, &items)?;
         }
-        Format::Csv => output::display_csv_rows(&headers, &table)?,
-        _ => output::display_table_dyn(&headers, &table),
+        f => output::print_rows(f, &headers, &table)?,
     }
     Ok(())
 }
@@ -174,8 +173,7 @@ pub fn links(
                 .collect();
             output::print_items(f, &items)?;
         }
-        Format::Csv => output::display_csv_rows(&headers, &table)?,
-        _ => output::display_table_dyn(&headers, &table),
+        f => output::print_rows(f, &headers, &table)?,
     }
     Ok(())
 }
@@ -726,12 +724,7 @@ fn read_assoc_csv(
     path: &Path,
     expected: [&str; 4],
 ) -> Result<Vec<(i64, String, i64, String)>, String> {
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(false)
-        .trim(csv::Trim::All)
-        .from_path(path)
-        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let mut reader = crate::csv_io::open_reader(path)?;
     let header: Vec<String> = reader
         .headers()
         .map_err(|e| format!("reading the header of {}: {e}", path.display()))?
@@ -748,23 +741,13 @@ fn read_assoc_csv(
     }
 
     let mut out = Vec::new();
-    for (row, record) in reader.records().enumerate() {
-        let record =
-            record.map_err(|e| format!("reading {} row {}: {e}", path.display(), row + 1))?;
-        let cell = |i: usize| record.get(i).unwrap_or_default().trim().to_string();
-        let id = |i: usize| -> Result<i64, String> {
-            cell(i).parse::<i64>().map_err(|_| {
-                format!(
-                    "{} row {}: {} '{}' is not an integer",
-                    path.display(),
-                    row + 1,
-                    expected[i],
-                    cell(i)
-                )
-            })
-        };
-        for i in [1usize, 3] {
-            if cell(i).is_empty() {
+    for (row, record) in reader
+        .deserialize::<(i64, String, i64, String)>()
+        .enumerate()
+    {
+        let record = record.map_err(|e| crate::csv_io::row_error(path, row, &expected, &e))?;
+        for (i, cell) in [(1, &record.1), (3, &record.3)] {
+            if cell.is_empty() {
                 return Err(format!(
                     "{} row {}: {} is empty",
                     path.display(),
@@ -773,7 +756,7 @@ fn read_assoc_csv(
                 ));
             }
         }
-        out.push((id(0)?, cell(1), id(2)?, cell(3)));
+        out.push(record);
     }
     if out.is_empty() {
         return Err(format!("{} has a header but no rows", path.display()));

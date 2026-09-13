@@ -39,7 +39,7 @@ use h5::types::VarLenUnicode;
 use h5::{Group, Hyperslab, Selection, SliceOrIndex};
 
 use crate::error::{Result, TimeSeriesError};
-use crate::hash::{array_hash, hash_hex};
+use crate::hash::hash_hex;
 use crate::storage::{ArrayLayout, Compression};
 use crate::types::array::{Dtype, TypedArray};
 use crate::version::{Compat, DATA_FORMAT_VERSION};
@@ -50,7 +50,7 @@ use super::common::{
     hex_to_hash, packed_chunk_rows, parse_dataset_name, resolve_dataset_cols, spill_name,
     standalone_chunks,
 };
-use super::{ArrayLocation, BackendStats, CompactionReport, IntegrityReport, StorageBackend};
+use super::{ArrayLocation, BackendStats, StorageBackend};
 
 /// Root attribute naming the backend that wrote the file. `Store::open`
 /// refuses an HDF5 file without it, which is what tells an arbitrary HDF5 file
@@ -1769,23 +1769,6 @@ impl StorageBackend for Hdf5Backend {
         )
     }
 
-    /// Reports what a compaction would reclaim without touching the file.
-    ///
-    /// `Store::compact` does not call this for an on-disk store: reclaiming
-    /// space here means rewriting the file from the catalog's live set, which
-    /// the backend cannot see. It stays as the honest "nothing was reclaimed in
-    /// place" answer for any other caller.
-    fn compact(&mut self) -> Result<CompactionReport> {
-        let stats = self.stats();
-        Ok(CompactionReport {
-            slots_reclaimed: stats.free_packed_slots,
-            datasets_dropped: 0,
-            feature_sets_reclaimed: 0,
-            timestamp_sets_reclaimed: 0,
-            bytes_reclaimed: 0,
-        })
-    }
-
     fn stats(&self) -> BackendStats {
         let inner = self.inner.lock().expect("mutex poisoned");
         BackendStats {
@@ -1796,32 +1779,6 @@ impl StorageBackend for Hdf5Backend {
                 .sum(),
             data_datasets: inner.datasets.len() + inner.standalone_vars.len(),
         }
-    }
-
-    fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport> {
-        let inner = self.inner.lock().expect("mutex poisoned");
-        let mut errors = Vec::new();
-        for &(hash, dtype) in arrays {
-            match inner.read_locked(&hash, dtype, None) {
-                Ok(arr) => {
-                    let recomputed = array_hash(&arr);
-                    if recomputed != hash {
-                        errors.push(format!(
-                            "hash mismatch: stored={} computed={}",
-                            hash_hex(&hash),
-                            hash_hex(&recomputed),
-                        ));
-                    }
-                }
-                Err(TimeSeriesError::NotFound) => errors.push(format!(
-                    "dangling reference: the catalog references array {} but the array \
-                     file does not hold it",
-                    hash_hex(&hash),
-                )),
-                Err(e) => errors.push(format!("read error for array {}: {e}", hash_hex(&hash))),
-            }
-        }
-        Ok(IntegrityReport { errors })
     }
 
     fn flush(&mut self) -> Result<()> {

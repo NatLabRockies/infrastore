@@ -126,12 +126,6 @@ pub(crate) struct WriteBuffer {
     max_bytes: usize,
 }
 
-impl Default for WriteBuffer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl WriteBuffer {
     pub(crate) fn new() -> Self {
         Self {

@@ -4,64 +4,34 @@
 # which series exist and hands back the catalog `id` that addresses each — and
 # every read and removal takes that id.
 
-# The Julia time series type for a key's integer type code.
-function _type_for_code(code::Integer)
-    if code == INFRASTORE_TYPE_SINGLE
-        SingleTimeSeries
-    elseif code == INFRASTORE_TYPE_NON_SEQUENTIAL
-        NonSequentialTimeSeries
-    elseif code == INFRASTORE_TYPE_PERSISTENT
-        PersistentTimeSeries
-    elseif code == INFRASTORE_TYPE_DETERMINISTIC
-        Deterministic
-    elseif code == INFRASTORE_TYPE_DETERMINISTIC_SINGLE
-        DeterministicSingleTimeSeries
-    elseif code == INFRASTORE_TYPE_PROBABILISTIC
-        Probabilistic
-    elseif code == INFRASTORE_TYPE_SCENARIOS
-        Scenarios
-    else
-        throw(InvalidParameterError("unknown time series type code $code"))
-    end
-end
-
-# Every type a request may name. The methods below give each its ABI code; this
-# list exists so the fallback can tell a *parameterized* spelling of one of them
-# (`SingleTimeSeries{Float64}`) from a type that is not a time series type at
-# all. Keep it in step with those methods.
+# Every type a request may name, ordered by its ABI type code (the index, from
+# zero -- the `INFRASTORE_TYPE_*` constants in `forecasts.jl`). Codes are
+# appended, never renumbered, in lockstep with `TimeSeriesType::code` in Rust.
 const _TIME_SERIES_TYPES = (
     SingleTimeSeries,
     NonSequentialTimeSeries,
-    PersistentTimeSeries,
     Deterministic,
     DeterministicSingleTimeSeries,
     Probabilistic,
     Scenarios,
+    PersistentTimeSeries,
 )
 
-# The integer type code for a Julia time series type — the inverse of
-# `_type_for_code`. Every code names a stored type; the widening of a
-# `Deterministic` request to both deterministic storage forms happens in the
-# Rust core, not here.
-_type_code(::Type{SingleTimeSeries}) = INFRASTORE_TYPE_SINGLE
-_type_code(::Type{NonSequentialTimeSeries}) = INFRASTORE_TYPE_NON_SEQUENTIAL
-_type_code(::Type{PersistentTimeSeries}) = INFRASTORE_TYPE_PERSISTENT
-_type_code(::Type{Deterministic}) = INFRASTORE_TYPE_DETERMINISTIC
-_type_code(::Type{DeterministicSingleTimeSeries}) = INFRASTORE_TYPE_DETERMINISTIC_SINGLE
-_type_code(::Type{Probabilistic}) = INFRASTORE_TYPE_PROBABILISTIC
-_type_code(::Type{Scenarios}) = INFRASTORE_TYPE_SCENARIOS
+# The integer type code for a Julia time series type. Every code names a stored
+# type; the widening of a `Deterministic` request to both deterministic storage
+# forms happens in the Rust core, not here.
+#
+# A parameterized spelling (`SingleTimeSeries{Float64}`) answers for its base
+# type: the store addresses a series by its identity -- (owner, category, type,
+# name, resolution, interval, features) -- which carries no element type, so
+# `{T,N}` can only restate what the matched arrays are, never select between
+# them. It is accepted rather than rejected so that the parameterized
+# `time_series_type` of a metadata row round-trips into every type-taking call;
+# what it names beyond the base type is ignored.
 function _type_code(::Type{T}) where {T}
-    # `Type{}` is invariant, so a parameterized spelling never matches the
-    # methods above and lands here. Strip the parameters and answer for the base
-    # type: the store addresses a series by its identity — (owner, category,
-    # type, name, resolution, interval, features) — which carries no element
-    # type, so `{T,N}` can only restate what the matched arrays are, never
-    # select between them. It is accepted rather than rejected so that the
-    # parameterized `time_series_type` of a metadata row round-trips into every
-    # type-taking call; what it names beyond the base type is ignored.
     base = _base_time_series_type(T)
     base === nothing && throw(InvalidParameterError("$T is not a time series type"))
-    return _type_code(base)
+    return findfirst(==(base), _TIME_SERIES_TYPES) - 1
 end
 
 # The unparameterized time series type `T` is a spelling of, or `nothing` if it
@@ -81,23 +51,9 @@ _filter_type_code(::Type{T}) where {T} = Int32(_type_code(T))
 
 # The Julia time series type for a metadata row's type name (the `as_str` form).
 function _type_for_name(name::AbstractString)
-    if name == "SingleTimeSeries"
-        SingleTimeSeries
-    elseif name == "NonSequentialTimeSeries"
-        NonSequentialTimeSeries
-    elseif name == "PersistentTimeSeries"
-        PersistentTimeSeries
-    elseif name == "Deterministic"
-        Deterministic
-    elseif name == "DeterministicSingleTimeSeries"
-        DeterministicSingleTimeSeries
-    elseif name == "Probabilistic"
-        Probabilistic
-    elseif name == "Scenarios"
-        Scenarios
-    else
-        throw(InvalidParameterError("unknown time series type name $name"))
-    end
+    i = findfirst(T -> String(nameof(T)) == name, _TIME_SERIES_TYPES)
+    i === nothing && throw(InvalidParameterError("unknown time series type name $name"))
+    return _TIME_SERIES_TYPES[i]
 end
 
 # The *parameterized* Julia type of a metadata row: the row's stored type with
@@ -424,28 +380,9 @@ end
 Remove every series matching the filter (same filters as [`list_metadata`](@ref)) in
 one all-or-nothing transaction; returns the number removed (0 if none match).
 """
-function remove_by_filter!(
-    store::Store;
-    owner_id::Union{Nothing, Integer}=nothing,
-    owner_category::Union{Nothing, OwnerCategory}=nothing,
-    time_series_type::Union{Nothing, Type}=nothing,
-    name::Union{Nothing, AbstractString}=nothing,
-    resolution::Union{Nothing, Period}=nothing,
-    interval::Union{Nothing, Period}=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-    features_exact::Bool=false,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    name_glob::Union{Nothing, AbstractString}=nothing,
-    zoneless::Union{Nothing, Bool}=nothing,
-    initial_timestamp=nothing,
-    length::Union{Nothing, Integer}=nothing,
-)
+function remove_by_filter!(store::Store; kwargs...)
     out_removed = Ref{UInt64}(0)
-    code = _with_filter(;
-        owner_id, owner_category, time_series_type, name, resolution, interval,
-        features, features_exact, component_field, name_glob, zoneless,
-        initial_timestamp, length,
-    ) do filter
+    code = _with_filter(; kwargs...) do filter
         @ccall libinfrastore.infrastore_store_remove_by_filter(
             store::Ptr{Cvoid},
             filter::Ref{FilterRecord},
@@ -526,28 +463,9 @@ genuinely partial feature lists take the indexed per-feature fallback probe.
 Pass `features_exact=true` to match `features` as the row's whole feature set,
 which is the content-hash comparison and always an index seek.
 """
-function has_any_time_series(
-    store::Store;
-    owner_id=nothing,
-    owner_category=nothing,
-    time_series_type=nothing,
-    name=nothing,
-    resolution=nothing,
-    interval=nothing,
-    features::Union{Nothing, AbstractDict}=nothing,
-    features_exact::Bool=false,
-    component_field=nothing,
-    name_glob=nothing,
-    zoneless::Union{Nothing, Bool}=nothing,
-    initial_timestamp=nothing,
-    length=nothing,
-)
+function has_any_time_series(store::Store; kwargs...)
     out = Ref{Bool}(false)
-    code = _with_filter(;
-        owner_id, owner_category, time_series_type, name, resolution, interval,
-        features, features_exact, component_field, name_glob, zoneless,
-        initial_timestamp, length,
-    ) do filter
+    code = _with_filter(; kwargs...) do filter
         @ccall libinfrastore.infrastore_store_has_any_by_filter(
             store::Ptr{Cvoid},
             filter::Ref{FilterRecord},

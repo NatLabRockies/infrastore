@@ -56,13 +56,6 @@ impl OwnerCategory {
     }
 }
 
-impl FromStr for OwnerCategory {
-    type Err = ();
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        Self::parse(s).ok_or(())
-    }
-}
-
 /// Which unit basis a series' values are expressed in.
 ///
 /// This is the per-unit declaration power-systems modelers know as the "unit

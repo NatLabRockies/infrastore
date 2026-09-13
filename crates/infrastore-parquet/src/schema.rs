@@ -10,9 +10,7 @@
 //! `element_shape`, `features` — rides as JSON, which is the spelling the rest of
 //! the project already uses for the same values.
 
-use infrastore_core::{
-    ElementType, Features, OwnerCategory, TimeReference, TimeSeriesType, UnitSystem,
-};
+use infrastore_core::{ElementType, Features, TimeSeriesType};
 
 /// Which of the six types the rows describe. Present on every file, and the one
 /// key that tells a `PersistentTimeSeries` from a `NonSequentialTimeSeries` —
@@ -125,18 +123,6 @@ pub fn encode_features(features: &Features) -> String {
     serde_json::Value::Object(infrastore_core::features_to_plain(features)).to_string()
 }
 
-/// Parse a `features` value back, inferring each value's kind from its JSON
-/// type — the inverse of [`encode_features`], and the same inference the C ABI
-/// and the CLI do.
-pub fn decode_features(text: &str) -> Result<Features, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("{FEATURES} is not JSON: {e}"))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| format!("{FEATURES} must be a JSON object"))?;
-    infrastore_core::features_from_plain(object).map_err(|e| e.to_string())
-}
-
 /// Parse a `time_series_type` value back.
 pub fn decode_time_series_type(text: &str) -> Result<TimeSeriesType, String> {
     TimeSeriesType::parse(text).ok_or_else(|| format!("unknown {TIME_SERIES_TYPE} {text:?}"))
@@ -145,28 +131,4 @@ pub fn decode_time_series_type(text: &str) -> Result<TimeSeriesType, String> {
 /// Parse an `element_type` value back.
 pub fn decode_element_type(text: &str) -> Result<ElementType, String> {
     ElementType::parse(text).ok_or_else(|| format!("unknown {ELEMENT_TYPE} {text:?}"))
-}
-
-/// Parse a `time_reference` value back. `None` for [`UNSPECIFIED_REFERENCE`].
-///
-/// The `Option` is the point: unspecified is the absence of a reference, so it
-/// is decoded here rather than in `TimeReference::parse`, which must keep
-/// refusing the literal -- see [`UNSPECIFIED_REFERENCE`].
-pub fn decode_time_reference(text: &str) -> Result<Option<TimeReference>, String> {
-    if text == UNSPECIFIED_REFERENCE {
-        return Ok(None);
-    }
-    TimeReference::parse(text)
-        .map(Some)
-        .map_err(|e| format!("{TIME_REFERENCE} {text:?}: {e}"))
-}
-
-/// Parse an `owner_category` value back.
-pub fn decode_owner_category(text: &str) -> Result<OwnerCategory, String> {
-    OwnerCategory::parse(text).ok_or_else(|| format!("unknown {OWNER_CATEGORY} {text:?}"))
-}
-
-/// Parse a `unit_system` value back.
-pub fn decode_unit_system(text: &str) -> Result<UnitSystem, String> {
-    UnitSystem::parse(text).ok_or_else(|| format!("unknown {UNIT_SYSTEM} {text:?}"))
 }

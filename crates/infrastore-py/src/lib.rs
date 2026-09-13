@@ -2441,7 +2441,195 @@ impl PySingleTimeSeries {
     }
 }
 
-// ---- NonSequentialTimeSeries ----------------------------------------------
+// ---- NonSequentialTimeSeries / PersistentTimeSeries ------------------------
+
+/// The `#[pymethods]` the two irregular static types share: they are built,
+/// converted, and described identically, differing only in what a value means
+/// between two timestamps. `$core` is the core type and `$py_name` the Python
+/// class name; each `{ /// ... }` block is that method's docstring, since the
+/// two types word them for their own semantics. Persistent-only methods live in
+/// a hand-written `#[pymethods]` block beside the invocation.
+macro_rules! irregular_pymethods {
+    (
+        $ty:ident, $core:ident, $py_name:literal,
+        new: { $(#[$new_doc:meta])* }
+        from_values: { $(#[$from_values_doc:meta])* }
+        timestamps: { $(#[$timestamps_doc:meta])* }
+        from_arrow: { $(#[$from_arrow_doc:meta])* }
+        to_arrow: { $(#[$to_arrow_doc:meta])* }
+        len: { $(#[$len_doc:meta])* }
+    ) => {
+        series_pymethods!($ty, 1);
+
+        #[pymethods]
+        impl $ty {
+            $(#[$new_doc])*
+            #[new]
+            #[pyo3(signature = (
+                    timestamps, data, name, *, application_data=None, element_type=None, units=None,
+                    quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+                ))]
+            #[allow(clippy::too_many_arguments)]
+            fn new(
+                py: Python<'_>,
+                timestamps: Vec<PyInstant>,
+                data: &Bound<'_, PyAny>,
+                name: String,
+                application_data: Option<String>,
+                element_type: Option<String>,
+                units: Option<String>,
+                quantity_kind: Option<String>,
+                unit_system: Option<String>,
+                component_field: Option<String>,
+                time_reference: Option<String>,
+            ) -> PyResult<Self> {
+                let typed = typed_array_from_numpy(data)?;
+                // One series records one spelling, so the vector has to agree on one.
+                let reference = vector_reference(&timestamps)?;
+                let mut inner = core_lib::$core::new(instants_to_utc(&timestamps), typed, name)
+                    .map_err(InvalidParameterError::new_err)?;
+                let descriptors = DescriptorArgs {
+                    application_data,
+                    element_type,
+                    units,
+                    quantity_kind,
+                    unit_system,
+                    component_field,
+                    time_reference,
+                }
+                .resolve(py, inner.element_type, reference)?;
+                apply_descriptors!(inner, descriptors);
+                Ok(Self { inner })
+            }
+
+            $(#[$from_values_doc])*
+            #[classmethod]
+            #[pyo3(signature = (
+                    timestamps, values, name, *,
+                    application_data=None, element_type=None, units=None, quantity_kind=None,
+                    unit_system=None, component_field=None, time_reference=None
+                ))]
+            #[allow(clippy::too_many_arguments)]
+            fn from_values(
+                _cls: &Bound<'_, pyo3::types::PyType>,
+                py: Python<'_>,
+                timestamps: Vec<PyInstant>,
+                values: &Bound<'_, PyAny>,
+                name: String,
+                application_data: Option<String>,
+                element_type: Option<String>,
+                units: Option<String>,
+                quantity_kind: Option<String>,
+                unit_system: Option<String>,
+                component_field: Option<String>,
+                time_reference: Option<String>,
+            ) -> PyResult<Self> {
+                // One series records one spelling, so the vector has to agree on one.
+                let reference = vector_reference(&timestamps)?;
+                let decoded = from_values_payload(values, element_type.as_deref())?;
+                let mut inner =
+                    core_lib::$core::from_values(instants_to_utc(&timestamps), &decoded, name)
+                        .map_err(InvalidParameterError::new_err)?;
+                let descriptors = DescriptorArgs {
+                    application_data,
+                    element_type,
+                    units,
+                    quantity_kind,
+                    unit_system,
+                    component_field,
+                    time_reference,
+                }
+                .resolve(py, inner.element_type, reference)?;
+                apply_descriptors!(inner, descriptors);
+                Ok(Self { inner })
+            }
+
+            $(#[$timestamps_doc])*
+            #[getter]
+            fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+                spell_instants(
+                    py,
+                    &self.inner.timestamps,
+                    self.inner.time_reference.as_ref(),
+                )
+            }
+
+            #[getter]
+            fn length(&self) -> usize {
+                self.inner.length
+            }
+
+            $(#[$from_arrow_doc])*
+            #[classmethod]
+            #[pyo3(signature = (
+                    table, *, name=None, application_data=None, element_type=None, units=None,
+                    quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+                ))]
+            #[allow(clippy::too_many_arguments)]
+            fn from_arrow(
+                _cls: &Bound<'_, pyo3::types::PyType>,
+                py: Python<'_>,
+                table: &Bound<'_, PyAny>,
+                name: Option<String>,
+                application_data: Option<String>,
+                element_type: Option<String>,
+                units: Option<String>,
+                quantity_kind: Option<String>,
+                unit_system: Option<String>,
+                component_field: Option<String>,
+                time_reference: Option<String>,
+            ) -> PyResult<Self> {
+                let parts = arrow_parts(py, table)?;
+                let name = arrow_name(&parts, name)?;
+                let instants = arrow_instant_vec(&parts.millis)?;
+                let typed = typed_array_from_numpy(&parts.values)?;
+                let mut inner = core_lib::$core::new(instants, typed, name)
+                    .map_err(InvalidParameterError::new_err)?;
+                let descriptors = arrow_descriptor_args(
+                    &parts,
+                    DescriptorArgs {
+                        application_data,
+                        element_type,
+                        units,
+                        quantity_kind,
+                        unit_system,
+                        component_field,
+                        time_reference,
+                    },
+                )?
+                .resolve(py, inner.element_type, None)?;
+                apply_descriptors!(inner, descriptors);
+                Ok(Self { inner })
+            }
+
+            $(#[$to_arrow_doc])*
+            fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+                arrow_table(
+                    py,
+                    &self.inner.timestamps,
+                    self.inner.time_reference.as_ref(),
+                    &self.inner.data,
+                    arrow_metadata!(self.inner, $py_name),
+                )
+            }
+
+            $(#[$len_doc])*
+            fn __len__(&self) -> usize {
+                self.inner.length
+            }
+
+            fn __repr__(&self) -> String {
+                format!(
+                    concat!($py_name, "(name={:?}, length={}, shape={:?}, time_reference={})"),
+                    self.inner.name,
+                    self.inner.length,
+                    self.inner.data.shape,
+                    reference_label(self.inner.time_reference.as_ref()),
+                )
+            }
+        }
+    };
+}
 
 #[pyclass(
     name = "NonSequentialTimeSeries",
@@ -2453,199 +2641,45 @@ pub struct PyNonSequentialTimeSeries {
     inner: core_lib::NonSequentialTimeSeries,
 }
 
-series_pymethods!(PyNonSequentialTimeSeries, 1);
-
-#[pymethods]
-impl PyNonSequentialTimeSeries {
-    /// `name` is required.
-    ///
-    /// The keyword-only arguments are the descriptive attributes documented on
-    /// `SingleTimeSeries`; they travel with the series into the store and come
-    /// back on a read.
-    #[new]
-    #[pyo3(signature = (
-            timestamps, data, name, *, application_data=None, element_type=None, units=None,
-            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-        ))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        py: Python<'_>,
-        timestamps: Vec<PyInstant>,
-        data: &Bound<'_, PyAny>,
-        name: String,
-        application_data: Option<String>,
-        element_type: Option<String>,
-        units: Option<String>,
-        quantity_kind: Option<String>,
-        unit_system: Option<String>,
-        component_field: Option<String>,
-        time_reference: Option<String>,
-    ) -> PyResult<Self> {
-        let typed = typed_array_from_numpy(data)?;
-        // One series records one spelling, so the vector has to agree on one.
-        let reference = vector_reference(&timestamps)?;
-        let mut inner =
-            core_lib::NonSequentialTimeSeries::new(instants_to_utc(&timestamps), typed, name)
-                .map_err(InvalidParameterError::new_err)?;
-        let descriptors = DescriptorArgs {
-            application_data,
-            element_type,
-            units,
-            quantity_kind,
-            unit_system,
-            component_field,
-            time_reference,
-        }
-        .resolve(py, inner.element_type, reference)?;
-        apply_descriptors!(inner, descriptors);
-        Ok(Self { inner })
+irregular_pymethods!(
+    PyNonSequentialTimeSeries, NonSequentialTimeSeries, "NonSequentialTimeSeries",
+    new: {
+        /// `name` is required.
+        ///
+        /// The keyword-only arguments are the descriptive attributes documented on
+        /// `SingleTimeSeries`; they travel with the series into the store and come
+        /// back on a read.
     }
-
-    /// Build from per-timestamp logical values, encoding them into the array
-    /// the store holds and declaring the element type they imply. See
-    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
-    #[classmethod]
-    #[pyo3(signature = (
-            timestamps, values, name, *,
-            application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
-        ))]
-    #[allow(clippy::too_many_arguments)]
-    fn from_values(
-        _cls: &Bound<'_, pyo3::types::PyType>,
-        py: Python<'_>,
-        timestamps: Vec<PyInstant>,
-        values: &Bound<'_, PyAny>,
-        name: String,
-        application_data: Option<String>,
-        element_type: Option<String>,
-        units: Option<String>,
-        quantity_kind: Option<String>,
-        unit_system: Option<String>,
-        component_field: Option<String>,
-        time_reference: Option<String>,
-    ) -> PyResult<Self> {
-        // One series records one spelling, so the vector has to agree on one.
-        let reference = vector_reference(&timestamps)?;
-        let decoded = from_values_payload(values, element_type.as_deref())?;
-        let mut inner = core_lib::NonSequentialTimeSeries::from_values(
-            instants_to_utc(&timestamps),
-            &decoded,
-            name,
-        )
-        .map_err(InvalidParameterError::new_err)?;
-        let descriptors = DescriptorArgs {
-            application_data,
-            element_type,
-            units,
-            quantity_kind,
-            unit_system,
-            component_field,
-            time_reference,
-        }
-        .resolve(py, inner.element_type, reference)?;
-        apply_descriptors!(inner, descriptors);
-        Ok(Self { inner })
+    from_values: {
+        /// Build from per-timestamp logical values, encoding them into the array
+        /// the store holds and declaring the element type they imply. See
+        /// `SingleTimeSeries.from_values` for the value shapes and the rules.
     }
-
-    /// The explicit timestamp vector, spelled the way it was written.
-    #[getter]
-    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        spell_instants(
-            py,
-            &self.inner.timestamps,
-            self.inner.time_reference.as_ref(),
-        )
+    timestamps: {
+        /// The explicit timestamp vector, spelled the way it was written.
     }
-
-    #[getter]
-    fn length(&self) -> usize {
-        self.inner.length
+    from_arrow: {
+        /// Build a `NonSequentialTimeSeries` from a `pyarrow.Table` — the inverse of
+        /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules; the
+        /// only difference is that the timestamps are taken as they are and need not
+        /// walk a grid.
     }
-
-    /// Build a `NonSequentialTimeSeries` from a `pyarrow.Table` — the inverse of
-    /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules; the
-    /// only difference is that the timestamps are taken as they are and need not
-    /// walk a grid.
-    #[classmethod]
-    #[pyo3(signature = (
-            table, *, name=None, application_data=None, element_type=None, units=None,
-            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-        ))]
-    #[allow(clippy::too_many_arguments)]
-    fn from_arrow(
-        _cls: &Bound<'_, pyo3::types::PyType>,
-        py: Python<'_>,
-        table: &Bound<'_, PyAny>,
-        name: Option<String>,
-        application_data: Option<String>,
-        element_type: Option<String>,
-        units: Option<String>,
-        quantity_kind: Option<String>,
-        unit_system: Option<String>,
-        component_field: Option<String>,
-        time_reference: Option<String>,
-    ) -> PyResult<Self> {
-        let parts = arrow_parts(py, table)?;
-        let name = arrow_name(&parts, name)?;
-        let instants = arrow_instant_vec(&parts.millis)?;
-        let typed = typed_array_from_numpy(&parts.values)?;
-        let mut inner = core_lib::NonSequentialTimeSeries::new(instants, typed, name)
-            .map_err(InvalidParameterError::new_err)?;
-        let descriptors = arrow_descriptor_args(
-            &parts,
-            DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            },
-        )?
-        .resolve(py, inner.element_type, None)?;
-        apply_descriptors!(inner, descriptors);
-        Ok(Self { inner })
+    to_arrow: {
+        /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+        ///
+        /// Requires pyarrow, which is not installed with infrastore — use
+        /// `pip install 'infrastore[arrow]'`. Identical in shape to
+        /// `SingleTimeSeries.to_arrow`, except that the timestamp column is the
+        /// stored vector rather than a computed grid, and the metadata carries no
+        /// `resolution` because an irregular timeline has no constant step.
+        ///
+        /// The rows are the timestamps and nothing else: an irregular series has no
+        /// value *between* two of them, so nothing is filled in.
     }
-
-    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
-    ///
-    /// Requires pyarrow, which is not installed with infrastore — use
-    /// `pip install 'infrastore[arrow]'`. Identical in shape to
-    /// `SingleTimeSeries.to_arrow`, except that the timestamp column is the
-    /// stored vector rather than a computed grid, and the metadata carries no
-    /// `resolution` because an irregular timeline has no constant step.
-    ///
-    /// The rows are the timestamps and nothing else: an irregular series has no
-    /// value *between* two of them, so nothing is filled in.
-    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        arrow_table(
-            py,
-            &self.inner.timestamps,
-            self.inner.time_reference.as_ref(),
-            &self.inner.data,
-            arrow_metadata!(self.inner, "NonSequentialTimeSeries"),
-        )
+    len: {
+        /// Number of time steps (`length`).
     }
-
-    /// Number of time steps (`length`).
-    fn __len__(&self) -> usize {
-        self.inner.length
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "NonSequentialTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
-            self.inner.name,
-            self.inner.length,
-            self.inner.data.shape,
-            reference_label(self.inner.time_reference.as_ref()),
-        )
-    }
-}
-
-// ---- PersistentTimeSeries -------------------------------------------------
+);
 
 /// A sparse step function: breakpoints plus one value each, holding the last
 /// value forward.
@@ -2664,117 +2698,54 @@ pub struct PyPersistentTimeSeries {
     inner: core_lib::PersistentTimeSeries,
 }
 
-series_pymethods!(PyPersistentTimeSeries, 1);
+irregular_pymethods!(
+    PyPersistentTimeSeries, PersistentTimeSeries, "PersistentTimeSeries",
+    new: {
+        /// `name` is required.
+        ///
+        /// The keyword-only arguments are the descriptive attributes documented on
+        /// `SingleTimeSeries`; they travel with the series into the store and come
+        /// back on a read. A step function's scalar-collapse policy belongs in
+        /// `application_data` — the store has no column for it.
+    }
+    from_values: {
+        /// Build from per-breakpoint logical values, encoding them into the array
+        /// the store holds and declaring the element type they imply. See
+        /// `SingleTimeSeries.from_values` for the value shapes and the rules.
+    }
+    timestamps: {
+        /// The breakpoint vector, spelled the way it was written.
+    }
+    from_arrow: {
+        /// Build a `PersistentTimeSeries` from a `pyarrow.Table` — the inverse of
+        /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules.
+        ///
+        /// The rows are **breakpoints**, not instants: a step function is stored
+        /// sparsely and the table is that sparse form. This class has to be named,
+        /// because a `PersistentTimeSeries` table is shaped exactly like a
+        /// `NonSequentialTimeSeries` one — the two differ only in what the values
+        /// mean between the rows.
+    }
+    to_arrow: {
+        /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
+        ///
+        /// Requires pyarrow, which is not installed with infrastore — use
+        /// `pip install 'infrastore[arrow]'`.
+        ///
+        /// **One row per breakpoint, not per instant.** A step function is stored
+        /// sparsely and the table is that sparse form: the value at a row stays in
+        /// force until the next row, and past the last one forever. Resampling it
+        /// onto a dense grid is the caller's to do, and needs a grid the series
+        /// itself does not carry — there is no value before the first breakpoint, so
+        /// a grid starting earlier has no answer to give.
+    }
+    len: {
+        /// Number of breakpoints (`length`).
+    }
+);
 
 #[pymethods]
 impl PyPersistentTimeSeries {
-    /// `name` is required.
-    ///
-    /// The keyword-only arguments are the descriptive attributes documented on
-    /// `SingleTimeSeries`; they travel with the series into the store and come
-    /// back on a read. A step function's scalar-collapse policy belongs in
-    /// `application_data` — the store has no column for it.
-    #[new]
-    #[pyo3(signature = (
-            timestamps, data, name, *, application_data=None, element_type=None, units=None,
-            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-        ))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        py: Python<'_>,
-        timestamps: Vec<PyInstant>,
-        data: &Bound<'_, PyAny>,
-        name: String,
-        application_data: Option<String>,
-        element_type: Option<String>,
-        units: Option<String>,
-        quantity_kind: Option<String>,
-        unit_system: Option<String>,
-        component_field: Option<String>,
-        time_reference: Option<String>,
-    ) -> PyResult<Self> {
-        let typed = typed_array_from_numpy(data)?;
-        // One series records one spelling, so the vector has to agree on one.
-        let reference = vector_reference(&timestamps)?;
-        let mut inner =
-            core_lib::PersistentTimeSeries::new(instants_to_utc(&timestamps), typed, name)
-                .map_err(InvalidParameterError::new_err)?;
-        let descriptors = DescriptorArgs {
-            application_data,
-            element_type,
-            units,
-            quantity_kind,
-            unit_system,
-            component_field,
-            time_reference,
-        }
-        .resolve(py, inner.element_type, reference)?;
-        apply_descriptors!(inner, descriptors);
-        Ok(Self { inner })
-    }
-
-    /// Build from per-breakpoint logical values, encoding them into the array
-    /// the store holds and declaring the element type they imply. See
-    /// `SingleTimeSeries.from_values` for the value shapes and the rules.
-    #[classmethod]
-    #[pyo3(signature = (
-            timestamps, values, name, *,
-            application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
-        ))]
-    #[allow(clippy::too_many_arguments)]
-    fn from_values(
-        _cls: &Bound<'_, pyo3::types::PyType>,
-        py: Python<'_>,
-        timestamps: Vec<PyInstant>,
-        values: &Bound<'_, PyAny>,
-        name: String,
-        application_data: Option<String>,
-        element_type: Option<String>,
-        units: Option<String>,
-        quantity_kind: Option<String>,
-        unit_system: Option<String>,
-        component_field: Option<String>,
-        time_reference: Option<String>,
-    ) -> PyResult<Self> {
-        // One series records one spelling, so the vector has to agree on one.
-        let reference = vector_reference(&timestamps)?;
-        let decoded = from_values_payload(values, element_type.as_deref())?;
-        let mut inner = core_lib::PersistentTimeSeries::from_values(
-            instants_to_utc(&timestamps),
-            &decoded,
-            name,
-        )
-        .map_err(InvalidParameterError::new_err)?;
-        let descriptors = DescriptorArgs {
-            application_data,
-            element_type,
-            units,
-            quantity_kind,
-            unit_system,
-            component_field,
-            time_reference,
-        }
-        .resolve(py, inner.element_type, reference)?;
-        apply_descriptors!(inner, descriptors);
-        Ok(Self { inner })
-    }
-
-    /// The breakpoint vector, spelled the way it was written.
-    #[getter]
-    fn timestamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        spell_instants(
-            py,
-            &self.inner.timestamps,
-            self.inner.time_reference.as_ref(),
-        )
-    }
-
-    #[getter]
-    fn length(&self) -> usize {
-        self.inner.length
-    }
-
     /// The value in force at `at`.
     ///
     /// A step function is defined at *every* instant from its first breakpoint
@@ -2830,92 +2801,6 @@ impl PyPersistentTimeSeries {
             self.inner.time_reference.as_ref(),
         )
     }
-
-    /// Build a `PersistentTimeSeries` from a `pyarrow.Table` — the inverse of
-    /// `to_arrow()`. See `SingleTimeSeries.from_arrow` for the full rules.
-    ///
-    /// The rows are **breakpoints**, not instants: a step function is stored
-    /// sparsely and the table is that sparse form. This class has to be named,
-    /// because a `PersistentTimeSeries` table is shaped exactly like a
-    /// `NonSequentialTimeSeries` one — the two differ only in what the values
-    /// mean between the rows.
-    #[classmethod]
-    #[pyo3(signature = (
-            table, *, name=None, application_data=None, element_type=None, units=None,
-            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
-        ))]
-    #[allow(clippy::too_many_arguments)]
-    fn from_arrow(
-        _cls: &Bound<'_, pyo3::types::PyType>,
-        py: Python<'_>,
-        table: &Bound<'_, PyAny>,
-        name: Option<String>,
-        application_data: Option<String>,
-        element_type: Option<String>,
-        units: Option<String>,
-        quantity_kind: Option<String>,
-        unit_system: Option<String>,
-        component_field: Option<String>,
-        time_reference: Option<String>,
-    ) -> PyResult<Self> {
-        let parts = arrow_parts(py, table)?;
-        let name = arrow_name(&parts, name)?;
-        let instants = arrow_instant_vec(&parts.millis)?;
-        let typed = typed_array_from_numpy(&parts.values)?;
-        let mut inner = core_lib::PersistentTimeSeries::new(instants, typed, name)
-            .map_err(InvalidParameterError::new_err)?;
-        let descriptors = arrow_descriptor_args(
-            &parts,
-            DescriptorArgs {
-                application_data,
-                element_type,
-                units,
-                quantity_kind,
-                unit_system,
-                component_field,
-                time_reference,
-            },
-        )?
-        .resolve(py, inner.element_type, None)?;
-        apply_descriptors!(inner, descriptors);
-        Ok(Self { inner })
-    }
-
-    /// This series as a two-column `pyarrow.Table`: `timestamp` and `value`.
-    ///
-    /// Requires pyarrow, which is not installed with infrastore — use
-    /// `pip install 'infrastore[arrow]'`.
-    ///
-    /// **One row per breakpoint, not per instant.** A step function is stored
-    /// sparsely and the table is that sparse form: the value at a row stays in
-    /// force until the next row, and past the last one forever. Resampling it
-    /// onto a dense grid is the caller's to do, and needs a grid the series
-    /// itself does not carry — there is no value before the first breakpoint, so
-    /// a grid starting earlier has no answer to give.
-    fn to_arrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        arrow_table(
-            py,
-            &self.inner.timestamps,
-            self.inner.time_reference.as_ref(),
-            &self.inner.data,
-            arrow_metadata!(self.inner, "PersistentTimeSeries"),
-        )
-    }
-
-    /// Number of breakpoints (`length`).
-    fn __len__(&self) -> usize {
-        self.inner.length
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "PersistentTimeSeries(name={:?}, length={}, shape={:?}, time_reference={})",
-            self.inner.name,
-            self.inner.length,
-            self.inner.data.shape,
-            reference_label(self.inner.time_reference.as_ref()),
-        )
-    }
 }
 
 // ---- Associations ---------------------------------------------------------
@@ -2926,12 +2811,20 @@ impl PyPersistentTimeSeries {
 /// denormalized filtering aids, so re-attaching the same pair under different
 /// type names is still a duplicate and the second `add` raises
 /// `DuplicateAssociationError`.
+///
+/// `==` and `hash` are structural over all four fields (the catalog `id` is
+/// excluded) — stricter than the table's notion of identity, so that a
+/// round-tripped row compares equal only when its type names survived too, and
+/// consistent with each other so attachments work in sets and as dict keys.
 #[pyclass(
     name = "SupplementalAttributeAssociation",
     module = "infrastore",
-    from_py_object
+    from_py_object,
+    eq,
+    hash,
+    frozen
 )]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PySupplementalAttributeAssociation {
     inner: core_lib::SupplementalAttributeAssociation,
 }
@@ -2996,19 +2889,6 @@ impl PySupplementalAttributeAssociation {
             self.inner.attribute_type,
         )
     }
-
-    /// Structural equality over all four fields — stricter than the table's
-    /// notion of identity, so that a round-tripped row compares equal only when
-    /// its type names survived too.
-    fn __eq__(&self, other: &PySupplementalAttributeAssociation) -> bool {
-        self.inner == other.inner
-    }
-
-    /// Consistent with `__eq__`, so attachments work in sets and as dict keys
-    /// (bulk export/import comparisons rely on this).
-    fn __hash__(&self) -> u64 {
-        hash_of(&self.inner)
-    }
 }
 
 /// One directed edge between two components — a generator (parent) connected to
@@ -3016,9 +2896,17 @@ impl PySupplementalAttributeAssociation {
 ///
 /// Identity is the ordered `(parent_id, child_id)` pair, so the reversed pair is
 /// a different edge. As above, the type names are denormalized filtering aids
-/// and do not enter identity.
-#[pyclass(name = "ParentChildAssociation", module = "infrastore", from_py_object)]
-#[derive(Clone)]
+/// and do not enter identity. `==` and `hash` are structural over all four
+/// fields; see `SupplementalAttributeAssociation`.
+#[pyclass(
+    name = "ParentChildAssociation",
+    module = "infrastore",
+    from_py_object,
+    eq,
+    hash,
+    frozen
+)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PyParentChildAssociation {
     inner: core_lib::ParentChildAssociation,
 }
@@ -3076,25 +2964,6 @@ impl PyParentChildAssociation {
             self.inner.child_type,
         )
     }
-
-    /// Structural equality over all four fields; see
-    /// [`PySupplementalAttributeAssociation::__eq__`].
-    fn __eq__(&self, other: &PyParentChildAssociation) -> bool {
-        self.inner == other.inner
-    }
-
-    /// Consistent with `__eq__`.
-    fn __hash__(&self) -> u64 {
-        hash_of(&self.inner)
-    }
-}
-
-/// `__hash__` body shared by the two association pyclasses.
-fn hash_of<T: std::hash::Hash>(value: &T) -> u64 {
-    use std::hash::Hasher;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
 }
 
 /// Extract a required key from a bulk-add item dict, with a uniform error.

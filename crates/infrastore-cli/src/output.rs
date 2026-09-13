@@ -112,6 +112,18 @@ pub fn display_csv_rows(headers: &[String], rows: &[Vec<String>]) -> Result<(), 
     }
 }
 
+/// Render a header + rows as CSV under `-f csv`, and as a console table under
+/// every other format.
+pub fn print_rows(format: Format, headers: &[String], rows: &[Vec<String>]) -> Result<(), String> {
+    match format {
+        Format::Csv => display_csv_rows(headers, rows),
+        _ => {
+            display_table_dyn(headers, rows);
+            Ok(())
+        }
+    }
+}
+
 fn on_csv_err(e: csv::Error) -> Result<(), String> {
     if let csv::ErrorKind::Io(io) = e.kind()
         && io.kind() == std::io::ErrorKind::BrokenPipe

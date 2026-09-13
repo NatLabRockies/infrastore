@@ -77,8 +77,7 @@ pub mod table;
 pub mod write;
 
 pub use read::{
-    ImportOptions, ImportedSeries, PartitionFiles, SeriesSink, partitions, read_partition,
-    read_partition_with,
+    ImportOptions, ImportedSeries, PartitionFiles, SeriesSink, partitions, read_partition_with,
 };
 pub use write::{ExportReport, WrittenPartition, check_destination, write_partitions};
 

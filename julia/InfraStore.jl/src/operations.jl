@@ -104,16 +104,14 @@ function _from_unix_ms(ms::Int64)
     return DateTime(Dates.UTM(ms + Dates.UNIXEPOCH))
 end
 
-# Lower an optional `(start, end)` DateTime range to the FFI's
-# (present::Bool, zoneless::Bool, start_ms::Int64, end_ms::Int64) tuple.
-# `nothing` -> no range.
+# Lower a `(start, end)` DateTime range to the FFI's
+# (zoneless::Bool, start_ms::Int64, end_ms::Int64) tuple.
 #
 # The bounds cross as Unix milliseconds either way -- a wall clock is sent as the
 # instant it would name read as UTC, exactly as the store holds one -- so
 # `zoneless` is the only thing that tells the two apart. The core refuses a bound
 # whose spelling the series cannot answer rather than coercing it.
-function _time_range_args(time_range::TimeRangeArg)
-    time_range === nothing && return (false, false, Int64(0), Int64(0))
+function _time_range_args(time_range::Tuple{Any, Any})
     start_ref = _time_reference_of(time_range[1])
     end_ref = _time_reference_of(time_range[2])
     is_zoneless(start_ref) == is_zoneless(end_ref) || throw(
@@ -124,7 +122,6 @@ function _time_range_args(time_range::TimeRangeArg)
         ),
     )
     return (
-        true,
         is_zoneless(start_ref),
         _to_unix_ms(time_range[1]),
         _to_unix_ms(time_range[2]),
@@ -421,20 +418,6 @@ function count_array_references(store::Store, data_hash::Vector{UInt8})
 end
 
 """
-    get_array_nd(store, data_hash, T, dims) -> Array{T}
-
-Fetch a stored array and reshape it to `dims` as a column-major Julia array. The
-store hands back row-major bytes, so this is the inverse of the row-major encoding
-used on write (handles the column-major ↔ row-major transpose for rank ≥ 2).
-"""
-function get_array_nd(store::Store, data_hash::Vector{UInt8}, ::Type{T}, dims) where {T}
-    flat = get_array_by_hash(store, data_hash, T)
-    n = length(dims)
-    n <= 1 && return reshape(flat, dims...)
-    return permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, n)))
-end
-
-"""
     has_time_series(store, owner_id, owner_category, name; resolution, features=nothing) -> Bool
 
 `owner_category` is the owner's `OwnerCategory` (`Component` or
@@ -500,6 +483,24 @@ function _read_values(
     return raw ? data : decode_element_values(data, element_type; types=types)
 end
 
+# The seven descriptor strings every bulk getter hands back, as out-pointers in
+# ABI order: application_data, element_type, units, quantity_kind, unit_system,
+# time_reference, component_field. Each is owned by the caller and freed with
+# `foreach(r -> _free_cstr(r[]), desc)` in the getter's `finally`.
+_descriptor_refs() = [Ref{Ptr{Cchar}}(C_NULL) for _ in 1:7]
+
+# The constructor keywords the filled descriptor refs spell, read without
+# freeing (the caller's `finally` does that).
+function _descriptor_kwargs(desc)
+    application_data, element_type, units, quantity_kind, unit_system, time_reference,
+    component_field = (_peek_cstr(r[]) for r in desc)
+    return (;
+        application_data, element_type, units, quantity_kind,
+        unit_system=_unit_system(unit_system),
+        time_reference=_time_reference(time_reference), component_field,
+    )
+end
+
 function _bulk_single(
     result::Ptr{Cvoid}, idx::Integer, name::AbstractString, raw::Bool,
     types::NamedTuple,
@@ -511,13 +512,7 @@ function _bulk_single(
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
-    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
-    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
-    out_units = Ref{Ptr{Cchar}}(C_NULL)
-    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
-    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
-    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
-    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
+    desc = _descriptor_refs()
     _check(
         @ccall libinfrastore.infrastore_bulk_result_get_single(
             result::Ptr{Cvoid},
@@ -529,42 +524,29 @@ function _bulk_single(
             out_shape_len::Ref{UInt64},
             out_data::Ref{Ptr{UInt8}},
             out_data_len::Ref{UInt64},
-            out_application_data::Ref{Ptr{Cchar}},
-            out_element_type::Ref{Ptr{Cchar}},
-            out_units::Ref{Ptr{Cchar}},
-            out_quantity_kind::Ref{Ptr{Cchar}},
-            out_unit_system::Ref{Ptr{Cchar}},
-            out_time_reference::Ref{Ptr{Cchar}},
-            out_component_field::Ref{Ptr{Cchar}},
+            desc[1]::Ref{Ptr{Cchar}},
+            desc[2]::Ref{Ptr{Cchar}},
+            desc[3]::Ref{Ptr{Cchar}},
+            desc[4]::Ref{Ptr{Cchar}},
+            desc[5]::Ref{Ptr{Cchar}},
+            desc[6]::Ref{Ptr{Cchar}},
+            desc[7]::Ref{Ptr{Cchar}},
         )::Int32
     )
     try
         dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
         bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
         raw_data = _decode_array(bytes, out_dtype[], dims)
-        element_type = _peek_cstr(out_element_type[])
+        kw = _descriptor_kwargs(desc)
         return SingleTimeSeries(
             _from_unix_ms(out_initial[]), _peek_period(out_resolution[]),
-            _read_values(raw_data, element_type, raw, types), name;
-            application_data=_peek_cstr(out_application_data[]),
-            element_type=element_type,
-            units=_peek_cstr(out_units[]),
-            quantity_kind=_peek_cstr(out_quantity_kind[]),
-            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
-            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
-            component_field=_peek_cstr(out_component_field[]),
+            _read_values(raw_data, kw.element_type, raw, types), name; kw...,
         )
     finally
         _free_i64(out_shape[], out_shape_len[])
         _free_u8(out_data[], out_data_len[])
         _free_cstr(out_resolution[])
-        _free_cstr(out_application_data[])
-        _free_cstr(out_element_type[])
-        _free_cstr(out_units[])
-        _free_cstr(out_quantity_kind[])
-        _free_cstr(out_unit_system[])
-        _free_cstr(out_time_reference[])
-        _free_cstr(out_component_field[])
+        foreach(r -> _free_cstr(r[]), desc)
     end
 end
 
@@ -583,13 +565,7 @@ function _bulk_irregular(
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
-    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
-    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
-    out_units = Ref{Ptr{Cchar}}(C_NULL)
-    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
-    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
-    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
-    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
+    desc = _descriptor_refs()
     _check(
         @ccall libinfrastore.infrastore_bulk_result_get_irregular(
             result::Ptr{Cvoid},
@@ -601,13 +577,13 @@ function _bulk_irregular(
             out_shape_len::Ref{UInt64},
             out_data::Ref{Ptr{UInt8}},
             out_data_len::Ref{UInt64},
-            out_application_data::Ref{Ptr{Cchar}},
-            out_element_type::Ref{Ptr{Cchar}},
-            out_units::Ref{Ptr{Cchar}},
-            out_quantity_kind::Ref{Ptr{Cchar}},
-            out_unit_system::Ref{Ptr{Cchar}},
-            out_time_reference::Ref{Ptr{Cchar}},
-            out_component_field::Ref{Ptr{Cchar}},
+            desc[1]::Ref{Ptr{Cchar}},
+            desc[2]::Ref{Ptr{Cchar}},
+            desc[3]::Ref{Ptr{Cchar}},
+            desc[4]::Ref{Ptr{Cchar}},
+            desc[5]::Ref{Ptr{Cchar}},
+            desc[6]::Ref{Ptr{Cchar}},
+            desc[7]::Ref{Ptr{Cchar}},
         )::Int32
     )
     try
@@ -615,28 +591,16 @@ function _bulk_irregular(
         dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
         bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
         raw_data = _decode_array(bytes, out_dtype[], dims)
-        element_type = _peek_cstr(out_element_type[])
+        kw = _descriptor_kwargs(desc)
         return T(
-            _from_unix_ms.(ts_ms), _read_values(raw_data, element_type, raw, types), name;
-            application_data=_peek_cstr(out_application_data[]),
-            element_type=element_type,
-            units=_peek_cstr(out_units[]),
-            quantity_kind=_peek_cstr(out_quantity_kind[]),
-            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
-            time_reference=_time_reference(_peek_cstr(out_time_reference[])),
-            component_field=_peek_cstr(out_component_field[]),
+            _from_unix_ms.(ts_ms), _read_values(raw_data, kw.element_type, raw, types),
+            name; kw...,
         )
     finally
         _free_i64(out_ts[], out_ts_len[])
         _free_i64(out_shape[], out_shape_len[])
         _free_u8(out_data[], out_data_len[])
-        _free_cstr(out_application_data[])
-        _free_cstr(out_element_type[])
-        _free_cstr(out_units[])
-        _free_cstr(out_quantity_kind[])
-        _free_cstr(out_unit_system[])
-        _free_cstr(out_time_reference[])
-        _free_cstr(out_component_field[])
+        foreach(r -> _free_cstr(r[]), desc)
     end
 end
 
@@ -660,13 +624,7 @@ function _bulk_forecast(
     out_byte_len = Ref{UInt64}(0)
     out_pct = Ref{Ptr{Float64}}(C_NULL)
     out_pct_len = Ref{UInt64}(0)
-    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
-    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
-    out_units = Ref{Ptr{Cchar}}(C_NULL)
-    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
-    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
-    out_time_reference = Ref{Ptr{Cchar}}(C_NULL)
-    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
+    desc = _descriptor_refs()
     _check(
         @ccall libinfrastore.infrastore_bulk_result_get_forecast(
             result::Ptr{Cvoid},
@@ -684,18 +642,16 @@ function _bulk_forecast(
             out_byte_len::Ref{UInt64},
             out_pct::Ref{Ptr{Float64}},
             out_pct_len::Ref{UInt64},
-            out_application_data::Ref{Ptr{Cchar}},
-            out_element_type::Ref{Ptr{Cchar}},
-            out_units::Ref{Ptr{Cchar}},
-            out_quantity_kind::Ref{Ptr{Cchar}},
-            out_unit_system::Ref{Ptr{Cchar}},
-            out_time_reference::Ref{Ptr{Cchar}},
-            out_component_field::Ref{Ptr{Cchar}},
+            desc[1]::Ref{Ptr{Cchar}},
+            desc[2]::Ref{Ptr{Cchar}},
+            desc[3]::Ref{Ptr{Cchar}},
+            desc[4]::Ref{Ptr{Cchar}},
+            desc[5]::Ref{Ptr{Cchar}},
+            desc[6]::Ref{Ptr{Cchar}},
+            desc[7]::Ref{Ptr{Cchar}},
         )::Int32
     )
-    local raw_data, initial, resolution, horizon, interval, count, percentiles
-    local application_data, element_type, units, quantity_kind, unit_system
-    local time_reference, component_field
+    local raw_data, initial, resolution, horizon, interval, count, percentiles, kw
     try
         dims = Int.(unsafe_wrap(Array, out_dims[], Int(out_ndims[]); own=false))
         bytes = copy(unsafe_wrap(Array, out_data[], Int(out_byte_len[]); own=false))
@@ -710,13 +666,7 @@ function _bulk_forecast(
         horizon = _peek_period(out_horizon[])
         interval = _peek_period(out_interval[])
         count = Int(out_count[])
-        application_data = _peek_cstr(out_application_data[])
-        element_type = _peek_cstr(out_element_type[])
-        units = _peek_cstr(out_units[])
-        quantity_kind = _peek_cstr(out_quantity_kind[])
-        unit_system = _unit_system(_peek_cstr(out_unit_system[]))
-        time_reference = _time_reference(_peek_cstr(out_time_reference[]))
-        component_field = _peek_cstr(out_component_field[])
+        kw = _descriptor_kwargs(desc)
     finally
         _free_u64(out_dims[], out_ndims[])
         _free_u8(out_data[], out_byte_len[])
@@ -724,35 +674,18 @@ function _bulk_forecast(
         _free_cstr(out_res[])
         _free_cstr(out_horizon[])
         _free_cstr(out_interval[])
-        _free_cstr(out_application_data[])
-        _free_cstr(out_element_type[])
-        _free_cstr(out_units[])
-        _free_cstr(out_quantity_kind[])
-        _free_cstr(out_unit_system[])
-        _free_cstr(out_time_reference[])
-        _free_cstr(out_component_field[])
+        foreach(r -> _free_cstr(r[]), desc)
     end
-    data = _read_values(raw_data, element_type, raw, types)
+    data = _read_values(raw_data, kw.element_type, raw, types)
     if type_code == INFRASTORE_TYPE_PROBABILISTIC
         return Probabilistic(
-            initial, resolution, horizon, interval, count, percentiles, data, name;
-            application_data=application_data, element_type=element_type, units=units,
-            quantity_kind=quantity_kind, unit_system=unit_system,
-            time_reference=time_reference, component_field=component_field,
+            initial, resolution, horizon, interval, count, percentiles, data, name; kw...
         )
     elseif type_code == INFRASTORE_TYPE_SCENARIOS
-        return Scenarios(
-            initial, resolution, horizon, interval, count, data, name;
-            application_data=application_data, element_type=element_type, units=units,
-            quantity_kind=quantity_kind, unit_system=unit_system,
-            time_reference=time_reference, component_field=component_field,
-        )
+        return Scenarios(initial, resolution, horizon, interval, count, data, name; kw...)
     else
         return Deterministic(
-            initial, resolution, horizon, interval, count, data, name;
-            application_data=application_data, element_type=element_type, units=units,
-            quantity_kind=quantity_kind, unit_system=unit_system,
-            time_reference=time_reference, component_field=component_field,
+            initial, resolution, horizon, interval, count, data, name; kw...
         )
     end
 end
@@ -853,7 +786,7 @@ function read_by_ids(
             )::Int32
         )
     else
-        _, tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
+        tr_zoneless, tr_start, tr_end = _time_range_args(time_range)
         _check(
             @ccall libinfrastore.infrastore_store_read_by_ids_range(
                 store::Ptr{Cvoid},

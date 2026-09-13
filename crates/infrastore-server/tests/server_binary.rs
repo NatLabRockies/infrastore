@@ -87,12 +87,7 @@ fn write_config(dir: &Path, store: &Path, port: u16, auth: &str, keys: &[&str]) 
     writeln!(f, "[data]").unwrap();
     // TOML strings need escaping on Windows paths; `to_string_lossy` plus
     // `escape_debug` keeps backslashes intact without hard-coding a separator.
-    writeln!(
-        f,
-        "files = [\"{}\"]",
-        store.to_string_lossy().escape_debug()
-    )
-    .unwrap();
+    writeln!(f, "file = \"{}\"", store.to_string_lossy().escape_debug()).unwrap();
     writeln!(f).unwrap();
     writeln!(f, "[authentication]").unwrap();
     writeln!(f, "method = \"{auth}\"").unwrap();
@@ -213,13 +208,13 @@ fn a_missing_config_file_exits_nonzero() {
 }
 
 #[test]
-fn an_empty_data_files_list_exits_nonzero() {
+fn a_missing_data_file_exits_nonzero() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("server.toml");
     std::fs::write(
         &config,
         "[server]\nhost = \"127.0.0.1\"\nport = 50999\n\n\
-         [data]\nfiles = []\n\n[authentication]\nmethod = \"none\"\n",
+         [data]\n\n[authentication]\nmethod = \"none\"\n",
     )
     .unwrap();
 
@@ -231,8 +226,8 @@ fn an_empty_data_files_list_exits_nonzero() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("files") || stderr.contains("config error"),
-        "expected a diagnostic naming the empty file list, got: {stderr}"
+        stderr.contains("file"),
+        "expected a diagnostic naming the missing file, got: {stderr}"
     );
 }
 

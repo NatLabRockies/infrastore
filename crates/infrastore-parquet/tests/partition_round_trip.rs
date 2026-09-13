@@ -18,7 +18,20 @@ use infrastore_core::{
     TimeSeriesMetadata, TypedArray,
 };
 use infrastore_parquet::read::{ImportOptions, ImportedSeries};
-use infrastore_parquet::{PartitionFiles, partitions, read_partition, write_partitions};
+use infrastore_parquet::{PartitionFiles, partitions, read_partition_with, write_partitions};
+
+/// [`read_partition_with`], collecting every series.
+fn read_partition(
+    files: &PartitionFiles,
+    options: &ImportOptions,
+) -> infrastore_parquet::Result<Vec<ImportedSeries>> {
+    let mut out = Vec::new();
+    read_partition_with(files, options, &mut |series| {
+        out.push(series);
+        Ok(())
+    })?;
+    Ok(out)
+}
 
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
@@ -1206,8 +1219,6 @@ fn a_null_in_a_text_or_integer_column_is_refused() {
 
 #[test]
 fn a_partition_streams_into_its_sink_one_series_at_a_time() {
-    use infrastore_parquet::read_partition_with;
-
     let dir = tempfile::tempdir().expect("tempdir");
     let series = stored(plain(vec![
         (1, hourly("a", &[1.0, 2.0])),

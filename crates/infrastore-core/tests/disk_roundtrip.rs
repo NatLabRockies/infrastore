@@ -6,9 +6,9 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Compression, Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    Probabilistic, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesError,
-    TimeSeriesId, TimeSeriesType, TypedArray,
+    CatalogMode, Compression, Deterministic, Features, ListFilter, NonSequentialTimeSeries,
+    OwnerCategory, Probabilistic, Scenarios, SingleTimeSeries, Store, TimeSeriesData,
+    TimeSeriesError, TimeSeriesId, TimeSeriesType, TypedArray,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -308,8 +308,13 @@ fn compression_policies_round_trip() {
         let path = dir.path().join("store.h5");
 
         {
-            let mut store =
-                Store::create_with_compression(Some(path.as_path()), false, compression).unwrap();
+            let mut store = Store::create_with_catalog(
+                Some(path.as_path()),
+                false,
+                compression,
+                CatalogMode::Attached,
+            )
+            .unwrap();
             store
                 .add_time_series(
                     7,
@@ -437,13 +442,14 @@ fn read_only_open_works_on_write_protected_files() {
 fn invalid_compression_level_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
-    let err = Store::create_with_compression(
+    let err = Store::create_with_catalog(
         Some(path.as_path()),
         false,
         Compression::Deflate {
             level: 10,
             shuffle: true,
         },
+        CatalogMode::Attached,
     );
     assert!(err.is_err(), "level 10 should be rejected");
 }

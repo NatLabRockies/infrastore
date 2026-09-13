@@ -3,7 +3,7 @@
 
 use std::sync::OnceLock;
 
-use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 use infrastore_core::{
     ElementType, FeatureValue, OwnerCategory, Period, TimeReference, TimeSeriesType, UnitSystem,
 };
@@ -18,42 +18,12 @@ const DURATION_EXAMPLES: &str = "PT1H, PT15M, PT30S, P1D, P1M, P1Y";
 /// ISO-8601 is the only accepted spelling, matching what the CLI *prints*
 /// (every rendered period goes through `Period::to_iso8601`), so a duration copied
 /// out of `list`, `info`, or `export -f json` pastes back into the descriptor
-/// it came from. A human form (`1h`, `15min`, `7d`) survives in
-/// [`legacy_suggestion`] as an error hint only.
+/// it came from.
 pub fn parse_period(s: &str) -> Result<Period, String> {
     let s = s.trim();
-    Period::from_iso8601(s).map_err(|_| match legacy_suggestion(s) {
-        Some(iso) => {
-            format!("invalid duration '{s}': durations are ISO-8601 — did you mean '{iso}'?")
-        }
-        None => format!("invalid duration '{s}' (use an ISO-8601 duration: {DURATION_EXAMPLES})"),
+    Period::from_iso8601(s).map_err(|_| {
+        format!("invalid duration '{s}' (use an ISO-8601 duration: {DURATION_EXAMPLES})")
     })
-}
-
-/// The ISO-8601 spelling of a duration written in the retired human form (`1h`,
-/// `15min`, `500ms`, `7d`, or a bare integer of milliseconds), for the error
-/// hint above. `None` when the input is not in that form either, in which case
-/// there is nothing specific to suggest.
-fn legacy_suggestion(s: &str) -> Option<String> {
-    let split = s
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(s.len());
-    let n: i64 = s[..split].trim().parse().ok()?;
-    let d = match s[split..].trim() {
-        "" | "ms" => Duration::milliseconds(n),
-        "s" => Duration::seconds(n),
-        "min" => Duration::minutes(n),
-        "h" => Duration::hours(n),
-        "d" => Duration::days(n),
-        _ => return None,
-    };
-    Some(Period::Fixed(d).to_iso8601())
-}
-
-/// `H = horizon / resolution` for periods, requiring an exact positive integer
-/// (and matching calendar/fixed kinds).
-pub fn period_horizon_steps(horizon: Period, resolution: Period) -> Result<usize, String> {
-    resolution.divide_into(&horizon).map_err(|e| e.to_string())
 }
 
 /// How the CLI reads a *zoneless* timestamp, from the global
@@ -159,6 +129,8 @@ pub fn parse_time_spec(s: &str) -> Result<TimeSpec, String> {
 /// swallowed second set is exactly the shape that turns them order-dependent
 /// with no visible cause.
 pub fn set_assumed_timezone(spec: Option<&str>, zoneless: bool) -> Result<(), String> {
+    // clap's `conflicts_with` misses the pair when the two global flags sit on
+    // opposite sides of the subcommand (`--zoneless add --assume-timezone UTC`).
     let resolved = match (spec, zoneless) {
         (Some(_), true) => {
             return Err(
@@ -316,16 +288,13 @@ fn parse_zoneless(s: &str) -> Option<NaiveDateTime> {
         .and_then(|d| d.and_hms_opt(0, 0, 0))
 }
 
-/// A half-open `START..END` time range, as `get`, `grid`, and `export` spell it.
-pub type TimeRange = infrastore_core::TimeRange;
-
 /// Parse a `START..END` time range, each end an RFC3339 timestamp or epoch-ms.
 ///
 /// The bounds carry their *spelling* through, not just their instant: the store
 /// refuses a wall-clock bound against a series that records instants, and an
 /// instant bound against a zoneless one, rather than coercing either. Both ends
 /// have to agree — a range is one request.
-pub fn parse_time_range(spec: Option<&str>) -> Result<Option<TimeRange>, String> {
+pub fn parse_time_range(spec: Option<&str>) -> Result<Option<infrastore_core::TimeRange>, String> {
     let Some(spec) = spec else {
         return Ok(None);
     };
@@ -340,7 +309,7 @@ pub fn parse_time_range(spec: Option<&str>) -> Result<Option<TimeRange>, String>
              instant and the other is a bare wall clock. Spell both the way the series is."
         ));
     }
-    Ok(Some(TimeRange::spelled(
+    Ok(Some(infrastore_core::TimeRange::spelled(
         start_instant,
         end_instant,
         start_reference.is_zoneless(),
@@ -494,6 +463,7 @@ pub fn parse_compression(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     /// Every offset spelling the doc comment promises must actually parse.
     ///
@@ -625,33 +595,12 @@ mod tests {
         }
     }
 
-    /// The human form is rejected, but with the ISO-8601 translation attached —
-    /// the whole point of keeping the retired grammar around as a hint.
     #[test]
-    fn the_retired_human_form_is_rejected_with_a_suggestion() {
-        for (human, iso) in [
-            ("1h", "PT1H"),
-            ("15min", "PT15M"),
-            ("500ms", "PT0.5S"),
-            ("7d", "P7D"),
-            // A bare integer reads as milliseconds, which the suggestion
-            // makes explicit rather than silent.
-            ("24", "PT0.024S"),
-        ] {
-            let err = parse_period(human).expect_err("human form is no longer accepted");
-            assert!(
-                err.contains(iso),
-                "error for '{human}' should suggest '{iso}': {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn unparseable_durations_error_without_a_suggestion() {
+    fn unparseable_durations_error() {
         let err = parse_period("abc").unwrap_err();
         assert!(err.contains("ISO-8601"), "{err}");
-        assert!(!err.contains("did you mean"), "{err}");
         assert!(parse_period("1w").is_err());
+        assert!(parse_period("1h").is_err());
         assert!(parse_period("").is_err());
     }
 

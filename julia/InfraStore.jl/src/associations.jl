@@ -147,27 +147,32 @@ end
 #
 # A row type supplies its family's filter keywords: the id columns as-is, the
 # type columns pluralized, because `component_type` filters on
-# `component_types`, a list of concrete type names.
+# `component_types`, a list of concrete type names. The typed keywords make an
+# unknown or mistyped filter an error at the call.
 
-function _filter_fields(::Type{T}) where {T}
-    return map(f -> endswith(String(f), "_id") ? f : Symbol(f, "s"), _identity_fields(T))
+function _assoc_filter(
+    ::Type{SupplementalAttributeAssociation};
+    component_id::Union{Nothing, Integer}=nothing,
+    component_types::Union{Nothing, AbstractVector}=nothing,
+    attribute_id::Union{Nothing, Integer}=nothing,
+    attribute_types::Union{Nothing, AbstractVector}=nothing,
+)
+    return _assoc_filter_json(
+        "component_id" => component_id, "component_types" => component_types,
+        "attribute_id" => attribute_id, "attribute_types" => attribute_types,
+    )
 end
 
-_is_id_field(f::Symbol) = endswith(String(f), "_id")
-
-function _assoc_filter_kwargs(::Type{T}) where {T}
-    return [
-        Expr(
-            :kw,
-            :($f::Union{Nothing, $(_is_id_field(f) ? :Integer : :AbstractVector)}),
-            :nothing,
-        ) for f in _filter_fields(T)
-    ]
-end
-
-function _assoc_filter_call(::Type{T}) where {T}
-    return Expr(
-        :call, :_assoc_filter_json, (:($(String(f)) => $f) for f in _filter_fields(T))...
+function _assoc_filter(
+    ::Type{ParentChildAssociation};
+    parent_id::Union{Nothing, Integer}=nothing,
+    parent_types::Union{Nothing, AbstractVector}=nothing,
+    child_id::Union{Nothing, Integer}=nothing,
+    child_types::Union{Nothing, AbstractVector}=nothing,
+)
+    return _assoc_filter_json(
+        "parent_id" => parent_id, "parent_types" => parent_types,
+        "child_id" => child_id, "child_types" => child_types,
     )
 end
 
@@ -317,8 +322,8 @@ for (T, api) in (
     else
         error("unknown association wrapper shape $shape")
     end
-    @eval function $fname(store::Store; $(_assoc_filter_kwargs(T)...))
-        filter_json = $(_assoc_filter_call(T))
+    @eval function $fname(store::Store; kwargs...)
+        filter_json = _assoc_filter($T; kwargs...)
         $body
     end
 end

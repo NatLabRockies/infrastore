@@ -169,8 +169,7 @@ pub fn arrays(
 
     match format {
         f if f.is_json() => output::print_items(f, &items)?,
-        Format::Csv => output::display_csv_rows(&headers, &table_rows)?,
-        _ => output::display_table_dyn(&headers, &table_rows),
+        f => output::print_rows(f, &headers, &table_rows)?,
     }
     Ok(())
 }
@@ -506,8 +505,7 @@ pub fn check_consistency(
                 .collect();
             output::print_items(f, &items)?;
         }
-        Format::Csv => output::display_csv_rows(&headers, &table_rows)?,
-        _ => output::display_table_dyn(&headers, &table_rows),
+        f => output::print_rows(f, &headers, &table_rows)?,
     }
     Ok(())
 }
@@ -537,11 +535,7 @@ pub fn resolutions(store_path: &Path, format: Format) -> Result<(), String> {
                     .iter()
                     .map(|p| vec!["interval".to_string(), p.to_iso8601()]),
             );
-            if format == Format::Csv {
-                output::display_csv_rows(&headers, &rows)?;
-            } else {
-                output::display_table_dyn(&headers, &rows);
-            }
+            output::print_rows(format, &headers, &rows)?;
         }
     }
     Ok(())
@@ -656,29 +650,29 @@ pub fn summary(
             for v in &static_items {
                 rows.push(vec![
                     "static".to_string(),
-                    json_str(v, "owner_type"),
-                    json_str(v, "time_series_type"),
-                    json_str(v, "name"),
-                    json_str(v, "resolution"),
-                    json_str(v, "time_step_count"),
+                    fields::value_cell(&v["owner_type"]),
+                    fields::value_cell(&v["time_series_type"]),
+                    fields::value_cell(&v["name"]),
+                    fields::value_cell(&v["resolution"]),
+                    fields::value_cell(&v["time_step_count"]),
                     "-".to_string(),
                     "-".to_string(),
                     "-".to_string(),
-                    json_str(v, "count"),
+                    fields::value_cell(&v["count"]),
                 ]);
             }
             for v in &forecast_items {
                 rows.push(vec![
                     "forecast".to_string(),
-                    json_str(v, "owner_type"),
-                    json_str(v, "time_series_type"),
-                    json_str(v, "name"),
-                    json_str(v, "resolution"),
+                    fields::value_cell(&v["owner_type"]),
+                    fields::value_cell(&v["time_series_type"]),
+                    fields::value_cell(&v["name"]),
+                    fields::value_cell(&v["resolution"]),
                     "-".to_string(),
-                    json_str(v, "horizon"),
-                    json_str(v, "interval"),
-                    json_str(v, "window_count"),
-                    json_str(v, "count"),
+                    fields::value_cell(&v["horizon"]),
+                    fields::value_cell(&v["interval"]),
+                    fields::value_cell(&v["window_count"]),
+                    fields::value_cell(&v["count"]),
                 ]);
             }
             output::display_csv_rows(&headers, &rows)?;
@@ -704,12 +698,12 @@ pub fn summary(
                     .iter()
                     .map(|v| {
                         vec![
-                            json_str(v, "owner_type"),
-                            json_str(v, "time_series_type"),
-                            json_str(v, "name"),
-                            json_str(v, "resolution"),
-                            json_str(v, "time_step_count"),
-                            json_str(v, "count"),
+                            fields::value_cell(&v["owner_type"]),
+                            fields::value_cell(&v["time_series_type"]),
+                            fields::value_cell(&v["name"]),
+                            fields::value_cell(&v["resolution"]),
+                            fields::value_cell(&v["time_step_count"]),
+                            fields::value_cell(&v["count"]),
                         ]
                     })
                     .collect();
@@ -734,14 +728,14 @@ pub fn summary(
                     .iter()
                     .map(|v| {
                         vec![
-                            json_str(v, "owner_type"),
-                            json_str(v, "time_series_type"),
-                            json_str(v, "name"),
-                            json_str(v, "resolution"),
-                            json_str(v, "horizon"),
-                            json_str(v, "interval"),
-                            json_str(v, "window_count"),
-                            json_str(v, "count"),
+                            fields::value_cell(&v["owner_type"]),
+                            fields::value_cell(&v["time_series_type"]),
+                            fields::value_cell(&v["name"]),
+                            fields::value_cell(&v["resolution"]),
+                            fields::value_cell(&v["horizon"]),
+                            fields::value_cell(&v["interval"]),
+                            fields::value_cell(&v["window_count"]),
+                            fields::value_cell(&v["count"]),
                         ]
                     })
                     .collect();
@@ -750,12 +744,4 @@ pub fn summary(
         }
     }
     Ok(())
-}
-
-fn json_str(v: &Value, key: &str) -> String {
-    match v.get(key) {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Null) | None => "-".to_string(),
-        Some(other) => other.to_string(),
-    }
 }

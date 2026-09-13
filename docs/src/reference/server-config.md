@@ -15,7 +15,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./store.h5"]
+file = "./store.h5"
 
 [authentication]
 # "none" or "api_key". For api_key, populate `keys`; clients must send the
@@ -35,12 +35,11 @@ method = "none"
 
 ### `[data]`
 
-| Key     | Type            | Required | Description                        |
-| ------- | --------------- | -------- | ---------------------------------- |
-| `files` | array of string | yes      | HDF5 file paths to serve read-only |
+| Key    | Type   | Required | Description                       |
+| ------ | ------ | -------- | --------------------------------- |
+| `file` | string | yes      | HDF5 file path to serve read-only |
 
-v0 serves a **single** file (the first entry). Multiple entries are reserved for a later milestone.
-The matching `<path>.sqlite` catalog must sit beside each HDF5 file. The server opens the store
+The matching `<path>.sqlite` catalog must sit beside the HDF5 file. The server opens the store
 read-only.
 
 ### `[authentication]`
@@ -58,11 +57,9 @@ first request:
 - `method = "api_key"` with an empty `keys` list is rejected.
 - An unknown `method` value is rejected.
 
-That validation covers the values, not the key names. `ServerConfig` does not reject unknown fields,
-so a **misspelled TOML key is silently ignored** and the default (or a missing-field parse error,
-for a required key) applies instead. A server that starts with `[authenticaton]` (sic) is running
-with `method = "none"` — check the startup logs and confirm the effective settings rather than
-assuming a typo would have been caught.
+- An unknown key or section is rejected, in every section. A misspelled `[authenticaton]` (sic)
+  fails the parse instead of silently falling back to `method = "none"`. The cost is that a config
+  carrying a key from a newer version is refused rather than partly honored.
 
 When `method = "api_key"`, each request must carry a matching value in the `x-api-key` metadata
 header. Keys are compared without early-exit — every configured key of the same length as the
@@ -76,7 +73,7 @@ On launch the server:
 
 1. Loads and parses the TOML file.
 2. Validates the `[authentication]` section.
-3. Opens the first `[data].files` entry as a read-only store (errors if the list is empty).
+3. Opens `[data].file` as a read-only store.
 4. Binds `host:port` and serves the `CatalogStore` gRPC service.
 
 Logging honors the `RUST_LOG` environment variable (default `info`):

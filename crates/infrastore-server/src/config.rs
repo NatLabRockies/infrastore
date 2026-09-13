@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// The server's TOML configuration.
 ///
@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 /// `method` on its `"none"` default, passed `validate()`, and served the whole
 /// read surface to anyone — with a single `tracing` line as the only clue. Every
 /// other mistake in this file already fails loudly (`api_key` with no keys, an
-/// unknown method, an empty `files` list), so this closes the one path that
+/// unknown method, a missing `file`), so this closes the one path that
 /// failed open. The cost is that a config written for a newer version, carrying
 /// a key this binary does not know, is refused rather than partly honored;
 /// for a file that decides whether authentication happens, that is the safer
 /// direction to fail in.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub server: ServerSection,
@@ -25,7 +25,7 @@ pub struct ServerConfig {
     pub authentication: AuthSection,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerSection {
     pub host: String,
@@ -47,15 +47,15 @@ fn default_max_read_ids() -> usize {
     crate::service::DEFAULT_MAX_READ_IDS
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataSection {
-    /// Paths to HDF5 files served read-only by this server. v0 supports a
-    /// single file (the first entry); multi-file is reserved for a follow-up.
-    pub files: Vec<PathBuf>,
+    /// Path to the HDF5 file served read-only by this server (its `.sqlite`
+    /// catalog must sit beside it).
+    pub file: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSection {
     /// "none" | "api_key". `oauth` is reserved for a later milestone.
@@ -108,18 +108,9 @@ impl AuthSection {
 }
 
 impl ServerConfig {
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let s = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
-        toml::from_str(&s).map_err(ConfigError::Parse)
+    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("parse error: {0}")]
-    Parse(#[from] toml::de::Error),
 }
 
 #[cfg(test)]
@@ -132,7 +123,7 @@ host = "127.0.0.1"
 port = 50051
 
 [data]
-files = ["store.h5"]
+file = "store.h5"
 "#;
 
     #[test]
@@ -171,7 +162,7 @@ files = ["store.h5"]
         // Unknown keys in the other sections are refused the same way.
         for bad in [
             "[server]\nhost = \"::1\"\nport = 1\nprot = 2",
-            "[data]\nfiles = []\nfile = \"x\"",
+            "[data]\nfile = \"x\"\nfiles = []",
         ] {
             assert!(toml::from_str::<ServerConfig>(bad).is_err(), "{bad}");
         }
@@ -187,7 +178,7 @@ files = ["store.h5"]
         );
 
         let raised: ServerConfig = toml::from_str(
-            "[server]\nhost = \"127.0.0.1\"\nport = 1\nmax_read_ids = 99\n\n[data]\nfiles = [\"s.h5\"]\n",
+            "[server]\nhost = \"127.0.0.1\"\nport = 1\nmax_read_ids = 99\n\n[data]\nfile = \"s.h5\"\n",
         )
         .unwrap();
         assert_eq!(raised.server.max_read_ids, 99);

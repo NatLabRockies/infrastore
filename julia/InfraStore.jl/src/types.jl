@@ -147,62 +147,113 @@ end
 _maybe_string(::Nothing) = nothing
 _maybe_string(s::AbstractString) = String(s)
 
+# ---- Series descriptors ----------------------------------------------------
+#
+# Every series type ends with the same seven descriptor fields, after `data` and
+# `name`, and every constructor takes them as the same keywords. Each is spelled
+# once here as (field, stored type, keyword type, default, conversion, doc) and
+# spliced into the structs and constructors below. `time_reference` has no
+# conversion in the table: a grid infers it from its `initial` and a vector from
+# its timestamps, so each constructor supplies that expression itself.
+const _DESCRIPTORS = (
+    (
+        :application_data, Union{Nothing, String}, Union{Nothing, AbstractString},
+        nothing, :(_maybe_string(application_data)),
+        "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it.",
+    ),
+    (
+        :element_type, Union{Nothing, String}, Union{Nothing, AbstractString},
+        nothing, :(_declared_element_type(element_type, data)),
+        "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`.",
+    ),
+    (
+        :units, Union{Nothing, String}, Union{Nothing, AbstractString},
+        nothing, :(_maybe_string(units)),
+        "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity.",
+    ),
+    (
+        :quantity_kind, Union{Nothing, String}, Union{Nothing, AbstractString},
+        nothing, :(_maybe_string(quantity_kind)),
+        "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure.",
+    ),
+    (
+        :unit_system, Union{Nothing, UnitSystem},
+        Union{Nothing, UnitSystem, AbstractString},
+        nothing, :(_unit_system(unit_system)),
+        "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`.",
+    ),
+    (
+        :component_field, Union{Nothing, String}, Union{Nothing, AbstractString},
+        nothing, :(_maybe_string(component_field)),
+        "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity.",
+    ),
+    (
+        :time_reference, Union{Nothing, TimeReference}, TimeReferenceArg,
+        INFERRED, nothing,
+        "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash.",
+    ),
+)
+
+# Struct body: each documented descriptor field.
+const _DESCRIPTOR_FIELDS = collect(
+    Iterators.flatten((doc, :($f::$T)) for (f, T, _, _, _, doc) in _DESCRIPTORS)
+)
+# Constructor keywords, with their types and defaults.
+const _DESCRIPTOR_KWARGS = [Expr(:kw, :($f::$K), d) for (f, _, K, d, _, _) in _DESCRIPTORS]
+# `name=name` for forwarding every descriptor keyword to another constructor.
+const _DESCRIPTOR_FORWARD = [Expr(:kw, f, f) for (f, _, _, _, _, _) in _DESCRIPTORS]
+# The stored descriptor values, in field order, given the `time_reference` one.
+function _descriptor_args(time_reference)
+    return [c === nothing ? time_reference : c for (_, _, _, _, c, _) in _DESCRIPTORS]
+end
+
 # ---- Single time series ---------------------------------------------------
 
-struct SingleTimeSeries{T, N}
+@eval struct SingleTimeSeries{T, N}
     initial_timestamp::DateTime
     resolution::Period
     "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time)."
     data::Array{T, N}
     "Association name (required; the same array may be stored under different names)."
     name::String
-    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    application_data::Union{Nothing, String}
-    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
-    element_type::Union{Nothing, String}
-    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
-    units::Union{Nothing, String}
-    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
-    quantity_kind::Union{Nothing, String}
-    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
-    unit_system::Union{Nothing, UnitSystem}
-    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
-    component_field::Union{Nothing, String}
-    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
-    time_reference::Union{Nothing, TimeReference}
+    $(_DESCRIPTOR_FIELDS...)
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
 # `Array` (copy-free when already one).
-function SingleTimeSeries(
-    initial,
-    resolution,
-    data::AbstractArray,
-    name::AbstractString;
-    application_data::Union{Nothing, AbstractString}=nothing,
-    element_type::Union{Nothing, AbstractString}=nothing,
-    units::Union{Nothing, AbstractString}=nothing,
-    quantity_kind::Union{Nothing, AbstractString}=nothing,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    time_reference::TimeReferenceArg=INFERRED,
+@eval function SingleTimeSeries(
+    initial, resolution, data::AbstractArray, name::AbstractString;
+    $(_DESCRIPTOR_KWARGS...),
 )
     return SingleTimeSeries{eltype(data), ndims(data)}(
         _utc_datetime(initial),
         resolution,
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(application_data),
-        _declared_element_type(element_type, data),
-        _maybe_string(units),
-        _maybe_string(quantity_kind),
-        _unit_system(unit_system),
-        _maybe_string(component_field),
-        _resolved_time_reference(time_reference, initial),
+        $(_descriptor_args(:(_resolved_time_reference(time_reference, initial)))...),
     )
 end
 
-"""
+@eval function SingleTimeSeries(
+    timestamps::AbstractVector, data::AbstractArray, name::AbstractString;
+    $(_DESCRIPTOR_KWARGS...),
+)
+    steps = size(data, 1)
+    if length(timestamps) != steps
+        throw(
+            InvalidParameterError(
+                "SingleTimeSeries: $(length(timestamps)) timestamps for $steps value(s); " *
+                "the vector must have one entry per time step",
+            ),
+        )
+    end
+    resolution = infer_resolution(timestamps)
+    return SingleTimeSeries(
+        first(timestamps), resolution, data, name; $(_DESCRIPTOR_FORWARD...)
+    )
+end
+
+@doc """
     SingleTimeSeries(timestamps::AbstractVector, data, name; kwargs...)
 
 Build from the timeline you actually hold, inferring the resolution and
@@ -231,35 +282,7 @@ SingleTimeSeries(hours, values, "load")     # compacts to PT1H
 days = [ZonedDateTime(DateTime(2024, 11, d), tz"America/Denver") for d in 1:5]
 SingleTimeSeries(days, values, "peak")      # refused: use NonSequentialTimeSeries
 ```
-"""
-function SingleTimeSeries(
-    timestamps::AbstractVector,
-    data::AbstractArray,
-    name::AbstractString;
-    application_data::Union{Nothing, AbstractString}=nothing,
-    element_type::Union{Nothing, AbstractString}=nothing,
-    units::Union{Nothing, AbstractString}=nothing,
-    quantity_kind::Union{Nothing, AbstractString}=nothing,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    time_reference::TimeReferenceArg=INFERRED,
-)
-    steps = size(data, 1)
-    if length(timestamps) != steps
-        throw(
-            InvalidParameterError(
-                "SingleTimeSeries: $(length(timestamps)) timestamps for $steps value(s); " *
-                "the vector must have one entry per time step",
-            ),
-        )
-    end
-    resolution = infer_resolution(timestamps)
-    return SingleTimeSeries(
-        first(timestamps), resolution, data, name;
-        application_data, element_type, units, quantity_kind, unit_system,
-        component_field, time_reference,
-    )
-end
+""" SingleTimeSeries(::AbstractVector, ::AbstractArray, ::AbstractString)
 
 """
     infer_resolution(timestamps) -> Period
@@ -288,143 +311,69 @@ function infer_resolution(timestamps::AbstractVector)
     end
 end
 
-# ---- Non-sequential time series -------------------------------------------
-
-struct NonSequentialTimeSeries{T, N}
-    timestamps::Vector{DateTime}
-    "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time, one entry per timestamp)."
-    data::Array{T, N}
-    "Association name (required)."
-    name::String
-    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    application_data::Union{Nothing, String}
-    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
-    element_type::Union{Nothing, String}
-    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
-    units::Union{Nothing, String}
-    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
-    quantity_kind::Union{Nothing, String}
-    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
-    unit_system::Union{Nothing, UnitSystem}
-    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
-    component_field::Union{Nothing, String}
-    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
-    time_reference::Union{Nothing, TimeReference}
-end
-
-# Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
-# `Array`. Timestamps are explicit and must be strictly increasing, with one entry
-# per leading-dimension row (`size(data, 1)`).
-function NonSequentialTimeSeries(
-    timestamps,
-    data::AbstractArray,
-    name::AbstractString;
-    application_data::Union{Nothing, AbstractString}=nothing,
-    element_type::Union{Nothing, AbstractString}=nothing,
-    units::Union{Nothing, AbstractString}=nothing,
-    quantity_kind::Union{Nothing, AbstractString}=nothing,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    time_reference::TimeReferenceArg=INFERRED,
-)
-    length(timestamps) == size(data, 1) ||
-        throw(InvalidParameterError("timestamp count must match data length"))
-    # The spelling is read off the vector before it is normalized -- afterwards
-    # every element is a bare `DateTime` and the intent is gone.
-    reference = _vector_time_reference(timestamps)
-    # Normalize first, then check: a vector mixing zones (or `ZonedDateTime`s
-    # from different ones) is ordered by the instants it names, not by the wall
-    # clocks it reads.
-    timestamps = DateTime[_utc_datetime(t) for t in timestamps]
-    all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
-        throw(InvalidParameterError("timestamps must be strictly increasing"))
-    arr = data isa Array ? data : Array(data)
-    return NonSequentialTimeSeries{eltype(arr), ndims(arr)}(
-        timestamps,
-        arr,
-        String(name),
-        _maybe_string(application_data),
-        _declared_element_type(element_type, data),
-        _maybe_string(units),
-        _maybe_string(quantity_kind),
-        _unit_system(unit_system),
-        _maybe_string(component_field),
-        time_reference isa _Inferred ? reference : _time_reference(time_reference),
-    )
-end
-
-# ---- Persistent time series -----------------------------------------------
+# ---- Non-sequential and persistent time series ----------------------------
 #
-# A sparse step function: breakpoints plus one value each, holding the last
-# value forward. Structurally identical to `NonSequentialTimeSeries` above --
-# same fields, same constructor, same spelling inference -- and stored
-# identically. What differs is the read: the value at breakpoint `i` stays in
-# force until breakpoint `i + 1`, and past the last one forever, where a
-# `NonSequentialTimeSeries` has no value between its timestamps at all. There is
-# no value before the first breakpoint, and asking for one is an error rather
-# than a clamp.
-
-struct PersistentTimeSeries{T, N}
-    timestamps::Vector{DateTime}
-    "Values: a 1-D vector (one per breakpoint) or N-D array (dim 1 = time, one entry per breakpoint)."
-    data::Array{T, N}
-    "Association name (required)."
-    name::String
-    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    application_data::Union{Nothing, String}
-    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
-    element_type::Union{Nothing, String}
-    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
-    units::Union{Nothing, String}
-    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
-    quantity_kind::Union{Nothing, String}
-    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
-    unit_system::Union{Nothing, UnitSystem}
-    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
-    component_field::Union{Nothing, String}
-    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
-    time_reference::Union{Nothing, TimeReference}
-end
-
+# A `PersistentTimeSeries` is a sparse step function: breakpoints plus one value
+# each, holding the last value forward. Structurally identical to
+# `NonSequentialTimeSeries` -- same fields, same constructor, same spelling
+# inference -- and stored identically. What differs is the read: the value at
+# breakpoint `i` stays in force until breakpoint `i + 1`, and past the last one
+# forever, where a `NonSequentialTimeSeries` has no value between its timestamps
+# at all. There is no value before the first breakpoint, and asking for one is
+# an error rather than a clamp.
+#
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
-# `Array`. Breakpoints are explicit and must be strictly increasing, with one
-# entry per leading-dimension row (`size(data, 1)`).
-function PersistentTimeSeries(
-    timestamps,
-    data::AbstractArray,
-    name::AbstractString;
-    application_data::Union{Nothing, AbstractString}=nothing,
-    element_type::Union{Nothing, AbstractString}=nothing,
-    units::Union{Nothing, AbstractString}=nothing,
-    quantity_kind::Union{Nothing, AbstractString}=nothing,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    time_reference::TimeReferenceArg=INFERRED,
+# `Array`. Timestamps (breakpoints) are explicit and must be strictly increasing,
+# with one entry per leading-dimension row (`size(data, 1)`).
+for (S, entry, data_doc, name_doc) in (
+    (:NonSequentialTimeSeries, "timestamp",
+        "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time, one entry per timestamp).",
+        "Association name (required)."),
+    (:PersistentTimeSeries, "breakpoint",
+        "Values: a 1-D vector (one per breakpoint) or N-D array (dim 1 = time, one entry per breakpoint).",
+        "Association name (required)."),
 )
-    length(timestamps) == size(data, 1) ||
-        throw(InvalidParameterError("breakpoint count must match data length"))
-    # The spelling is read off the vector before it is normalized -- afterwards
-    # every element is a bare `DateTime` and the intent is gone.
-    reference = _vector_time_reference(timestamps)
-    # Normalize first, then check: a vector mixing zones (or `ZonedDateTime`s
-    # from different ones) is ordered by the instants it names, not by the wall
-    # clocks it reads.
-    timestamps = DateTime[_utc_datetime(t) for t in timestamps]
-    all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
-        throw(InvalidParameterError("breakpoints must be strictly increasing"))
-    arr = data isa Array ? data : Array(data)
-    return PersistentTimeSeries{eltype(arr), ndims(arr)}(
-        timestamps,
-        arr,
-        String(name),
-        _maybe_string(application_data),
-        _declared_element_type(element_type, data),
-        _maybe_string(units),
-        _maybe_string(quantity_kind),
-        _unit_system(unit_system),
-        _maybe_string(component_field),
-        time_reference isa _Inferred ? reference : _time_reference(time_reference),
+    @eval struct $S{T, N}
+        timestamps::Vector{DateTime}
+        $data_doc
+        data::Array{T, N}
+        $name_doc
+        name::String
+        $(_DESCRIPTOR_FIELDS...)
+    end
+
+    @eval function $S(
+        timestamps, data::AbstractArray, name::AbstractString; $(_DESCRIPTOR_KWARGS...)
     )
+        length(timestamps) == size(data, 1) ||
+            throw(InvalidParameterError($("$entry count must match data length")))
+        # The spelling is read off the vector before it is normalized -- afterwards
+        # every element is a bare `DateTime` and the intent is gone.
+        reference = _vector_time_reference(timestamps)
+        # Normalize first, then check: a vector mixing zones (or `ZonedDateTime`s
+        # from different ones) is ordered by the instants it names, not by the wall
+        # clocks it reads.
+        timestamps = DateTime[_utc_datetime(t) for t in timestamps]
+        all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
+            throw(InvalidParameterError($("$(entry)s must be strictly increasing")))
+        arr = data isa Array ? data : Array(data)
+        return $S{eltype(arr), ndims(arr)}(
+            timestamps,
+            arr,
+            String(name),
+            $(
+                _descriptor_args(
+                    :(
+                        if time_reference isa _Inferred
+                            reference
+                        else
+                            _time_reference(time_reference)
+                        end
+                    ),
+                )...
+            ),
+        )
+    end
 end
 
 # ---- Forecast types -------------------------------------------------------
@@ -436,191 +385,51 @@ end
 # `SingleTimeSeries` via `transform_single_time_series!` and read back as a
 # `Deterministic` (see the type below). Requesting `Deterministic` matches it
 # too, so which of the two a store holds stays an internal detail.
-
-struct Deterministic{T, N}
-    initial_timestamp::DateTime
-    resolution::Period
-    horizon::Period
-    interval::Period
-    count::Int
-    "Values with canonical shape `(H, count, element_dims...)`."
-    data::Array{T, N}
-    "Association name (required)."
-    name::String
-    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    application_data::Union{Nothing, String}
-    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
-    element_type::Union{Nothing, String}
-    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
-    units::Union{Nothing, String}
-    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
-    quantity_kind::Union{Nothing, String}
-    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
-    unit_system::Union{Nothing, UnitSystem}
-    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
-    component_field::Union{Nothing, String}
-    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
-    time_reference::Union{Nothing, TimeReference}
-end
-
-function Deterministic(
-    initial,
-    resolution,
-    horizon,
-    interval,
-    count,
-    data::AbstractArray,
-    name::AbstractString;
-    application_data::Union{Nothing, AbstractString}=nothing,
-    element_type::Union{Nothing, AbstractString}=nothing,
-    units::Union{Nothing, AbstractString}=nothing,
-    quantity_kind::Union{Nothing, AbstractString}=nothing,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    time_reference::TimeReferenceArg=INFERRED,
+#
+# Each shares the grid fields and differs only in its extra leading field
+# (`percentiles` for `Probabilistic`, `scenario_count` for `Scenarios`), taken
+# as a constructor argument for `Probabilistic` and off the leading axis of
+# `data` for `Scenarios`.
+for (S, extra_fields, extra_args, extra_values, data_doc) in (
+    (:Deterministic, (), (), (),
+        "Values with canonical shape `(H, count, element_dims...)`."),
+    (:Probabilistic, (:(percentiles::Vector{Float64}),), (:percentiles,),
+        (:(Vector{Float64}(percentiles)),),
+        "Values with canonical shape `(num_percentiles, H, count, element_dims...)`."),
+    (:Scenarios, (:(scenario_count::Int),), (), (:(size(data, 1)),),
+        "Values with canonical shape `(scenario_count, H, count, element_dims...)`."),
 )
-    return Deterministic{eltype(data), ndims(data)}(
-        _utc_datetime(initial),
-        resolution,
-        horizon,
-        interval,
-        Int(count),
-        data isa Array ? data : Array(data),
-        String(name),
-        _maybe_string(application_data),
-        _declared_element_type(element_type, data),
-        _maybe_string(units),
-        _maybe_string(quantity_kind),
-        _unit_system(unit_system),
-        _maybe_string(component_field),
-        _resolved_time_reference(time_reference, initial),
+    @eval struct $S{T, N}
+        initial_timestamp::DateTime
+        resolution::Period
+        horizon::Period
+        interval::Period
+        count::Int
+        $(extra_fields...)
+        $data_doc
+        data::Array{T, N}
+        "Association name (required)."
+        name::String
+        $(_DESCRIPTOR_FIELDS...)
+    end
+
+    @eval function $S(
+        initial, resolution, horizon, interval, count, $(extra_args...),
+        data::AbstractArray, name::AbstractString;
+        $(_DESCRIPTOR_KWARGS...),
     )
-end
-
-struct Probabilistic{T, N}
-    initial_timestamp::DateTime
-    resolution::Period
-    horizon::Period
-    interval::Period
-    count::Int
-    percentiles::Vector{Float64}
-    "Values with canonical shape `(num_percentiles, H, count, element_dims...)`."
-    data::Array{T, N}
-    "Association name (required)."
-    name::String
-    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    application_data::Union{Nothing, String}
-    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
-    element_type::Union{Nothing, String}
-    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
-    units::Union{Nothing, String}
-    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
-    quantity_kind::Union{Nothing, String}
-    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
-    unit_system::Union{Nothing, UnitSystem}
-    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
-    component_field::Union{Nothing, String}
-    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
-    time_reference::Union{Nothing, TimeReference}
-end
-
-function Probabilistic(
-    initial,
-    resolution,
-    horizon,
-    interval,
-    count,
-    percentiles,
-    data::AbstractArray,
-    name::AbstractString;
-    application_data::Union{Nothing, AbstractString}=nothing,
-    element_type::Union{Nothing, AbstractString}=nothing,
-    units::Union{Nothing, AbstractString}=nothing,
-    quantity_kind::Union{Nothing, AbstractString}=nothing,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    time_reference::TimeReferenceArg=INFERRED,
-)
-    return Probabilistic{eltype(data), ndims(data)}(
-        _utc_datetime(initial),
-        resolution,
-        horizon,
-        interval,
-        Int(count),
-        Vector{Float64}(percentiles),
-        data isa Array ? data : Array(data),
-        String(name),
-        _maybe_string(application_data),
-        _declared_element_type(element_type, data),
-        _maybe_string(units),
-        _maybe_string(quantity_kind),
-        _unit_system(unit_system),
-        _maybe_string(component_field),
-        _resolved_time_reference(time_reference, initial),
-    )
-end
-
-struct Scenarios{T, N}
-    initial_timestamp::DateTime
-    resolution::Period
-    horizon::Period
-    interval::Period
-    count::Int
-    scenario_count::Int
-    "Values with canonical shape `(scenario_count, H, count, element_dims...)`."
-    data::Array{T, N}
-    "Association name (required)."
-    name::String
-    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    application_data::Union{Nothing, String}
-    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
-    element_type::Union{Nothing, String}
-    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
-    units::Union{Nothing, String}
-    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
-    quantity_kind::Union{Nothing, String}
-    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
-    unit_system::Union{Nothing, UnitSystem}
-    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
-    component_field::Union{Nothing, String}
-    "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash."
-    time_reference::Union{Nothing, TimeReference}
-end
-
-# `scenario_count` defaults to the leading axis of `data`.
-function Scenarios(
-    initial,
-    resolution,
-    horizon,
-    interval,
-    count,
-    data::AbstractArray,
-    name::AbstractString;
-    application_data::Union{Nothing, AbstractString}=nothing,
-    element_type::Union{Nothing, AbstractString}=nothing,
-    units::Union{Nothing, AbstractString}=nothing,
-    quantity_kind::Union{Nothing, AbstractString}=nothing,
-    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
-    component_field::Union{Nothing, AbstractString}=nothing,
-    time_reference::TimeReferenceArg=INFERRED,
-)
-    return Scenarios{eltype(data), ndims(data)}(
-        _utc_datetime(initial),
-        resolution,
-        horizon,
-        interval,
-        Int(count),
-        size(data, 1),
-        data isa Array ? data : Array(data),
-        String(name),
-        _maybe_string(application_data),
-        _declared_element_type(element_type, data),
-        _maybe_string(units),
-        _maybe_string(quantity_kind),
-        _unit_system(unit_system),
-        _maybe_string(component_field),
-        _resolved_time_reference(time_reference, initial),
-    )
+        return $S{eltype(data), ndims(data)}(
+            _utc_datetime(initial),
+            resolution,
+            horizon,
+            interval,
+            Int(count),
+            $(extra_values...),
+            data isa Array ? data : Array(data),
+            String(name),
+            $(_descriptor_args(:(_resolved_time_reference(time_reference, initial)))...),
+        )
+    end
 end
 
 """
@@ -648,11 +457,3 @@ Write the bare `DeterministicSingleTimeSeries` when naming it as a request or a
 filter; parameters are ignored there.
 """
 abstract type DeterministicSingleTimeSeries{T, N} end
-
-# Every type accepted as a *requested* forecast type. Internal: it exists for
-# method bounds only, is not exported, and is not part of the public surface —
-# callers name a concrete type, and `Deterministic` already spans both
-# deterministic storage forms (see `_forecast_result_type`).
-const _ForecastRequest = Union{
-    Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios
-}

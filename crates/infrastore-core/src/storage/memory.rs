@@ -5,10 +5,9 @@ use std::ops::Range;
 use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TimeSeriesError};
-use crate::hash::array_hash;
 use crate::types::array::{Dtype, TypedArray};
 
-use super::{ArrayLayout, CompactionReport, IntegrityReport, PackGroup, StorageBackend};
+use super::{ArrayLayout, CompactionReport, PackGroup, StorageBackend};
 
 /// Pure in-memory storage backend.
 ///
@@ -116,39 +115,6 @@ impl StorageBackend for MemoryBackend {
             // Nothing on disk to shrink.
             bytes_reclaimed: 0,
         })
-    }
-
-    fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport> {
-        let mut errors = Vec::new();
-        for (hash, dtype) in arrays {
-            let data = match self.get_array(hash, *dtype) {
-                Ok(data) => data,
-                Err(TimeSeriesError::NotFound) => {
-                    errors.push(format!(
-                        "dangling reference: the catalog references array {} but the array \
-                         store does not hold it",
-                        crate::hash::hash_hex(hash),
-                    ));
-                    continue;
-                }
-                Err(e) => {
-                    errors.push(format!(
-                        "read error for array {}: {e}",
-                        crate::hash::hash_hex(hash)
-                    ));
-                    continue;
-                }
-            };
-            let recomputed = array_hash(&data);
-            if &recomputed != hash {
-                errors.push(format!(
-                    "hash mismatch: stored={} computed={}",
-                    crate::hash::hash_hex(hash),
-                    crate::hash::hash_hex(&recomputed),
-                ));
-            }
-        }
-        Ok(IntegrityReport { errors })
     }
 
     fn flush(&mut self) -> Result<()> {
