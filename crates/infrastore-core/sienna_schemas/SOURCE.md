@@ -7,12 +7,13 @@ network access (`deny.toml` denies unknown sources and CI provisions nothing on 
 this is a maintainer-run sync rather than a live fetch, mirroring the `conformance/` +
 `julia/generate_artifacts.jl` precedent.
 
-- **Source repo**: upstream is `Sienna-Platform/SiennaSchemas`. The sync script vendors whatever
-  local checkout is passed to it.
-- **Source commit**: `6786680f1080a8d11edb159c2bdaa7efb5a34b2a`
-- **Sync note**: the vendored copy may include un-merged upstream changes from the local checkout
-  used.
-- **Synced**: 2026-09-04T19:53:45Z
+- **Source repo**: `Sienna-Platform/SiennaSchemas`
+- **Release**: `v0.1.0` (named by `.schema-version` at the repository root)
+- **Release commit**: `9f589ad266f55e91c946378cd6a4c88ba3554119`
+- **Sync note**: the content is `git archive` of the release tag, never a working tree, so it is the
+  published release and nothing else. To move to a newer release, change `.schema-version` and
+  re-run the sync.
+- **Synced**: 2026-09-13T01:05:31Z
 
 ## Refreshing
 

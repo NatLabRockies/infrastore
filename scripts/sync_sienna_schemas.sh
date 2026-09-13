@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
-# Refreshes crates/infrastore-core/sienna_schemas/ from a local SiennaSchemas checkout.
+# Refreshes crates/infrastore-core/sienna_schemas/ from a SiennaSchemas *release*.
+#
+# The release vendored is whatever `.schema-version` at the repository root names.
+# The content comes from `git archive` of that tag rather than from the checkout's
+# working tree: the tree is whichever branch a maintainer happened to be on, which
+# is how un-merged upstream changes reached this repository before. Vendoring the
+# tag means the copy here always corresponds to a published release, and
+# `.schema-version` says which one.
+#
 # Maintainer-run only: never wired into build.rs or CI (this repo's policy is
 # no network/build-time fetching; see crates/infrastore-core/sienna_schemas/SOURCE.md).
+# The script itself needs no network either -- it reads a tag out of a local
+# checkout. Fetch tags there first if the release is newer than the clone:
+#
+#   git -C ../SiennaSchemas fetch --tags
 #
 # Usage: scripts/sync_sienna_schemas.sh [path-to-SiennaSchemas-checkout]
 #   Default source path: ../SiennaSchemas (sibling of this repo checkout)
@@ -18,6 +30,38 @@ if [ ! -d "$SRC_ARG" ]; then
   exit 1
 fi
 SRC="$(cd "$SRC_ARG" && pwd)"
+
+VERSION_FILE="$REPO_ROOT/.schema-version"
+if [ ! -f "$VERSION_FILE" ]; then
+  echo "error: $VERSION_FILE is missing; it names the SiennaSchemas release to vendor" >&2
+  exit 1
+fi
+VERSION="$(tr -d '[:space:]' <"$VERSION_FILE")"
+if [ -z "$VERSION" ]; then
+  echo "error: $VERSION_FILE is empty; it must name a SiennaSchemas release tag" >&2
+  exit 1
+fi
+
+if ! git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "error: $SRC is not a git checkout; this script vendors a release tag from one" >&2
+  exit 1
+fi
+
+# Refuse rather than silently vendor a tree that is not the release. A missing tag
+# is usually a clone predating it, so say which command fixes that.
+if ! git -C "$SRC" rev-parse -q --verify "refs/tags/$VERSION^{commit}" >/dev/null; then
+  echo "error: tag $VERSION not found in $SRC" >&2
+  echo "       run: git -C $SRC fetch --tags" >&2
+  exit 1
+fi
+SOURCE_REF="$(git -C "$SRC" rev-parse "refs/tags/$VERSION^{commit}")"
+
+# Everything below reads from the tag's tree, never the working tree.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+git -C "$SRC" archive "refs/tags/$VERSION" | tar -x -C "$STAGE"
+SRC_REPO="$SRC"
+SRC="$STAGE"
 
 # Exact file set (relative to $SRC), preserving directory structure so the
 # $refs among them keep resolving:
@@ -89,10 +133,6 @@ with open(dest_path, "w") as f:
     f.write(json.dumps(trimmed, indent=2, ensure_ascii=False) + "\n")
 PYEOF
 
-cd "$SRC"
-SOURCE_REF="$(git rev-parse HEAD)"
-cd - >/dev/null
-
 SOURCE_MD="$DEST/SOURCE.md"
 {
   echo "# Vendored SiennaSchemas wire-format specs"
@@ -105,11 +145,12 @@ SOURCE_MD="$DEST/SOURCE.md"
   echo "provisions nothing on any platform), so this is a maintainer-run sync rather than a"
   echo "live fetch, mirroring the \`conformance/\` + \`julia/generate_artifacts.jl\` precedent."
   echo
-  echo "- **Source repo**: upstream is \`Sienna-Platform/SiennaSchemas\`. The sync script"
-  echo "  vendors whatever local checkout is passed to it."
-  echo "- **Source commit**: \`$SOURCE_REF\`"
-  echo "- **Sync note**: the vendored copy may include un-merged upstream changes from the"
-  echo "  local checkout used."
+  echo "- **Source repo**: \`Sienna-Platform/SiennaSchemas\`"
+  echo "- **Release**: \`$VERSION\` (named by \`.schema-version\` at the repository root)"
+  echo "- **Release commit**: \`$SOURCE_REF\`"
+  echo "- **Sync note**: the content is \`git archive\` of the release tag, never a working"
+  echo "  tree, so it is the published release and nothing else. To move to a newer"
+  echo "  release, change \`.schema-version\` and re-run the sync."
   echo "- **Synced**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo
   echo "## Refreshing"
@@ -131,4 +172,4 @@ else
   echo "note: dprint not found on PATH; run 'dprint fmt $SOURCE_MD' before committing" >&2
 fi
 
-echo "synced $DEST from $SRC @ $SOURCE_REF"
+echo "synced $DEST from $SRC_REPO @ $VERSION ($SOURCE_REF)"

@@ -31,7 +31,7 @@
 //!
 //! Three fields reached the schema after the rest (`timestamps_uri`, below, is
 //! the third) — see `crates/infrastore-core/sienna_schemas/SOURCE.md` for the
-//! upstream commit the vendored copy carries: `time_reference`,
+//! release the vendored copy carries: `time_reference`,
 //! the catalog spelling of [`TimeReference`] (`"utc"`, `"zoneless"`, an offset,
 //! or a zone name), and `array_shape`, the stored array's full native shape —
 //! `[length, *element_shape]` in the catalog's own terms, where the schema's
