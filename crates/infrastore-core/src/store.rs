@@ -2460,10 +2460,11 @@ impl Store {
         // a committed row must never name something the file does not hold.
         // Held by the transaction when one is open, so a run of adds interns each
         // shared set once for the span rather than once per call. Taken out for
-        // the duration: every `?` below therefore drops it, which is exactly
-        // right, because an add that fails has had its savepoint rolled back and
-        // `settle` has removed the arrays it staged — so what the cache
-        // remembered writing is precisely what is no longer there.
+        // the duration: every `?` below therefore drops it. That is conservative
+        // rather than exact — an add that fails has had its savepoint (if it took
+        // one) rolled back and `settle` has removed the arrays it staged, so some
+        // of what the cache remembered may be gone, and re-interning costs only an
+        // `INSERT OR IGNORE`.
         let in_txn = self.in_transaction();
         let mut shared_sets = if in_txn {
             std::mem::take(&mut self.txn.shared_sets)

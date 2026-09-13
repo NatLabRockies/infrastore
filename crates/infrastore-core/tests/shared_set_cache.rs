@@ -13,8 +13,8 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    FeatureValue, Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesId,
-    TypedArray,
+    FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, ReadWindow, SingleTimeSeries,
+    Store, TimeSeriesData, TimeSeriesId, TypedArray,
 };
 
 fn t0() -> DateTime<Utc> {
@@ -89,6 +89,54 @@ fn inner_rollback_reinterns_the_set() {
             stored_features(store, id),
             feats(),
             "{backend}: the set was interned only at the level that rolled back"
+        );
+    });
+}
+
+/// The timestamp half of the cache: an irregular series writes its time axis at
+/// an inner level, the level rolls back and removes the axis, and the outer span
+/// adds another series on the same axis. The cache must not remember the removed
+/// vector, or the committed row names an axis the file does not hold.
+#[test]
+fn inner_rollback_rewrites_the_time_axis() {
+    let axis = vec![t0(), t0() + Duration::hours(3), t0() + Duration::days(2)];
+    let irregular = |owner: i64, base: f64, store: &mut Store| {
+        let data = TypedArray::from_f64(vec![3], &[base, base + 1.0, base + 2.0]);
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::NonSequentialTimeSeries(
+                    NonSequentialTimeSeries::new(axis.clone(), data, "availability").unwrap(),
+                ),
+                Features::new(),
+            )
+            .unwrap()
+    };
+    each_backend(|store, backend| {
+        store.begin_transaction().unwrap();
+        store.begin_transaction().unwrap();
+        irregular(1, 0.0, store);
+        store.rollback_transaction().unwrap();
+
+        let id = irregular(2, 100.0, store);
+        store.commit_transaction().unwrap();
+
+        let TimeSeriesData::NonSequentialTimeSeries(read) =
+            store.read_by_id(id, ReadWindow::full()).unwrap()
+        else {
+            panic!("{backend}: expected a NonSequentialTimeSeries");
+        };
+        assert_eq!(
+            read.timestamps, axis,
+            "{backend}: the axis was written only at the level that rolled back"
+        );
+        let report = store.verify_integrity().unwrap();
+        assert!(
+            report.ok(),
+            "{backend}: integrity errors: {:?}",
+            report.errors
         );
     });
 }
