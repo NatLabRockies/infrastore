@@ -948,6 +948,19 @@ struct OpenTxn {
     /// bytes must survive, because a rollback restores the catalog rows that
     /// point at them.
     pending_free: FileObjects,
+    /// The shared sets — feature sets and timestamp vectors — this transaction
+    /// has already written, so a run of adds interns each one once rather than
+    /// once per call. A batch deduplicated them within itself; holding the cache
+    /// here extends that across the span, which is what a client whose single
+    /// add is a one-item batch needs to get the same catalog traffic a bulk add
+    /// produces.
+    ///
+    /// Correctness rests entirely on emptying it whenever the writes it
+    /// remembers might be gone: any rollback, and any operation that deletes
+    /// shared rows wholesale. A stale entry is not a slow path but a wrong one —
+    /// the add would skip interning a set and leave an association row naming a
+    /// row that is not there. See [`Store::invalidate_shared_sets`].
+    shared_sets: SharedSetCache,
 }
 
 /// A set of objects in the array file — arrays and explicit time axes — named
@@ -1623,6 +1636,18 @@ impl Store {
         !self.txn.marks.is_empty()
     }
 
+    /// Forget the shared sets this transaction remembers writing.
+    ///
+    /// Called wherever those writes may no longer be there: a rollback at any
+    /// level, and the two operations that delete shared rows in bulk
+    /// (`clear_time_series`, which empties `feature_sets` outright, and
+    /// `compact`, which sweeps the orphans). Cheap and conservative — the cost
+    /// of clearing when we did not have to is re-interning a set the next add
+    /// touches, which `INSERT OR IGNORE` absorbs.
+    fn invalidate_shared_sets(&mut self) {
+        self.txn.shared_sets = SharedSetCache::default();
+    }
+
     /// Begin a transaction spanning any number of subsequent operations, so that
     /// adds, removals, and transforms either all take effect or none do.
     ///
@@ -1836,6 +1861,11 @@ impl Store {
         // must be released to actually pop this nesting level.
         self.metadata
             .execute_txn_stmt(&format!("ROLLBACK TO {name}; RELEASE {name};"))?;
+        // Whatever this level interned is gone with it. `written` is unwound per
+        // level via its mark, but the cache carries no level information, so it
+        // goes wholesale rather than risk remembering a set the ROLLBACK TO just
+        // removed.
+        self.invalidate_shared_sets();
         let mark = self.txn.marks.pop().expect("one mark per open level");
         let written = self.txn.written.split_off(mark);
         if level == 0 {
@@ -2428,7 +2458,18 @@ impl Store {
         // both are deduplicated over the same batch. The explicit time axes go
         // in before the rows that name them, for the same reason the arrays do:
         // a committed row must never name something the file does not hold.
-        let mut shared_sets = SharedSetCache::default();
+        // Held by the transaction when one is open, so a run of adds interns each
+        // shared set once for the span rather than once per call. Taken out for
+        // the duration: every `?` below therefore drops it, which is exactly
+        // right, because an add that fails has had its savepoint rolled back and
+        // `settle` has removed the arrays it staged — so what the cache
+        // remembered writing is precisely what is no longer there.
+        let in_txn = self.in_transaction();
+        let mut shared_sets = if in_txn {
+            std::mem::take(&mut self.txn.shared_sets)
+        } else {
+            SharedSetCache::default()
+        };
         for part in &parts {
             stage_timestamp_vector(
                 &mut *self.backend,
@@ -2527,6 +2568,9 @@ impl Store {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
+        if in_txn {
+            self.txn.shared_sets = shared_sets;
+        }
         tracing::debug!(count = ids.len(), "add committed");
         Ok(ids)
     }
@@ -2704,6 +2748,12 @@ impl Store {
     /// the clear left unreferenced: it orphans them wholesale, and a cleared
     /// store may never see the compaction that would otherwise sweep them.
     pub fn clear_time_series(&mut self, owner: Option<(i64, OwnerCategory)>) -> Result<usize> {
+        // `delete_all` empties `feature_sets` outright, and the axis sweep below
+        // takes the timestamp vectors, so every entry the cache holds is about to
+        // stop being true. Cleared up front: were an add to follow this inside
+        // the same transaction, a surviving entry would let it skip interning a
+        // set and file a row naming one that is gone.
+        self.invalidate_shared_sets();
         let (count, arrays) = self.write_catalog(|tx| {
             let removed = match owner {
                 Some((id, category)) => MetadataStore::delete_by_owner(tx, id, category)?,
@@ -5087,6 +5137,9 @@ impl Store {
         self.flush()?;
         // Sweep the catalog first: the rewrite's liveness scan should see the
         // post-sweep catalog.
+        // The sweep deletes exactly the sets no row references — which is what a
+        // cache entry with no association behind it yet would be.
+        self.invalidate_shared_sets();
         let feature_sets_reclaimed =
             self.write_catalog(MetadataStore::sweep_orphan_feature_sets)?;
         // The timestamp vectors are in the array file, not the catalog, so their
