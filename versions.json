@@ -1,10 +1,15 @@
 {
-  "latest_release": "v0.13.1",
+  "latest_release": "v0.14.0",
   "versions": [
     {
       "version": "latest",
       "label": "latest (main)",
       "path": "/infrastore/latest/"
+    },
+    {
+      "version": "v0.14.0",
+      "label": "v0.14.0",
+      "path": "/infrastore/v0.14.0/"
     },
     {
       "version": "v0.13.1",
@@ -25,11 +30,6 @@
       "version": "v0.11.0",
       "label": "v0.11.0",
       "path": "/infrastore/v0.11.0/"
-    },
-    {
-      "version": "v0.10.0",
-      "label": "v0.10.0",
-      "path": "/infrastore/v0.10.0/"
     }
   ]
 }
