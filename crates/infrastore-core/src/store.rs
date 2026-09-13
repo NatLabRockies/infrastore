@@ -2495,15 +2495,38 @@ impl Store {
 
         // Inside a transaction the flush waits for the outermost commit.
         let flush = !self.in_transaction();
-        let tx = self.metadata.savepoint()?;
-        let ids = parts
-            .iter()
-            .map(|p| insert_association(&tx, &p.meta, &mut shared_sets).map(TimeSeriesId))
-            .collect::<Result<Vec<_>>>()?;
-        if flush {
-            flush_before_commit(&mut *self.backend, staged)?;
-        }
-        tx.commit()?;
+        // The savepoint is what makes a *multi*-statement write all-or-nothing:
+        // it is the point the inserts rewind to when a later one fails, and the
+        // point the array flush must land before. A call issuing exactly one
+        // insert inside an already-open transaction needs neither -- there is no
+        // earlier insert to rewind, and the flush is deferred to the outermost
+        // commit -- so the SAVEPOINT/RELEASE pair is two SQL statements bought
+        // for nothing. That is the whole per-add cost a binding pays when its
+        // single add is a one-item batch, which is how every add arrives once a
+        // client stops buffering them itself.
+        let wrap = flush || parts.len() > 1;
+        let ids = if wrap {
+            let tx = self.metadata.savepoint()?;
+            let ids = parts
+                .iter()
+                .map(|p| insert_association(&tx, &p.meta, &mut shared_sets).map(TimeSeriesId))
+                .collect::<Result<Vec<_>>>()?;
+            if flush {
+                flush_before_commit(&mut *self.backend, staged)?;
+            }
+            tx.commit()?;
+            ids
+        } else {
+            // `flush` is false here by construction, so nothing waits on a commit
+            // this branch does not make.
+            parts
+                .iter()
+                .map(|p| {
+                    insert_association(self.metadata.conn(), &p.meta, &mut shared_sets)
+                        .map(TimeSeriesId)
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
         tracing::debug!(count = ids.len(), "add committed");
         Ok(ids)
     }

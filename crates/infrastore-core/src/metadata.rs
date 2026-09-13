@@ -1102,6 +1102,14 @@ impl MetadataStore {
     /// just its own statements and leaves the enclosing transaction open.
     /// Every mutating entry point takes one, so each is atomic on its own and
     /// composes into a caller's larger transaction without changing behavior.
+    /// The catalog connection, for a write that runs outside a savepoint of its
+    /// own. See [`Store::add_requests_staged`], the one caller: a single insert
+    /// issued inside an already-open transaction has no partial state to unwind,
+    /// so the savepoint it would otherwise take is pure overhead.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn savepoint(&mut self) -> Result<Savepoint<'_>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
