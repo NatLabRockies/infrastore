@@ -3108,6 +3108,14 @@ fn zoneless_and_assume_timezone_are_mutually_exclusive() {
         err.contains("--zoneless") && err.contains("assume-timezone"),
         "{err}"
     );
+
+    // Split around the subcommand, clap accepts the pair, so the CLI's own
+    // guard must refuse it rather than silently dropping `--zoneless`.
+    let (_, err) = run_fail(&store, &["--zoneless", "list", "--assume-timezone", "UTC"]);
+    assert!(
+        err.contains("--zoneless") && err.contains("assume-timezone"),
+        "{err}"
+    );
 }
 
 /// The flag is global, so it reaches a read command's `--time-range` too — the

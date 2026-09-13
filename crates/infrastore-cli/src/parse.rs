@@ -129,9 +129,18 @@ pub fn parse_time_spec(s: &str) -> Result<TimeSpec, String> {
 /// swallowed second set is exactly the shape that turns them order-dependent
 /// with no visible cause.
 pub fn set_assumed_timezone(spec: Option<&str>, zoneless: bool) -> Result<(), String> {
-    // clap's `conflicts_with` already refuses both at once.
+    // clap's `conflicts_with` misses the pair when the two global flags sit on
+    // opposite sides of the subcommand (`--zoneless add --assume-timezone UTC`).
     let resolved = match (spec, zoneless) {
-        (Some(s), _) => Some(parse_time_spec(s)?),
+        (Some(_), true) => {
+            return Err(
+                "--zoneless and --assume-timezone say different things about the same \
+                 timestamps: one records them as wall clocks naming no instant, the other \
+                 resolves them to instants. Pass one."
+                    .to_string(),
+            );
+        }
+        (Some(s), false) => Some(parse_time_spec(s)?),
         (None, true) => Some(TimeSpec::Zoneless),
         (None, false) => None,
     };
