@@ -608,7 +608,7 @@ fn read_curve(
         None => store.read_by_id(id, infrastore_core::ReadWindow::full()),
     }
     .map_err(|e| e.to_string())?;
-    let Some((times, arr)) = super::show::static_points(&data) else {
+    let Some((times, arr)) = super::show::static_points(&data)? else {
         return Err(format!(
             "{} is not a static series",
             data.time_series_type().as_str()

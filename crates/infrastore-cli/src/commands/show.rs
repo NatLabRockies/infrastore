@@ -311,7 +311,7 @@ pub fn get(store_path: &Path, opts: &GetArgs, format: Format) -> Result<(), Stri
         return render_plot(&meta, &data, opts.plot_width);
     }
 
-    match static_points(&data) {
+    match static_points(&data)? {
         // A `PersistentTimeSeries` is rendered as breakpoint/value pairs,
         // exactly as stored. A step function's value *between* those rows is
         // not printed: expanding it would need a target grid the caller has not
@@ -336,13 +336,19 @@ pub type StaticPoints<'a> = (Vec<DateTime<Utc>>, &'a TypedArray);
 ///
 /// A `SingleTimeSeries` grid is materialized by the core, which is what steps a
 /// calendar resolution correctly; the irregular types store their instants.
-pub fn static_points(data: &TimeSeriesData) -> Option<StaticPoints<'_>> {
-    Some(match data {
-        TimeSeriesData::SingleTimeSeries(s) => (s.timestamps().collect(), &s.data),
+pub fn static_points(data: &TimeSeriesData) -> Result<Option<StaticPoints<'_>>, String> {
+    Ok(Some(match data {
+        TimeSeriesData::SingleTimeSeries(s) => {
+            let times = (0..s.length)
+                .map(|i| s.timestamp_at(i))
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?;
+            (times, &s.data)
+        }
         TimeSeriesData::NonSequentialTimeSeries(ns) => (ns.timestamps.clone(), &ns.data),
         TimeSeriesData::PersistentTimeSeries(p) => (p.timestamps.clone(), &p.data),
-        _ => return None,
-    })
+        _ => return Ok(None),
+    }))
 }
 
 /// The window grid of a dense forecast *as it was read*.
