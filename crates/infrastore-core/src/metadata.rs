@@ -1902,6 +1902,13 @@ impl MetadataStore {
         let (where_clause, mut params_vec) = filter.to_sql();
         let mut sql = format!("SELECT 1 FROM time_series_associations {where_clause}");
         for (key, value) in required {
+            // SQL `=` equates -0.0 with 0.0, but `is_subset` is bit-exact and a
+            // stored feature is never -0.0 (or NaN), so neither can match.
+            if let FeatureValue::Float(f) = value
+                && (f.is_nan() || (*f == 0.0 && f.is_sign_negative()))
+            {
+                return Ok(false);
+            }
             let (kind, column, param): (&str, &str, Box<dyn rusqlite::ToSql>) = match value {
                 FeatureValue::Int(i) => ("int", "value_int", Box::new(*i)),
                 FeatureValue::Float(f) => ("float", "value_float", Box::new(*f)),

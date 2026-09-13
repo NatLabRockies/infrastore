@@ -1023,7 +1023,12 @@ fn build_groups_inner(
                 ));
             };
             let have = r.length.unwrap_or(0);
-            if have < companion + length {
+            // `length` is caller-supplied, so the sum can overflow; an
+            // overflowing window covers nothing.
+            if companion
+                .checked_add(*length)
+                .is_none_or(|need| have < need)
+            {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "series '{}' (owner {}) spans ({}, {}, {have}) and does not cover the \
                      reader window ({}, {}, {length}). Narrow the filter, or shorten the \

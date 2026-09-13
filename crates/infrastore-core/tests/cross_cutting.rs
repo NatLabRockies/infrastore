@@ -134,11 +134,11 @@ fn sub_millisecond_resolutions_are_rejected_not_truncated() {
         );
     }
 
-    // 1500 microseconds is 1 whole millisecond plus a remainder: PIN that the
-    // remainder is dropped by the ISO encoding, so the stored resolution is
-    // 1 ms, not 1.5 ms.
+    // 1500 microseconds is 1 whole millisecond plus a remainder the ISO
+    // encoding drops, so it is refused too: stored, it would read back as 1 ms
+    // and name the same packed dataset as a true 1 ms series.
     let one_and_a_half = Period::fixed(Duration::microseconds(1_500));
-    assert!(one_and_a_half.is_positive());
+    assert!(!one_and_a_half.is_positive());
     assert_eq!(one_and_a_half.to_iso8601(), "PT0.001S");
     assert_eq!(
         Period::from_iso8601("PT0.001S").unwrap(),

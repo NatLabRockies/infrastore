@@ -3204,8 +3204,7 @@ impl Store {
 
                 let (data, timestamps) = match time_range {
                     None => (
-                        self.backend
-                            .get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
+                        self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
                         timestamps,
                     ),
                     Some((start, end)) => {
@@ -3242,8 +3241,7 @@ impl Store {
 
                 let (data, timestamps) = match time_range {
                     None => (
-                        self.backend
-                            .get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
+                        self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
                         timestamps,
                     ),
                     Some((start, end)) => {
@@ -5184,7 +5182,9 @@ impl Store {
             self.materialize_into(&mut backend)?;
             backend.flush()?;
             drop(backend);
-            Ok(())
+            // The rename below replaces the only copy, so the new bytes must
+            // be durable first (as `persist_to` does).
+            sync_file(&tmp)
         })();
         if let Err(e) = rewritten {
             let _ = std::fs::remove_file(&tmp);
@@ -5207,6 +5207,7 @@ impl Store {
         // leaves the store usable instead of stranded on the placeholder.
         self.reopen_backend(&path)?;
         renamed?;
+        sync_parent_dir(&path)?;
 
         // The `stat` after, taken on the replaced file rather than on the temp
         // copy, so it pairs with `bytes_before` on the same path. Both stats
@@ -6590,7 +6591,18 @@ fn validate_array_geometry(array: &TypedArray, ts_type: TimeSeriesType) -> Resul
 /// [`TimeSeriesError`], labeled with the type whose `initial_timestamp` it is.
 fn require_ms(t: chrono::DateTime<chrono::Utc>, label: &str) -> Result<()> {
     crate::timestamps::require_millisecond_precision(t, || format!("{label} initial_timestamp"))
-        .map_err(TimeSeriesError::InvalidParameter)
+        .map_err(TimeSeriesError::InvalidParameter)?;
+    // The catalog stores `initial_timestamp` as RFC 3339 text, which has only
+    // four year digits: chrono writes year 10000 as `+10000-…`, which it then
+    // refuses to parse, and one such row fails every listing of the store.
+    use chrono::Datelike;
+    if !(0..=9999).contains(&t.year()) {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "{label} initial_timestamp {t} is outside years 0000-9999, which the catalog \
+             cannot record"
+        )));
+    }
+    Ok(())
 }
 
 /// Check that a `SingleTimeSeries` describes its own array.

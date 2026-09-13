@@ -343,3 +343,21 @@ fn the_grid_filter_is_not_part_of_identity() {
         "{err:?}"
     );
 }
+
+#[test]
+fn an_overflowing_window_length_does_not_cover_the_series() {
+    let mut s = store();
+    hourly(&mut s, 1, "a", 0, 24);
+    hourly(&mut s, 2, "b", 7, 48);
+
+    let err = s
+        .build_static_reader_over(
+            hourly_filter(),
+            ReadWindow::from(t(9)).with_len(usize::MAX - 1),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("does not cover the reader window"),
+        "{err}"
+    );
+}

@@ -1154,6 +1154,11 @@ impl Probabilistic {
         if self.percentiles.is_empty() {
             return Err("Probabilistic: percentiles must be non-empty".to_string());
         }
+        // Non-finite values serialize to JSON `null` in the catalog and then
+        // fail every listing. Checked first, since `>=` below is false for NaN.
+        if !self.percentiles.iter().all(|p| p.is_finite()) {
+            return Err("Probabilistic: percentiles must be finite".to_string());
+        }
         if self.percentiles.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err("Probabilistic: percentiles must be strictly increasing".to_string());
         }
