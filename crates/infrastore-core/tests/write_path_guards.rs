@@ -146,3 +146,36 @@ fn a_negative_zero_filter_matches_nothing_on_either_path() {
     assert!(store.list_metadata(filter.clone()).unwrap().is_empty());
     assert!(!store.has_any_time_series(filter).unwrap());
 }
+
+#[test]
+fn an_infinite_feature_on_an_omitted_persistent_row_does_not_block_the_export() {
+    let mut store = Store::create(None, true).unwrap();
+    let mut features = Features::new();
+    features.insert("cap".into(), FeatureValue::Float(f64::INFINITY));
+    let step =
+        PersistentTimeSeries::new(vec![t0()], TypedArray::from_f64(vec![1], &[1.0]), "p").unwrap();
+    store
+        .add(req(1, TimeSeriesData::PersistentTimeSeries(step)).with_features(features))
+        .unwrap();
+    store
+        .add(req(1, sts(t0(), Duration::hours(1), &[1.0])))
+        .unwrap();
+    store
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .unwrap();
+}
+
+#[test]
+fn a_sub_millisecond_interval_is_not_a_zero_interval() {
+    use infrastore_core::Deterministic;
+    let err = Deterministic::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(1),
+        Duration::microseconds(500),
+        1,
+        TypedArray::from_f64(vec![1, 1], &[1.0]),
+        "f",
+    );
+    assert!(err.is_err(), "a 500 µs interval was accepted");
+}

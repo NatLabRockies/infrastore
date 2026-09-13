@@ -118,7 +118,10 @@ impl Period {
     /// forecast, which has no second window to step to).
     pub fn is_zero(&self) -> bool {
         match self {
-            Period::Fixed(d) => d.num_milliseconds() == 0,
+            // Exactly zero, not "rounds to zero milliseconds": a 500 µs interval
+            // would otherwise slip through a single-window forecast's zero
+            // exception and be stored as `PT0S`.
+            Period::Fixed(d) => d.is_zero(),
             Period::Months(m) => *m == 0,
         }
     }

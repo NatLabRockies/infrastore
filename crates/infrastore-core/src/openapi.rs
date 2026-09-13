@@ -392,9 +392,14 @@ fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
         ));
     }
     let rows = store.list_with_timestamps(filter.clone())?;
-    // The store keeps an infinite float feature, but JSON cannot spell one:
+    // Persistent rows are dropped first, so they are never checked. The store
+    // keeps an infinite float feature, but JSON cannot spell one:
     // `features_to_plain` would write `null`, which the import then refuses.
     // Refuse the export instead of emitting a document that cannot come back.
+    let rows: Vec<_> = rows
+        .iter()
+        .filter(|meta| meta.time_series_type != TimeSeriesType::PersistentTimeSeries)
+        .collect();
     for meta in &rows {
         if let Some((key, _)) = meta
             .features
@@ -411,7 +416,6 @@ fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
     }
     let mut keyed: Vec<(SortKey, Value)> = rows
         .iter()
-        .filter(|meta| meta.time_series_type != TimeSeriesType::PersistentTimeSeries)
         .map(|meta| (sort_key(meta), ts_row_to_json(meta)))
         .collect();
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
