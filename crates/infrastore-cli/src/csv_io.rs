@@ -39,6 +39,36 @@ impl CsvData {
     }
 }
 
+/// Open a headed, rectangular, whitespace-trimmed CSV — the shape every CSV the
+/// CLI reads has.
+pub fn open_reader(path: &Path) -> Result<csv::Reader<std::fs::File>, String> {
+    csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(false)
+        .trim(csv::Trim::All)
+        .from_path(path)
+        .map_err(|e| format!("opening {}: {e}", path.display()))
+}
+
+/// The message for a CSV row that failed to read or deserialize: the row, and
+/// for an id cell that is not an integer, the column it sits in.
+pub fn row_error(path: &Path, row: usize, columns: &[&str], e: &csv::Error) -> String {
+    if let csv::ErrorKind::Deserialize { err, .. } = e.kind()
+        && let csv::DeserializeErrorKind::ParseInt(parse) = err.kind()
+    {
+        let column = err
+            .field()
+            .and_then(|f| columns.get(f as usize))
+            .unwrap_or(&"a field");
+        return format!(
+            "{} row {}: {column} is not an integer ({parse})",
+            path.display(),
+            row + 1
+        );
+    }
+    format!("reading {} row {}: {e}", path.display(), row + 1)
+}
+
 /// Read a data CSV's header row, so a caller can decide how many leading
 /// columns to strip.
 ///
@@ -48,12 +78,7 @@ impl CsvData {
 /// forecast's axes without failing. A file with no header row is therefore an
 /// error here rather than a silent fall back to the flat layout.
 pub fn read_header(path: &Path) -> Result<Vec<String>, String> {
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(false)
-        .trim(csv::Trim::All)
-        .from_path(path)
-        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let mut reader = open_reader(path)?;
     let header: Vec<String> = match reader.headers() {
         Ok(h) => h.iter().map(|s| s.to_string()).collect(),
         Err(e) => return Err(format!("reading the header of {}: {e}", path.display())),
@@ -72,12 +97,7 @@ pub fn read_header(path: &Path) -> Result<Vec<String>, String> {
 /// every row and flattening the rest row-major. The first row is always the
 /// header — see [`read_header`].
 pub fn read_csv(path: &Path, leading_cols: usize) -> Result<CsvData, String> {
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(false)
-        .trim(csv::Trim::All)
-        .from_path(path)
-        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let mut reader = open_reader(path)?;
 
     let mut leading = Vec::new();
     let mut values = Vec::new();

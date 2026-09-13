@@ -742,11 +742,7 @@ pub fn compact(
                     report.bytes_reclaimed.to_string(),
                 ],
             ];
-            if format == crate::output::Format::Csv {
-                crate::output::display_csv_rows(&headers, &rows)?;
-            } else {
-                crate::output::display_table_dyn(&headers, &rows);
-            }
+            crate::output::print_rows(format, &headers, &rows)?;
         }
     }
     Ok(())

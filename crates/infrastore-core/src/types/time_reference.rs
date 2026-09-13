@@ -86,12 +86,6 @@ pub enum TimeReference {
 }
 
 impl TimeReference {
-    /// Whether this reference names an instant. `false` only for
-    /// [`Self::Zoneless`].
-    pub fn is_zoned(&self) -> bool {
-        !matches!(self, TimeReference::Zoneless)
-    }
-
     /// Whether this reference is [`Self::Zoneless`]. The partition every
     /// coherence rule in the store splits on.
     pub fn is_zoneless(&self) -> bool {

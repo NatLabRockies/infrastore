@@ -33,8 +33,16 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
     }
 
     match data.dtype {
-        Dtype::F64 => update_f64_canonical_nans(&mut hasher, &data.bytes),
-        Dtype::F32 => update_f32_canonical_nans(&mut hasher, &data.bytes),
+        Dtype::F64 => {
+            update_canonical_nans(&mut hasher, &data.bytes, f64::NAN.to_le_bytes(), |c| {
+                f64::from_le_bytes(c).is_nan()
+            })
+        }
+        Dtype::F32 => {
+            update_canonical_nans(&mut hasher, &data.bytes, f32::NAN.to_le_bytes(), |c| {
+                f32::from_le_bytes(c).is_nan()
+            })
+        }
         Dtype::I64
         | Dtype::I32
         | Dtype::I16
@@ -51,52 +59,32 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Feed `f64` bytes to `hasher` with every NaN collapsed to one canonical bit
-/// pattern.
+/// Feed `N`-byte float elements to `hasher` with every NaN (`is_nan`, which
+/// covers signaling and sign-negative NaNs) replaced by `canonical_nan`.
 ///
 /// A non-NaN element hashes as exactly the little-endian bytes it is stored as,
 /// so runs of them — the overwhelming common case — go in with a single
 /// `update` rather than one per element. That is the whole point: `Sha256::update`
-/// has real per-call cost, and an 8-byte-at-a-time loop makes hashing an array
+/// has real per-call cost, and an element-at-a-time loop makes hashing an array
 /// scale with its element count instead of its size.
 ///
 /// A trailing partial element is ignored, matching `chunks_exact`. It cannot
 /// occur for a well-formed [`TypedArray`], whose byte length is validated
 /// against `shape × dtype.size()`.
-fn update_f64_canonical_nans(hasher: &mut Sha256, bytes: &[u8]) {
-    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
-    const FRAC_MASK: u64 = 0x000f_ffff_ffff_ffff;
-
-    let bytes = &bytes[..bytes.len() - bytes.len() % 8];
+fn update_canonical_nans<const N: usize>(
+    hasher: &mut Sha256,
+    bytes: &[u8],
+    canonical_nan: [u8; N],
+    is_nan: impl Fn([u8; N]) -> bool,
+) {
+    let bytes = &bytes[..bytes.len() - bytes.len() % N];
     let mut run_start = 0;
-    for (index, chunk) in bytes.as_chunks::<8>().0.iter().enumerate() {
-        let bits = u64::from_le_bytes(*chunk);
-        // IEEE NaN: exponent all ones, mantissa non-zero. Covers signaling and
-        // sign-negative NaNs, exactly as `f64::is_nan` does.
-        if bits & EXP_MASK == EXP_MASK && bits & FRAC_MASK != 0 {
-            let offset = index * 8;
+    for (index, chunk) in bytes.as_chunks::<N>().0.iter().enumerate() {
+        if is_nan(*chunk) {
+            let offset = index * N;
             hasher.update(&bytes[run_start..offset]);
-            hasher.update(f64::NAN.to_bits().to_le_bytes());
-            run_start = offset + 8;
-        }
-    }
-    hasher.update(&bytes[run_start..]);
-}
-
-/// [`update_f64_canonical_nans`] for 4-byte elements.
-fn update_f32_canonical_nans(hasher: &mut Sha256, bytes: &[u8]) {
-    const EXP_MASK: u32 = 0x7f80_0000;
-    const FRAC_MASK: u32 = 0x007f_ffff;
-
-    let bytes = &bytes[..bytes.len() - bytes.len() % 4];
-    let mut run_start = 0;
-    for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
-        let bits = u32::from_le_bytes(*chunk);
-        if bits & EXP_MASK == EXP_MASK && bits & FRAC_MASK != 0 {
-            let offset = index * 4;
-            hasher.update(&bytes[run_start..offset]);
-            hasher.update(f32::NAN.to_bits().to_le_bytes());
-            run_start = offset + 4;
+            hasher.update(canonical_nan);
+            run_start = offset + N;
         }
     }
     hasher.update(&bytes[run_start..]);
@@ -167,7 +155,7 @@ pub fn timestamps_hash(timestamps: &[DateTime<Utc>]) -> [u8; 32] {
     hasher.update(b"timestamps\0");
     hasher.update((timestamps.len() as u64).to_le_bytes());
     // Built as one buffer and fed in one `update`, for the reason
-    // `update_f64_canonical_nans` documents: a per-element `update` makes
+    // `update_canonical_nans` documents: a per-element `update` makes
     // hashing scale with the element count rather than the size.
     let mut bytes = Vec::with_capacity(timestamps.len() * size_of::<i64>());
     for millis in crate::timestamps::to_millis(timestamps) {

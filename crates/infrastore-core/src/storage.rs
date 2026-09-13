@@ -436,25 +436,6 @@ pub(crate) trait StorageBackend: Send + Sync {
         write_window_block(&arr, count_axis, window_start, len, out)
     }
 
-    /// Read `len` consecutive time steps along axis 0 starting at `start`,
-    /// filling `out` (cleared first) with their row-major, little-endian bytes.
-    /// Backs `DeterministicSingleTimeSeries` window reads, which gather a
-    /// contiguous run from the packed underlying `SingleTimeSeries`; on the
-    /// on-disk backend [`Self::get_slice`] is already a single packed hyperslab.
-    fn read_range_into(
-        &self,
-        hash: &[u8; 32],
-        dtype: Dtype,
-        start: usize,
-        len: usize,
-        out: &mut Vec<u8>,
-    ) -> Result<()> {
-        let slice = self.get_slice(hash, dtype, start..start + len)?;
-        out.clear();
-        out.extend_from_slice(&slice.bytes);
-        Ok(())
-    }
-
     /// Remove an array. Marks the slot reusable. No-op if `hash` is absent.
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
 
@@ -508,8 +489,13 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// This is the in-memory backend's whole compaction story. An on-disk store
     /// is compacted by [`crate::Store::compact`] instead, which rewrites the
     /// file from the catalog's live set — the backend cannot do that on its own
-    /// because liveness lives in the catalog, not in the file.
-    fn compact(&mut self) -> Result<CompactionReport>;
+    /// because liveness lives in the catalog, not in the file — so an on-disk
+    /// backend keeps this default, which refuses.
+    fn compact(&mut self) -> Result<CompactionReport> {
+        Err(TimeSeriesError::InvalidParameter(
+            "this backend cannot compact in place; compact through Store::compact".into(),
+        ))
+    }
 
     /// Physical counts describing the backend's current state, for the
     /// before/after arithmetic in a compaction report. The default reports
@@ -526,7 +512,33 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// catalog does not reference are therefore not checked: they are
     /// unreachable, nothing can read them, and nothing says what their bytes
     /// mean. [`Self::compact`] is what reports them.
-    fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport>;
+    fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport> {
+        let mut errors = Vec::new();
+        for (hash, dtype) in arrays {
+            match self.get_array(hash, *dtype) {
+                Ok(arr) => {
+                    let recomputed = crate::hash::array_hash(&arr);
+                    if &recomputed != hash {
+                        errors.push(format!(
+                            "hash mismatch: stored={} computed={}",
+                            crate::hash::hash_hex(hash),
+                            crate::hash::hash_hex(&recomputed),
+                        ));
+                    }
+                }
+                Err(TimeSeriesError::NotFound) => errors.push(format!(
+                    "dangling reference: the catalog references array {} but the array \
+                     file does not hold it",
+                    crate::hash::hash_hex(hash),
+                )),
+                Err(e) => errors.push(format!(
+                    "read error for array {}: {e}",
+                    crate::hash::hash_hex(hash)
+                )),
+            }
+        }
+        Ok(IntegrityReport { errors })
+    }
 
     /// Flush any in-memory state to disk (no-op for in-memory backends).
     fn flush(&mut self) -> Result<()>;

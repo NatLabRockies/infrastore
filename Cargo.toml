@@ -35,7 +35,7 @@ thiserror = "1"
 infrastore-core = { version = "0.13.1", path = "crates/infrastore-core", default-features = false }
 infrastore-proto = { version = "0.13.1", path = "crates/infrastore-proto", default-features = false }
 infrastore-parquet = { version = "0.13.1", path = "crates/infrastore-parquet", default-features = false }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 # `default-features = false` drops the `derive` feature (and its unmaintained
 # `proc-macro-error2` transitive dep); the CLI builds tables via the Builder API.
 # `ansi` keeps column widths correct when header cells carry ANSI color codes.
@@ -43,7 +43,7 @@ tabled = { version = "0.20", default-features = false, features = ["std", "ansi"
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
-toml = "0.8"
+toml = "0.9"
 # `backup` drives `MetadataStore::open_path_into_memory`. `VACUUM INTO` (which
 # `backup_to` uses in the other direction) cannot target `:memory:`, so loading a
 # catalog file into RAM has to go through SQLite's online-backup API.

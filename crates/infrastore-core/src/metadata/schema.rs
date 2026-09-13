@@ -212,7 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_resolution ON time_series_associations(resolution
 -- large. Measured on
 -- a 405k-row catalog (100k owners):
 --
---   * idx_ts_type       count_by_type / counts_by_type / list() with a type
+--   * idx_ts_type       counts_by_type / list() with a type
 --                       predicate: 3-10x. Serves every stats and summary call
 --                       that scopes by time_series_type.
 --   * idx_name          exact-name filters 12x; name GLOB with a literal
@@ -226,7 +226,7 @@ CREATE INDEX IF NOT EXISTS idx_resolution ON time_series_associations(resolution
 --                       category-only predicate; leading with the category
 --                       (then owner_id, keeping DISTINCT owner_id covered)
 --                       does. Near-zero insert cost (two small columns).
---   * idx_interval      distinct_intervals becomes a covering range seek
+--   * idx_interval      distinct_periods("interval") becomes a covering range seek
 --                       (was a full scan + temp b-tree); the interval
 --                       counterpart of idx_resolution.
 --

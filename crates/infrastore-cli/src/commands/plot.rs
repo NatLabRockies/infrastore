@@ -64,10 +64,13 @@ pub struct PlotArgs {
     /// Chart title (defaults to the series name).
     #[arg(long)]
     pub title: Option<String>,
-    #[arg(long, default_value_t = 960.0)]
-    pub width: f64,
-    #[arg(long, default_value_t = 440.0)]
-    pub height: f64,
+    /// Canvas width in pixels (at least 50; below that the margins consume the
+    /// whole document).
+    #[arg(long, default_value_t = 960, value_parser = clap::value_parser!(u32).range(50..))]
+    pub width: u32,
+    /// Canvas height in pixels (at least 50).
+    #[arg(long, default_value_t = 440, value_parser = clap::value_parser!(u32).range(50..))]
+    pub height: u32,
     /// First forecast window to draw (fan, overlay).
     #[arg(long, default_value_t = 0)]
     pub window: usize,
@@ -76,38 +79,8 @@ pub struct PlotArgs {
     pub limit: Option<usize>,
 }
 
-/// The smallest canvas worth rendering. Below this the margins alone consume the
-/// whole document and the plot area clamps to a sliver, so a chart this size is
-/// a mistake rather than a request.
-const MIN_CANVAS: f64 = 50.0;
-
-/// Reject a canvas dimension an SVG cannot express.
-///
-/// `width`/`height` are bare `f64`s that went straight into the root element's
-/// `viewBox` and `width`/`height` attributes, so anything clap could parse
-/// reached the file: `--width=-100` wrote `width="-100"`, which the SVG spec
-/// makes an error, and `--width=nan` wrote `width="NaN"`, which is not a
-/// `<length>` at all — `NaN` then leaked into the body geometry as well
-/// (`x="NaN"`). Both reported success and exit 0, so a pipeline only found out
-/// when something downstream refused to render the file.
-fn check_canvas(value: f64, flag: &str) -> Result<(), String> {
-    if !value.is_finite() {
-        return Err(format!(
-            "--{flag} must be a finite number of pixels, not {value}"
-        ));
-    }
-    if value < MIN_CANVAS {
-        return Err(format!(
-            "--{flag} must be at least {MIN_CANVAS:.0} pixels, got {value}"
-        ));
-    }
-    Ok(())
-}
-
 /// `format` only shapes the "wrote it" line — the chart itself is always SVG.
 pub fn run(store_path: &Path, opts: &PlotArgs, format: Format) -> Result<(), String> {
-    check_canvas(opts.width, "width")?;
-    check_canvas(opts.height, "height")?;
     let selector = &opts.selector;
     let store = store_access::open_readonly(store_path)?;
     let range = crate::parse::parse_time_range(opts.time_range.as_deref())?;
@@ -155,7 +128,7 @@ fn line(
     store: &Store,
     selector: &SelectorArgs,
     opts: &PlotArgs,
-    range: Option<crate::parse::TimeRange>,
+    range: Option<infrastore_core::TimeRange>,
 ) -> Result<String, String> {
     let curves = static_curves(store, selector, range)?;
     let x_ticks = time_ticks(curves.iter().flat_map(|c| c.times.iter().copied()));
@@ -179,8 +152,8 @@ fn line(
         subtitle: subtitle(&curves),
         x_label: "Time (UTC)".to_string(),
         y_label: units(&curves),
-        width: opts.width,
-        height: opts.height,
+        width: f64::from(opts.width),
+        height: f64::from(opts.height),
         bands: Vec::new(),
         series,
         x_ticks,
@@ -192,7 +165,7 @@ fn duration(
     store: &Store,
     selector: &SelectorArgs,
     opts: &PlotArgs,
-    range: Option<crate::parse::TimeRange>,
+    range: Option<infrastore_core::TimeRange>,
 ) -> Result<String, String> {
     let curves = static_curves(store, selector, range)?;
     let series = curves
@@ -222,8 +195,8 @@ fn duration(
         subtitle: subtitle(&curves),
         x_label: "Percent of time at or above (%)".to_string(),
         y_label: units(&curves),
-        width: opts.width,
-        height: opts.height,
+        width: f64::from(opts.width),
+        height: f64::from(opts.height),
         bands: Vec::new(),
         series,
         // Percentages, so the generated numeric ticks are already right.
@@ -236,7 +209,7 @@ fn heatmap(
     store: &Store,
     selector: &SelectorArgs,
     opts: &PlotArgs,
-    range: Option<crate::parse::TimeRange>,
+    range: Option<infrastore_core::TimeRange>,
 ) -> Result<String, String> {
     let mut curves = static_curves(store, selector, range)?;
     if curves.len() != 1 {
@@ -319,8 +292,8 @@ fn heatmap(
         x_labels,
         y_labels,
         values,
-        width: opts.width,
-        height: opts.height,
+        width: f64::from(opts.width),
+        height: f64::from(opts.height),
     }
     .render())
 }
@@ -424,8 +397,8 @@ fn fan(store: &Store, selector: &SelectorArgs, opts: &PlotArgs) -> Result<String
         ),
         x_label: "Target time (UTC)".to_string(),
         y_label: meta.units.clone().unwrap_or_default(),
-        width: opts.width,
-        height: opts.height,
+        width: f64::from(opts.width),
+        height: f64::from(opts.height),
         bands,
         series,
         x_ticks,
@@ -535,8 +508,8 @@ fn overlay(store: &Store, selector: &SelectorArgs, opts: &PlotArgs) -> Result<St
         ),
         x_label: "Time (UTC)".to_string(),
         y_label: meta.units.clone().unwrap_or_default(),
-        width: opts.width,
-        height: opts.height,
+        width: f64::from(opts.width),
+        height: f64::from(opts.height),
         bands: Vec::new(),
         series,
         x_ticks,
@@ -590,7 +563,7 @@ impl Curve {
 fn static_curves(
     store: &Store,
     selector: &SelectorArgs,
-    range: Option<crate::parse::TimeRange>,
+    range: Option<infrastore_core::TimeRange>,
 ) -> Result<Vec<Curve>, String> {
     let metas = store
         .list_metadata(selector.to_filter()?)
@@ -627,7 +600,7 @@ fn static_curves(
 fn read_curve(
     store: &Store,
     meta: &TimeSeriesMetadata,
-    range: Option<crate::parse::TimeRange>,
+    range: Option<infrastore_core::TimeRange>,
 ) -> Result<Curve, String> {
     let id = select::id_of(meta)?;
     let data = match range {
@@ -635,7 +608,7 @@ fn read_curve(
         None => store.read_by_id(id, infrastore_core::ReadWindow::full()),
     }
     .map_err(|e| e.to_string())?;
-    let Some((times, arr)) = super::show::static_points(&data)? else {
+    let Some((times, arr)) = super::show::static_points(&data) else {
         return Err(format!(
             "{} is not a static series",
             data.time_series_type().as_str()
@@ -693,12 +666,7 @@ impl Window {
                 count - 1
             ));
         }
-        let interval = meta
-            .interval
-            .ok_or("forecast metadata is missing interval")?;
-        let initial = meta
-            .initial_timestamp
-            .ok_or("forecast metadata is missing initial_timestamp")?;
+        let grid = super::show::ForecastGrid::stored(meta)?;
         Ok(Self {
             horizon,
             count,
@@ -707,12 +675,8 @@ impl Window {
                 .product::<usize>()
                 .max(1),
             index,
-            issue: interval
-                .add_to(initial, index as i64)
-                .ok_or_else(|| format!("timestamp overflow at window {index}"))?,
-            resolution: meta
-                .resolution
-                .ok_or("forecast metadata is missing resolution")?,
+            issue: grid.issue_time(index)?,
+            resolution: grid.resolution,
         })
     }
 

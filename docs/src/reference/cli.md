@@ -242,11 +242,11 @@ language's own writer, which is a much smaller ask than linking Arrow into a whe
 `get` and `grid` separate the flags that _select data_ from the flags that _bound a display_, and
 the two reach different formats:
 
-| Flag                                                                    | Applies to     | Why                                                                                                                                 |
-| ----------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `--time-range START..END`                                               | every format   | A time slice is a different span of the series, so a pipe should carry exactly the rows asked for.                                  |
-| `--stride N` (`get`)                                                    | every format   | Every `N`th row is a different series, not a shorter view of one. `-f json` reports the strided `shape` and echoes `stride`.        |
-| `--limit N`, `--full`, `--tail` (`get`); `--limit N`, `--full` (`grid`) | the table only | A CSV or JSON stream is read by another program, and a silently short one is a data bug in whatever reads it — not a shorter table. |
+| Flag                                            | Applies to     | Why                                                                                                                                 |
+| ----------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `--time-range START..END`                       | every format   | A time slice is a different span of the series, so a pipe should carry exactly the rows asked for.                                  |
+| `--stride N` (`get`, `grid`)                    | every format   | Every `N`th row is a different series, not a shorter view of one. `-f json` reports the strided `shape` and echoes `stride`.        |
+| `--limit N`, `--full`, `--tail` (`get`, `grid`) | the table only | A CSV or JSON stream is read by another program, and a silently short one is a data bug in whatever reads it — not a shorter table. |
 
 So `-f csv get --limit 3` still writes every row; thin a pipe with `--stride`, or slice it with
 `--time-range`. The table's own default cap is 50 rows, lifted by `--full`.
@@ -495,7 +495,7 @@ infrastore --store <PATH> add --parquet <PATH> [--parquet <PATH>...] [--no-check
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]
-infrastore --store <PATH> grid    [SELECTOR...] [--window-start <TS> [--window-length N]] [--time-range START..END] [--limit N | --full] [--label <auto|owner|full>]
+infrastore --store <PATH> grid    [SELECTOR...] [--window-start <TS> [--window-length N]] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--label <auto|owner|full>]
 infrastore --store <PATH> plot    [SELECTOR...] [--out <FILE.svg|FILE.html|->] [--kind <line|duration|heatmap|fan|overlay>] [--time-range START..END] [--title <T>] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store <PATH> info    [SELECTOR...] [--no-stats]
 infrastore --store <PATH> export  [SELECTOR...] [--dir <DIR>] [--time-range START..END]
@@ -710,8 +710,7 @@ another. The lowercase forms are a command-line shorthand, not a second vocabula
   `list`, `info`, or `export -f json` can be pasted straight back into a descriptor.
 
   The human form the CLI used to accept (`1h`, `15min`, `7d`, and a bare integer meaning
-  _milliseconds_) is rejected, with the ISO-8601 translation attached:
-  `invalid duration '1h': durations are ISO-8601 — did you mean 'PT1H'?`
+  _milliseconds_) is rejected.
 - **Timestamps** (`initial_timestamp`, non-sequential timestamp column, `--time-range` bounds,
   `--issue-time`): RFC3339 (e.g. `2024-01-01T00:00:00Z`) or a bare integer of epoch milliseconds. A
   _stored_ timestamp must be a whole number of milliseconds — a finer one is refused by `add` rather
@@ -939,8 +938,8 @@ across runs and two grid exports can be diffed.
 opens in a browser, drops into a report, and survives being emailed. Both light and dark themes are
 written into the document, keyed on `prefers-color-scheme`. An `.html` destination wraps the same
 SVG in a minimal page; `--out -` writes to stdout, and the default is `chart.svg` in the working
-directory. `--width`/`--height` default to 960 × 440 (CSS pixels, fractional values allowed);
-`--limit` caps an `overlay` at 8 windows unless told otherwise.
+directory. `--width`/`--height` default to 960 × 440 (whole CSS pixels, at least 50); `--limit` caps
+an `overlay` at 8 windows unless told otherwise.
 
 | `--kind`   | What it shows                                                                     |
 | ---------- | --------------------------------------------------------------------------------- |

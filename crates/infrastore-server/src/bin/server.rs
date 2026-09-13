@@ -38,11 +38,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     cfg.authentication
         .validate()
         .map_err(|m| format!("config error: {m}"))?;
-    let primary_file = cfg
-        .data
-        .files
-        .first()
-        .ok_or("config error: [data] files = [] must contain at least one path")?;
+    let primary_file = &cfg.data.file;
 
     let service =
         CatalogStoreService::from_path(primary_file)?.with_max_read_ids(cfg.server.max_read_ids);

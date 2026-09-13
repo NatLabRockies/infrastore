@@ -254,7 +254,7 @@ Destructive commands take `--dry-run`, and `persist` refuses an existing destina
 
 ```sh
 cp examples/server.toml my_server.toml
-# edit my_server.toml: point [data].files at your .h5, set [authentication]
+# edit my_server.toml: point [data].file at your .h5, set [authentication]
 cargo run -p infrastore-server -- --config my_server.toml
 ```
 

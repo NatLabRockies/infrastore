@@ -184,15 +184,32 @@ fn optional_owner(
     if !has_owner {
         return Ok(None);
     }
-    let category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
+    Ok(Some((owner_id, owner_category_from_int(owner_category)?)))
+}
+
+/// Map an ABI `owner_category` code (`0` = Component, `1` =
+/// SupplementalAttribute) to its core value, recording the error otherwise.
+fn owner_category_from_int(code: i32) -> Result<core_lib::OwnerCategory, i32> {
+    match code {
+        0 => Ok(core_lib::OwnerCategory::Component),
+        1 => Ok(core_lib::OwnerCategory::SupplementalAttribute),
         other => {
             set_error(format!("invalid owner_category {other}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
+            Err(INFRASTORE_ERR_INVALID_PARAMETER)
         }
-    };
-    Ok(Some((owner_id, category)))
+    }
+}
+
+/// Write `v` through `out` when `out` is non-null; a null optional
+/// out-param is skipped.
+///
+/// # Safety
+///
+/// `out` must be null or valid for writing one `T`.
+unsafe fn write_opt<T>(out: *mut T, v: T) {
+    if !out.is_null() {
+        unsafe { *out = v };
+    }
 }
 
 /// Dereference a raw handle pointer or return `INFRASTORE_ERR_NULL_POINTER`.
@@ -343,6 +360,13 @@ unsafe fn cstr_to_optional_string(p: *const c_char) -> Result<Option<String>, i3
 
 unsafe fn cstr_to_optional_path(p: *const c_char) -> Result<Option<PathBuf>, i32> {
     Ok(unsafe { cstr_to_optional_string(p)? }.map(PathBuf::from))
+}
+
+/// Parse a required path argument, recording `msg` as the error on failure.
+unsafe fn cstr_to_path(p: *const c_char, msg: &str) -> Result<PathBuf, i32> {
+    unsafe { cstr_to_str(p) }
+        .map(PathBuf::from)
+        .inspect_err(|_| set_error(msg))
 }
 
 /// Parse a time reference from a C string. `null`/empty -> `None`
@@ -608,24 +632,30 @@ pub unsafe extern "C" fn infrastore_store_create_with_catalog(
 ) -> i32 {
     clear_error();
     require_nonnull!(out);
-    let path = match unsafe { cstr_to_optional_path(path) } {
-        Ok(p) => p,
-        Err(code) => {
-            set_error("invalid path");
-            return code;
-        }
-    };
+    let path = ffi_try!(code unsafe { cstr_to_optional_path(path) }.inspect_err(|_| set_error("invalid path")));
     let compression =
         ffi_try!(code compression_from_code(compression_kind, deflate_level, shuffle));
     let catalog = ffi_try!(code catalog_from_code(catalog_mode));
-    let store = ffi_try!(core_lib::Store::create_with_catalog(
-        path.as_deref(),
-        in_memory,
-        compression,
-        catalog,
-    ));
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
+    unsafe {
+        emit_store(
+            out,
+            core_lib::Store::create_with_catalog(path.as_deref(), in_memory, compression, catalog),
+        )
+    }
+}
+
+/// Hand a freshly created or opened store to the caller through `out`, or map
+/// the core error.
+///
+/// # Safety
+///
+/// `out` must be valid for writing one pointer.
+unsafe fn emit_store(
+    out: *mut *mut InfraStoreHandle,
+    store: std::result::Result<core_lib::Store, core_lib::TimeSeriesError>,
+) -> i32 {
+    let store = ffi_try!(store);
+    unsafe { *out = Box::into_raw(Box::new(InfraStoreHandle { inner: store })) };
     INFRASTORE_OK
 }
 
@@ -656,24 +686,16 @@ pub unsafe extern "C" fn infrastore_store_create_replacing(
 ) -> i32 {
     clear_error();
     require_nonnull!(out);
-    let path = match unsafe { cstr_to_str(path) } {
-        Ok(s) => PathBuf::from(s),
-        Err(code) => {
-            set_error("invalid path string");
-            return code;
-        }
-    };
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "invalid path string") });
     let compression =
         ffi_try!(code compression_from_code(compression_kind, deflate_level, shuffle));
     let catalog = ffi_try!(code catalog_from_code(catalog_mode));
-    let store = ffi_try!(core_lib::Store::create_replacing(
-        &path,
-        compression,
-        catalog
-    ));
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
-    INFRASTORE_OK
+    unsafe {
+        emit_store(
+            out,
+            core_lib::Store::create_replacing(&path, compression, catalog),
+        )
+    }
 }
 
 /// Copy the store at `src` to `dest` and open the copy read-write.
@@ -698,25 +720,10 @@ pub unsafe extern "C" fn infrastore_store_open_copy(
 ) -> i32 {
     clear_error();
     require_nonnull!(out);
-    let src = match unsafe { cstr_to_str(src) } {
-        Ok(s) => PathBuf::from(s),
-        Err(code) => {
-            set_error("invalid src path string");
-            return code;
-        }
-    };
-    let dest = match unsafe { cstr_to_str(dest) } {
-        Ok(s) => PathBuf::from(s),
-        Err(code) => {
-            set_error("invalid dest path string");
-            return code;
-        }
-    };
+    let src = ffi_try!(code unsafe { cstr_to_path(src, "invalid src path string") });
+    let dest = ffi_try!(code unsafe { cstr_to_path(dest, "invalid dest path string") });
     let catalog = ffi_try!(code catalog_from_code(catalog_mode));
-    let store = ffi_try!(core_lib::Store::open_copy(&src, &dest, catalog));
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
-    INFRASTORE_OK
+    unsafe { emit_store(out, core_lib::Store::open_copy(&src, &dest, catalog)) }
 }
 
 /// Open an existing store, choosing where the SQLite catalog lives.
@@ -738,20 +745,14 @@ pub unsafe extern "C" fn infrastore_store_open_with_catalog(
 ) -> i32 {
     clear_error();
     require_nonnull!(out);
-    let path = match unsafe { cstr_to_str(path) } {
-        Ok(s) => PathBuf::from(s),
-        Err(code) => {
-            set_error("invalid path string");
-            return code;
-        }
-    };
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "invalid path string") });
     let catalog = ffi_try!(code catalog_from_code(catalog_mode));
-    let store = ffi_try!(core_lib::Store::open_with_catalog(
-        &path, read_only, catalog
-    ));
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
-    INFRASTORE_OK
+    unsafe {
+        emit_store(
+            out,
+            core_lib::Store::open_with_catalog(&path, read_only, catalog),
+        )
+    }
 }
 
 /// Open the array half of an artifact whose catalog is absent, minting an empty one.
@@ -775,18 +776,9 @@ pub unsafe extern "C" fn infrastore_store_open_without_catalog(
 ) -> i32 {
     clear_error();
     require_nonnull!(out);
-    let path = match unsafe { cstr_to_str(path) } {
-        Ok(s) => PathBuf::from(s),
-        Err(code) => {
-            set_error("invalid path string");
-            return code;
-        }
-    };
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "invalid path string") });
     let catalog = ffi_try!(code catalog_from_code(catalog_mode));
-    let store = ffi_try!(core_lib::Store::open_without_catalog(&path, catalog));
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
-    INFRASTORE_OK
+    unsafe { emit_store(out, core_lib::Store::open_without_catalog(&path, catalog)) }
 }
 
 /// Report where `handle`'s catalog lives through `out`: `0` attached, `1` in memory.
@@ -874,16 +866,53 @@ unsafe fn build_typed_array(
     })
 }
 
-/// Parse the `infrastore_batch_add_single` argument list into an
-/// [`core_lib::AddRequest`].
+/// The arguments every `infrastore_batch_add_*` export shares, parsed: the
+/// owner, the name, the value array, the features, and the descriptors.
+///
+/// Each export parses these through [`parse_add_common`], builds its own
+/// type-specific [`core_lib::TimeSeriesData`] from `name` and `array`, and
+/// finishes with [`AddCommon::into_request`].
+struct AddCommon<'a> {
+    owner_type: &'a str,
+    owner_category: core_lib::OwnerCategory,
+    name: &'a str,
+    descriptors: core_lib::Descriptors,
+    features: core_lib::Features,
+}
+
+impl AddCommon<'_> {
+    /// Attach the descriptors to `data` and wrap it in an [`core_lib::AddRequest`].
+    fn into_request(
+        self,
+        owner_id: i64,
+        mut data: core_lib::TimeSeriesData,
+    ) -> core_lib::AddRequest {
+        // The descriptors describe the series, so they travel on it rather than
+        // on the request.
+        data.set_descriptors(self.descriptors);
+        core_lib::AddRequest {
+            owner_id,
+            owner_type: self.owner_type.to_string(),
+            owner_category: self.owner_category,
+            data,
+            features: self.features,
+        }
+    }
+}
+
+/// Parse the argument list shared by every `infrastore_batch_add_*` export,
+/// returning the parsed common fields and the value array.
+///
+/// # Safety
+///
+/// String pointers must be null or NUL-terminated; `dims_ptr` must reference
+/// `ndims` elements when `ndims` is nonzero and `data_ptr` `data_byte_len`
+/// bytes. The returned `&str`s borrow `owner_type` and `name`.
 #[allow(clippy::too_many_arguments)]
-unsafe fn build_single_request(
-    owner_id: i64,
+unsafe fn parse_add_common<'a>(
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
-    initial_ts_unix_ms: i64,
-    resolution: *const c_char,
     element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
@@ -896,33 +925,12 @@ unsafe fn build_single_request(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
-) -> Result<core_lib::AddRequest, i32> {
-    if data_ptr.is_null() {
-        set_error("data_ptr is null");
-        return Err(INFRASTORE_ERR_NULL_POINTER);
-    }
-    let owner_type = match unsafe { cstr_to_str(owner_type) } {
-        Ok(s) => s,
-        Err(c) => {
-            set_error("owner_type is invalid");
-            return Err(c);
-        }
-    };
-    let name = match unsafe { cstr_to_str(name) } {
-        Ok(s) => s,
-        Err(c) => {
-            set_error("name is invalid");
-            return Err(c);
-        }
-    };
-    let owner_category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
+) -> Result<(AddCommon<'a>, core_lib::TypedArray), i32> {
+    let owner_type = unsafe { cstr_to_str(owner_type) }.inspect_err(|_| {
+        set_error("owner_type is invalid");
+    })?;
+    let name = unsafe { cstr_to_str(name) }.inspect_err(|_| set_error("name is invalid"))?;
+    let owner_category = owner_category_from_int(owner_category)?;
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
@@ -930,142 +938,46 @@ unsafe fn build_single_request(
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
     let features = unsafe { parse_features_json(features_json) }?;
-
-    let initial_timestamp = match DateTime::from_timestamp_millis(initial_ts_unix_ms) {
-        Some(d) => d,
-        None => {
-            set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let resolution = unsafe { cstr_to_period(resolution)? };
     let element_type = unsafe { cstr_to_element_type(element_type) }?;
     let array =
         unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
-    let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array, name);
-
-    let mut data = core_lib::TimeSeriesData::SingleTimeSeries(single);
-    // The descriptors describe the series, so they travel on it rather than
-    // on the request.
-    data.set_descriptors(core_lib::Descriptors {
-        element_type,
-        units,
-        quantity_kind,
-        unit_system,
-        time_reference,
-        component_field,
-        application_data,
-    });
-    Ok(core_lib::AddRequest {
-        owner_id,
-        owner_type: owner_type.to_string(),
+    let common = AddCommon {
+        owner_type,
         owner_category,
-        data,
+        name,
+        descriptors: core_lib::Descriptors {
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            time_reference,
+            component_field,
+            application_data,
+        },
         features,
+    };
+    Ok((common, array))
+}
+
+/// Parse an `initial_ts_unix_ms` argument into an instant.
+fn initial_timestamp_from_ms(ms: i64) -> Result<DateTime<chrono::Utc>, i32> {
+    DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+        set_error(format!("invalid initial_ts_unix_ms: {ms}"));
+        INFRASTORE_ERR_INVALID_PARAMETER
     })
 }
 
-// ---- add_non_sequential / add_persistent ----------------------------------
+/// Record a core constructor's validation message and return
+/// `INFRASTORE_ERR_INVALID_PARAMETER`.
+fn invalid_parameter(msg: impl Into<String>) -> i32 {
+    set_error(msg);
+    INFRASTORE_ERR_INVALID_PARAMETER
+}
 
-/// Parse the argument list shared by the two irregular static types into an
-/// [`core_lib::AddRequest`].
-///
-/// `NonSequentialTimeSeries` and `PersistentTimeSeries` take byte-for-byte the
-/// same inputs — a strictly increasing `i64` unix-millisecond vector plus one
-/// value per entry — and differ only in what a read of the result *means*. So
-/// `kind` picks the core constructor and nothing else varies. Serves
-/// `infrastore_batch_add_non_sequential` and its `_persistent` twin.
-#[allow(clippy::too_many_arguments)]
-unsafe fn build_irregular_request(
-    kind: core_lib::TimeSeriesType,
-    owner_id: i64,
-    owner_type: *const c_char,
-    owner_category: i32,
-    name: *const c_char,
-    timestamps_unix_ms: *const i64,
-    timestamps_len: u64,
-    element_type: *const c_char,
-    ndims: u64,
-    dims_ptr: *const u64,
-    data_ptr: *const u8,
-    data_byte_len: u64,
-    application_data: *const c_char,
-    features_json: *const c_char,
-    units: *const c_char,
-    quantity_kind: *const c_char,
-    unit_system: *const c_char,
-    time_reference: *const c_char,
-    component_field: *const c_char,
-) -> Result<core_lib::AddRequest, i32> {
-    if timestamps_unix_ms.is_null() || data_ptr.is_null() {
-        set_error("an input pointer is null");
-        return Err(INFRASTORE_ERR_NULL_POINTER);
-    }
-    let owner_type = unsafe { cstr_to_str(owner_type) }?;
-    let name = unsafe { cstr_to_str(name) }?;
-    let owner_category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let timestamps = match unsafe {
-        slice::from_raw_parts(timestamps_unix_ms, timestamps_len as usize)
-            .iter()
-            .map(|&ns| DateTime::from_timestamp_millis(ns).ok_or(ns))
-            .collect::<std::result::Result<Vec<_>, _>>()
-    } {
-        Ok(timestamps) => timestamps,
-        Err(ns) => {
-            set_error(format!("invalid timestamp unix milliseconds: {ns}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let element_type = unsafe { cstr_to_element_type(element_type) }?;
-    let array =
-        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
-    let built = match kind {
-        core_lib::TimeSeriesType::PersistentTimeSeries => {
-            core_lib::PersistentTimeSeries::new(timestamps, array, name)
-                .map(core_lib::TimeSeriesData::PersistentTimeSeries)
-        }
-        _ => core_lib::NonSequentialTimeSeries::new(timestamps, array, name)
-            .map(core_lib::TimeSeriesData::NonSequentialTimeSeries),
-    };
-    let mut data = match built {
-        Ok(data) => data,
-        Err(error) => {
-            set_error(error);
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let features = unsafe { parse_features_json(features_json) }?;
-    let units = unsafe { cstr_to_optional_string(units) }?;
-    let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
-    let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
-    let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
-    let component_field = unsafe { cstr_to_optional_string(component_field) }?;
-    let application_data = unsafe { cstr_to_optional_string(application_data) }?;
-    // The descriptors describe the series, so they travel on it rather than
-    // on the request.
-    data.set_descriptors(core_lib::Descriptors {
-        element_type,
-        units,
-        quantity_kind,
-        unit_system,
-        time_reference,
-        component_field,
-        application_data,
-    });
-    Ok(core_lib::AddRequest {
-        owner_id,
-        owner_type: owner_type.to_string(),
-        owner_category,
-        data,
-        features,
-    })
+/// Push a built request onto `batch`, or return the error code.
+fn push_request(batch: &mut InfraStoreBatchHandle, req: Result<core_lib::AddRequest, i32>) -> i32 {
+    batch.items.push(ffi_try!(code req));
+    INFRASTORE_OK
 }
 
 // ---- get_single -----------------------------------------------------------
@@ -1135,13 +1047,9 @@ pub unsafe extern "C" fn infrastore_store_remove_by_ids(
         Some(owner) => store.inner.remove_by_ids_for_owner(&id_slice, owner),
         None => store.inner.remove_by_ids(&id_slice),
     };
-    match removed {
-        Ok(removed) => {
-            unsafe { *out_removed = removed as u64 };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let removed = ffi_try!(removed);
+    unsafe { *out_removed = removed as u64 };
+    INFRASTORE_OK
 }
 
 /// Return aggregate time-series counts.
@@ -1163,17 +1071,13 @@ pub unsafe extern "C" fn infrastore_store_counts(
         out_static_time_series,
         out_forecasts
     );
-    match store.inner.get_time_series_counts() {
-        Ok(c) => {
-            unsafe {
-                *out_components_with_time_series = c.components_with_time_series;
-                *out_static_time_series = c.static_time_series;
-                *out_forecasts = c.forecasts;
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    let c = ffi_try!(store.inner.get_time_series_counts());
+    unsafe {
+        *out_components_with_time_series = c.components_with_time_series;
+        *out_static_time_series = c.static_time_series;
+        *out_forecasts = c.forecasts;
     }
+    INFRASTORE_OK
 }
 
 /// Write the store's forecast parameters, optionally restricted to forecasts
@@ -1218,29 +1122,23 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_parameters(
     );
     let resolution = ffi_try!(code unsafe { cstr_to_optional_period(filter_resolution) });
     let interval = ffi_try!(code unsafe { cstr_to_optional_period(filter_interval) });
-    match store.inner.get_forecast_parameters(resolution, interval) {
-        Ok(p) => {
-            let present = p.horizon.is_some()
-                || p.interval.is_some()
-                || p.count.is_some()
-                || p.resolution.is_some();
-            unsafe {
-                *out_present = present;
-                // Period out-params are owned ISO-8601 C strings (null = unset),
-                // freed by the caller with `infrastore_string_free`.
-                *out_horizon = opt_period_cstr(p.horizon);
-                *out_interval = opt_period_cstr(p.interval);
-                *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
-                *out_resolution = opt_period_cstr(p.resolution);
-                *out_initial_ms = p
-                    .initial_timestamp
-                    .map(|t| t.timestamp_millis())
-                    .unwrap_or(-1);
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    let p = ffi_try!(store.inner.get_forecast_parameters(resolution, interval));
+    let present =
+        p.horizon.is_some() || p.interval.is_some() || p.count.is_some() || p.resolution.is_some();
+    unsafe {
+        *out_present = present;
+        // Period out-params are owned ISO-8601 C strings (null = unset),
+        // freed by the caller with `infrastore_string_free`.
+        *out_horizon = opt_period_cstr(p.horizon);
+        *out_interval = opt_period_cstr(p.interval);
+        *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
+        *out_resolution = opt_period_cstr(p.resolution);
+        *out_initial_ms = p
+            .initial_timestamp
+            .map(|t| t.timestamp_millis())
+            .unwrap_or(-1);
     }
+    INFRASTORE_OK
 }
 
 /// Verify that, per resolution, all `SingleTimeSeries` share one
@@ -1282,6 +1180,72 @@ pub unsafe extern "C" fn infrastore_store_check_static_consistency(
     INFRASTORE_OK
 }
 
+/// A `has_time_series_type`-gated `INFRASTORE_TYPE_*` code as an optional core
+/// type, recording the error for an unknown code.
+fn optional_ts_type(has: bool, code: i32) -> Result<Option<core_lib::TimeSeriesType>, i32> {
+    if !has {
+        return Ok(None);
+    }
+    time_series_type_from_int(code).map(Some).ok_or_else(|| {
+        set_error(format!("invalid time_series_type {code}"));
+        INFRASTORE_ERR_INVALID_PARAMETER
+    })
+}
+
+/// Write `periods` as a JSON array of ISO-8601 strings (probe-then-fetch).
+///
+/// # Safety
+///
+/// As [`write_str_out`].
+unsafe fn write_periods_json(
+    periods: &[core_lib::Period],
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    let arr: Vec<Value> = periods
+        .iter()
+        .map(|p| Value::from(p.to_iso8601()))
+        .collect();
+    unsafe { write_str_out(&Value::Array(arr).to_string(), buf, cap, out_len) };
+    INFRASTORE_OK
+}
+
+/// An optional period as its ISO-8601 JSON string, or `null`.
+fn period_json(p: Option<core_lib::Period>) -> Value {
+    p.map_or(Value::Null, |p| Value::from(p.to_iso8601()))
+}
+
+/// One static/forecast summary row as a JSON object: the grouping fields both
+/// summaries share, then the kind-specific `extra` fields, then `count`.
+#[allow(clippy::too_many_arguments)]
+fn summary_row(
+    owner_type: &str,
+    owner_category: &str,
+    time_series_type: &str,
+    name: &str,
+    initial_timestamp: Option<DateTime<chrono::Utc>>,
+    resolution: Option<core_lib::Period>,
+    extra: &[(&str, Value)],
+    count: i64,
+) -> Value {
+    let mut o = serde_json::Map::new();
+    o.insert("owner_type".into(), Value::from(owner_type));
+    o.insert("owner_category".into(), Value::from(owner_category));
+    o.insert("time_series_type".into(), Value::from(time_series_type));
+    o.insert("name".into(), Value::from(name));
+    o.insert(
+        "initial_timestamp_ms".into(),
+        initial_timestamp.map(|t| t.timestamp_millis()).into(),
+    );
+    o.insert("resolution".into(), period_json(resolution));
+    for (k, v) in extra {
+        o.insert((*k).into(), v.clone());
+    }
+    o.insert("count".into(), Value::from(count));
+    Value::Object(o)
+}
+
 /// List the distinct resolutions present in the store as a JSON array of
 /// ISO-8601 duration strings (e.g. `["PT1H","P1M"]`, ascending). When
 /// `has_time_series_type` is true the listing is
@@ -1306,25 +1270,9 @@ pub unsafe extern "C" fn infrastore_store_get_resolutions(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out_len);
-    let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
-            Some(t) => Some(t),
-            None => {
-                set_error(format!("invalid time_series_type {time_series_type}"));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        }
-    } else {
-        None
-    };
+    let ts_type = ffi_try!(code optional_ts_type(has_time_series_type, time_series_type));
     let resolutions = ffi_try!(store.inner.get_resolutions(ts_type));
-    let arr: Vec<Value> = resolutions
-        .iter()
-        .map(|p| Value::from(p.to_iso8601()))
-        .collect();
-    let json = Value::Array(arr).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_periods_json(&resolutions, buf, cap, out_len) }
 }
 
 /// List the distinct forecast intervals present in the store as a JSON array of
@@ -1349,25 +1297,9 @@ pub unsafe extern "C" fn infrastore_store_get_intervals(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out_len);
-    let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
-            Some(t) => Some(t),
-            None => {
-                set_error(format!("invalid time_series_type {time_series_type}"));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        }
-    } else {
-        None
-    };
+    let ts_type = ffi_try!(code optional_ts_type(has_time_series_type, time_series_type));
     let intervals = ffi_try!(store.inner.get_intervals(ts_type));
-    let arr: Vec<Value> = intervals
-        .iter()
-        .map(|p| Value::from(p.to_iso8601()))
-        .collect();
-    let json = Value::Array(arr).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_periods_json(&intervals, buf, cap, out_len) }
 }
 
 /// Write whether the store was opened read-only into `*out_read_only`.
@@ -1406,13 +1338,9 @@ pub unsafe extern "C" fn infrastore_store_is_empty(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out);
-    match store.inner.is_empty() {
-        Ok(empty) => {
-            unsafe { *out = empty };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let empty = ffi_try!(store.inner.is_empty());
+    unsafe { *out = empty };
+    INFRASTORE_OK
 }
 
 /// Write the store's backing HDF5 file path into `buf` (probe-then-fetch: call with a
@@ -1492,13 +1420,9 @@ pub unsafe extern "C" fn infrastore_store_num_distinct_arrays(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out_count);
-    match store.inner.num_distinct_arrays() {
-        Ok(n) => {
-            unsafe { *out_count = n };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let n = ffi_try!(store.inner.num_distinct_arrays());
+    unsafe { *out_count = n };
+    INFRASTORE_OK
 }
 
 /// Write the detailed counts: distinct owners per category and distinct stored
@@ -1523,18 +1447,14 @@ pub unsafe extern "C" fn infrastore_store_counts_detailed(
         out_static_time_series,
         out_forecasts
     );
-    match store.inner.time_series_counts_detailed() {
-        Ok(c) => {
-            unsafe {
-                *out_components = c.components_with_time_series;
-                *out_supplemental_attributes = c.supplemental_attributes_with_time_series;
-                *out_static_time_series = c.static_time_series_count;
-                *out_forecasts = c.forecast_count;
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    let c = ffi_try!(store.inner.time_series_counts_detailed());
+    unsafe {
+        *out_components = c.components_with_time_series;
+        *out_supplemental_attributes = c.supplemental_attributes_with_time_series;
+        *out_static_time_series = c.static_time_series_count;
+        *out_forecasts = c.forecast_count;
     }
+    INFRASTORE_OK
 }
 
 /// List the distinct owner ids of `owner_category` (`0` = Component, `1` =
@@ -1560,25 +1480,8 @@ pub unsafe extern "C" fn infrastore_store_list_owner_ids(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out_len);
-    let category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
-            Some(t) => Some(t),
-            None => {
-                set_error(format!("invalid time_series_type {time_series_type}"));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        }
-    } else {
-        None
-    };
+    let category = ffi_try!(code owner_category_from_int(owner_category));
+    let ts_type = ffi_try!(code optional_ts_type(has_time_series_type, time_series_type));
     let resolution = ffi_try!(code unsafe { cstr_to_optional_period(resolution) });
     let ids = ffi_try!(store.inner.list_owner_ids(category, ts_type, resolution));
     let arr: Vec<Value> = ids.iter().map(|id| Value::from(*id)).collect();
@@ -1606,36 +1509,19 @@ pub unsafe extern "C" fn infrastore_store_static_summary(
     let store = deref_handle!(ref handle);
     require_nonnull!(out_len);
     let rows = ffi_try!(store.inner.static_summary());
-    let dur = |d: Option<core_lib::Period>| {
-        d.map(|x| Value::from(x.to_iso8601()))
-            .unwrap_or(Value::Null)
-    };
-    let opt_i64 = |n: Option<i64>| n.map(Value::from).unwrap_or(Value::Null);
     let arr: Vec<Value> = rows
         .iter()
         .map(|r| {
-            let mut o = serde_json::Map::new();
-            o.insert("owner_type".into(), Value::from(r.owner_type.clone()));
-            o.insert(
-                "owner_category".into(),
-                Value::from(r.owner_category.as_str()),
-            );
-            o.insert(
-                "time_series_type".into(),
-                Value::from(r.time_series_type.as_str()),
-            );
-            o.insert("name".into(), Value::from(r.name.clone()));
-            o.insert(
-                "initial_timestamp_ms".into(),
-                r.initial_timestamp
-                    .map(|t| t.timestamp_millis())
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
-            );
-            o.insert("resolution".into(), dur(r.resolution));
-            o.insert("time_step_count".into(), opt_i64(r.time_step_count));
-            o.insert("count".into(), Value::from(r.count));
-            Value::Object(o)
+            summary_row(
+                &r.owner_type,
+                r.owner_category.as_str(),
+                r.time_series_type.as_str(),
+                &r.name,
+                r.initial_timestamp,
+                r.resolution,
+                &[("time_step_count", r.time_step_count.into())],
+                r.count,
+            )
         })
         .collect();
     let json = Value::Array(arr).to_string();
@@ -1663,38 +1549,23 @@ pub unsafe extern "C" fn infrastore_store_forecast_summary(
     let store = deref_handle!(ref handle);
     require_nonnull!(out_len);
     let rows = ffi_try!(store.inner.forecast_summary());
-    let dur = |d: Option<core_lib::Period>| {
-        d.map(|x| Value::from(x.to_iso8601()))
-            .unwrap_or(Value::Null)
-    };
-    let opt_i64 = |n: Option<i64>| n.map(Value::from).unwrap_or(Value::Null);
     let arr: Vec<Value> = rows
         .iter()
         .map(|r| {
-            let mut o = serde_json::Map::new();
-            o.insert("owner_type".into(), Value::from(r.owner_type.clone()));
-            o.insert(
-                "owner_category".into(),
-                Value::from(r.owner_category.as_str()),
-            );
-            o.insert(
-                "time_series_type".into(),
-                Value::from(r.time_series_type.as_str()),
-            );
-            o.insert("name".into(), Value::from(r.name.clone()));
-            o.insert(
-                "initial_timestamp_ms".into(),
-                r.initial_timestamp
-                    .map(|t| t.timestamp_millis())
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
-            );
-            o.insert("resolution".into(), dur(r.resolution));
-            o.insert("horizon".into(), dur(r.horizon));
-            o.insert("interval".into(), dur(r.interval));
-            o.insert("window_count".into(), opt_i64(r.window_count));
-            o.insert("count".into(), Value::from(r.count));
-            Value::Object(o)
+            summary_row(
+                &r.owner_type,
+                r.owner_category.as_str(),
+                r.time_series_type.as_str(),
+                &r.name,
+                r.initial_timestamp,
+                r.resolution,
+                &[
+                    ("horizon", period_json(r.horizon)),
+                    ("interval", period_json(r.interval)),
+                    ("window_count", r.window_count.into()),
+                ],
+                r.count,
+            )
         })
         .collect();
     let json = Value::Array(arr).to_string();
@@ -1754,13 +1625,9 @@ pub unsafe extern "C" fn infrastore_store_verify(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out_error_count);
-    match store.inner.verify_integrity() {
-        Ok(r) => {
-            unsafe { *out_error_count = r.errors.len() as u64 };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let r = ffi_try!(store.inner.verify_integrity());
+    unsafe { *out_error_count = r.errors.len() as u64 };
+    INFRASTORE_OK
 }
 
 /// Compact the store and return what it reclaimed as a JSON object
@@ -1826,10 +1693,8 @@ pub unsafe extern "C" fn infrastore_store_compact(
 pub unsafe extern "C" fn infrastore_store_begin_transaction(handle: *mut InfraStoreHandle) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    match store.inner.begin_transaction() {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.begin_transaction());
+    INFRASTORE_OK
 }
 
 /// Commit the innermost open transaction on `handle`.
@@ -1843,10 +1708,8 @@ pub unsafe extern "C" fn infrastore_store_begin_transaction(handle: *mut InfraSt
 pub unsafe extern "C" fn infrastore_store_commit_transaction(handle: *mut InfraStoreHandle) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    match store.inner.commit_transaction() {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.commit_transaction());
+    INFRASTORE_OK
 }
 
 /// Roll back the innermost open transaction on `handle`, undoing every operation
@@ -1864,10 +1727,8 @@ pub unsafe extern "C" fn infrastore_store_rollback_transaction(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    match store.inner.rollback_transaction() {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.rollback_transaction());
+    INFRASTORE_OK
 }
 
 /// Whether a transaction is currently open on `handle`. Writes `true`/`false`
@@ -1929,10 +1790,8 @@ pub unsafe extern "C" fn infrastore_store_set_write_buffer_bytes(
     // wider than the address space is the caller asking for no ceiling at all,
     // which is what saturating to `usize::MAX` gives them.
     let bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
-    match store.inner.set_write_buffer_bytes(bytes) {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.set_write_buffer_bytes(bytes));
+    INFRASTORE_OK
 }
 
 /// Flush pending store writes.
@@ -1944,10 +1803,8 @@ pub unsafe extern "C" fn infrastore_store_set_write_buffer_bytes(
 pub unsafe extern "C" fn infrastore_store_flush(handle: *mut InfraStoreHandle) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    match store.inner.flush() {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.flush());
+    INFRASTORE_OK
 }
 
 /// Persist the store's data to `path` (HDF5 arrays) and `<path>.sqlite` (metadata),
@@ -1963,17 +1820,9 @@ pub unsafe extern "C" fn infrastore_store_persist(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let path = match unsafe { cstr_to_str(path) } {
-        Ok(s) => PathBuf::from(s),
-        Err(code) => {
-            set_error("invalid path string");
-            return code;
-        }
-    };
-    match store.inner.persist_to(&path) {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "invalid path string") });
+    ffi_try!(store.inner.persist_to(&path));
+    INFRASTORE_OK
 }
 
 /// Persist only the **array half** to `path`, leaving no catalog beside it.
@@ -2003,17 +1852,9 @@ pub unsafe extern "C" fn infrastore_store_persist_arrays(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let path = match unsafe { cstr_to_str(path) } {
-        Ok(s) => PathBuf::from(s),
-        Err(code) => {
-            set_error("invalid path string");
-            return code;
-        }
-    };
-    match store.inner.persist_arrays_to(&path) {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "invalid path string") });
+    ffi_try!(store.inner.persist_arrays_to(&path));
+    INFRASTORE_OK
 }
 
 /// Write an in-memory catalog to this store's own `<path>.sqlite`, pairing it with the HDF5 file
@@ -2034,10 +1875,8 @@ pub unsafe extern "C" fn infrastore_store_persist_arrays(
 pub unsafe extern "C" fn infrastore_store_persist_catalog(handle: *mut InfraStoreHandle) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    match store.inner.persist_catalog() {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.persist_catalog());
+    INFRASTORE_OK
 }
 
 // ---- Attribute-based metadata access --------------------------------------
@@ -2079,27 +1918,24 @@ pub unsafe extern "C" fn infrastore_store_get_metadata_by_id(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out_len, out_present);
-    match store
-        .inner
-        .get_metadata_by_id(core_lib::TimeSeriesId(association_id))
-    {
-        Ok(Some(meta)) => {
+    match ffi_try!(
+        store
+            .inner
+            .get_metadata_by_id(core_lib::TimeSeriesId(association_id))
+    ) {
+        Some(meta) => {
             let json = Value::Object(metadata_to_map(&meta)).to_string();
             unsafe {
                 *out_present = true;
                 write_str_out(&json, buf, cap, out_len);
             }
-            INFRASTORE_OK
         }
-        Ok(None) => {
-            unsafe {
-                *out_present = false;
-                *out_len = 0;
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+        None => unsafe {
+            *out_present = false;
+            *out_len = 0;
+        },
     }
+    INFRASTORE_OK
 }
 
 /// Whether an association is filed under `association_id`.
@@ -2121,16 +1957,13 @@ pub unsafe extern "C" fn infrastore_store_association_exists(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out_present);
-    match store
-        .inner
-        .association_exists(core_lib::TimeSeriesId(association_id))
-    {
-        Ok(found) => {
-            unsafe { *out_present = found };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let found = ffi_try!(
+        store
+            .inner
+            .association_exists(core_lib::TimeSeriesId(association_id))
+    );
+    unsafe { *out_present = found };
+    INFRASTORE_OK
 }
 
 /// True iff at least one association matches the filter — the one existence
@@ -2160,13 +1993,9 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
     let store = deref_handle!(ref handle);
     require_nonnull!(out_present);
     let filter = ffi_try!(code unsafe { build_filter(filter) });
-    match store.inner.has_any_time_series(filter) {
-        Ok(present) => {
-            unsafe { *out_present = present };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let present = ffi_try!(store.inner.has_any_time_series(filter));
+    unsafe { *out_present = present };
+    INFRASTORE_OK
 }
 
 /// Fetch a stored array by its 32-byte content hash. On success the caller owns
@@ -2310,240 +2139,6 @@ unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) 
     }
 }
 
-/// Parse the `infrastore_batch_add_forecast` argument list (Deterministic /
-/// Scenarios) into an [`core_lib::AddRequest`].
-#[allow(clippy::too_many_arguments)]
-unsafe fn build_forecast_request(
-    owner_id: i64,
-    owner_type: *const c_char,
-    owner_category: i32,
-    name: *const c_char,
-    ts_type: i32,
-    initial_ts_unix_ms: i64,
-    resolution: *const c_char,
-    horizon: *const c_char,
-    interval: *const c_char,
-    count: u64,
-    element_type: *const c_char,
-    ndims: u64,
-    dims_ptr: *const u64,
-    data_ptr: *const u8,
-    data_byte_len: u64,
-    application_data: *const c_char,
-    features_json: *const c_char,
-    units: *const c_char,
-    quantity_kind: *const c_char,
-    unit_system: *const c_char,
-    time_reference: *const c_char,
-    component_field: *const c_char,
-) -> Result<core_lib::AddRequest, i32> {
-    if data_ptr.is_null() {
-        set_error("data_ptr is null");
-        return Err(INFRASTORE_ERR_NULL_POINTER);
-    }
-    let time_series_type = match time_series_type_from_int(ts_type) {
-        Some(t) => t,
-        None => {
-            set_error(format!("invalid time_series_type {ts_type}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let owner_type = unsafe { cstr_to_str(owner_type) }?;
-    let name = unsafe { cstr_to_str(name) }?;
-    let owner_category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let units = unsafe { cstr_to_optional_string(units) }?;
-    let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
-    let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
-    let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
-    let component_field = unsafe { cstr_to_optional_string(component_field) }?;
-    let features = unsafe { parse_features_json(features_json) }?;
-    let initial_timestamp = match DateTime::from_timestamp_millis(initial_ts_unix_ms) {
-        Some(d) => d,
-        None => {
-            set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let application_data = unsafe { cstr_to_optional_string(application_data) }?;
-    let element_type = unsafe { cstr_to_element_type(element_type) }?;
-    let array =
-        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
-
-    let resolution = unsafe { cstr_to_period(resolution)? };
-    let horizon = unsafe { cstr_to_period(horizon)? };
-    let interval = unsafe { cstr_to_period(interval)? };
-    let data = match time_series_type {
-        core_lib::TimeSeriesType::Deterministic => match core_lib::Deterministic::new(
-            initial_timestamp,
-            resolution,
-            horizon,
-            interval,
-            count as usize,
-            array,
-            name,
-        ) {
-            Ok(d) => core_lib::TimeSeriesData::Deterministic(d),
-            Err(e) => {
-                set_error(e);
-                return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-            }
-        },
-        core_lib::TimeSeriesType::Scenarios => {
-            let scenario_count = array.shape.first().copied().unwrap_or(0);
-            match core_lib::Scenarios::new(
-                initial_timestamp,
-                resolution,
-                horizon,
-                interval,
-                count as usize,
-                scenario_count,
-                array,
-                name,
-            ) {
-                Ok(s) => core_lib::TimeSeriesData::Scenarios(s),
-                Err(e) => {
-                    set_error(e);
-                    return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-                }
-            }
-        }
-        other => {
-            set_error(format!(
-                "infrastore_batch_add_forecast supports Deterministic and Scenarios; {other:?} \
-                 is not directly addable (DeterministicSingleTimeSeries is derived via \
-                 infrastore_store_transform_single_time_series)"
-            ));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-
-    let mut data = data;
-    // The descriptors describe the series, so they travel on it rather than
-    // on the request.
-    data.set_descriptors(core_lib::Descriptors {
-        element_type,
-        units,
-        quantity_kind,
-        unit_system,
-        time_reference,
-        component_field,
-        application_data,
-    });
-    Ok(core_lib::AddRequest {
-        owner_id,
-        owner_type: owner_type.to_string(),
-        owner_category,
-        data,
-        features,
-    })
-}
-
-/// Parse the `infrastore_batch_add_probabilistic` argument list into an
-/// [`core_lib::AddRequest`].
-#[allow(clippy::too_many_arguments)]
-unsafe fn build_probabilistic_request(
-    owner_id: i64,
-    owner_type: *const c_char,
-    owner_category: i32,
-    name: *const c_char,
-    initial_ts_unix_ms: i64,
-    resolution: *const c_char,
-    horizon: *const c_char,
-    interval: *const c_char,
-    count: u64,
-    percentiles_ptr: *const f64,
-    percentiles_len: u64,
-    element_type: *const c_char,
-    ndims: u64,
-    dims_ptr: *const u64,
-    data_ptr: *const u8,
-    data_byte_len: u64,
-    application_data: *const c_char,
-    features_json: *const c_char,
-    units: *const c_char,
-    quantity_kind: *const c_char,
-    unit_system: *const c_char,
-    time_reference: *const c_char,
-    component_field: *const c_char,
-) -> Result<core_lib::AddRequest, i32> {
-    if data_ptr.is_null() || percentiles_ptr.is_null() {
-        set_error("a required pointer is null");
-        return Err(INFRASTORE_ERR_NULL_POINTER);
-    }
-    let owner_type = unsafe { cstr_to_str(owner_type) }?;
-    let name = unsafe { cstr_to_str(name) }?;
-    let owner_category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let units = unsafe { cstr_to_optional_string(units) }?;
-    let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
-    let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
-    let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
-    let component_field = unsafe { cstr_to_optional_string(component_field) }?;
-    let features = unsafe { parse_features_json(features_json) }?;
-    let initial_timestamp = match DateTime::from_timestamp_millis(initial_ts_unix_ms) {
-        Some(d) => d,
-        None => {
-            set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let percentiles =
-        unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
-    let application_data = unsafe { cstr_to_optional_string(application_data) }?;
-    let element_type = unsafe { cstr_to_element_type(element_type) }?;
-    let array =
-        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
-
-    let prob = match core_lib::Probabilistic::new(
-        initial_timestamp,
-        unsafe { cstr_to_period(resolution)? },
-        unsafe { cstr_to_period(horizon)? },
-        unsafe { cstr_to_period(interval)? },
-        count as usize,
-        percentiles,
-        array,
-        name,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            set_error(e);
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
-    let mut data = core_lib::TimeSeriesData::Probabilistic(prob);
-    // The descriptors describe the series, so they travel on it rather than
-    // on the request.
-    data.set_descriptors(core_lib::Descriptors {
-        element_type,
-        units,
-        quantity_kind,
-        unit_system,
-        time_reference,
-        component_field,
-        application_data,
-    });
-    Ok(core_lib::AddRequest {
-        owner_id,
-        owner_type: owner_type.to_string(),
-        owner_category,
-        data,
-        features,
-    })
-}
-
 // ---- batched adds ----------------------------------------------------------
 //
 // A batch accumulates AddRequests client-side; `infrastore_store_add_batch` commits
@@ -2612,34 +2207,118 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
 ) -> i32 {
     clear_error();
     let batch = deref_handle!(mut batch, "batch handle is null");
-    match unsafe {
-        build_single_request(
-            owner_id,
-            owner_type,
-            owner_category,
-            name,
-            initial_ts_unix_ms,
-            resolution,
-            element_type,
-            ndims,
-            dims_ptr,
-            data_ptr,
-            data_byte_len,
-            application_data,
-            features_json,
-            units,
-            quantity_kind,
-            unit_system,
-            time_reference,
-            component_field,
-        )
-    } {
-        Ok(req) => {
-            batch.items.push(req);
-            INFRASTORE_OK
+    let req = (|| {
+        if data_ptr.is_null() {
+            set_error("data_ptr is null");
+            return Err(INFRASTORE_ERR_NULL_POINTER);
         }
-        Err(c) => c,
-    }
+        let (common, array) = unsafe {
+            parse_add_common(
+                owner_type,
+                owner_category,
+                name,
+                element_type,
+                ndims,
+                dims_ptr,
+                data_ptr,
+                data_byte_len,
+                application_data,
+                features_json,
+                units,
+                quantity_kind,
+                unit_system,
+                time_reference,
+                component_field,
+            )
+        }?;
+        let initial_timestamp = initial_timestamp_from_ms(initial_ts_unix_ms)?;
+        let resolution = unsafe { cstr_to_period(resolution) }?;
+        let single =
+            core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array, common.name);
+        let data = core_lib::TimeSeriesData::SingleTimeSeries(single);
+        Ok(common.into_request(owner_id, data))
+    })();
+    push_request(batch, req)
+}
+
+/// Build the request shared by the two irregular static types.
+///
+/// `NonSequentialTimeSeries` and `PersistentTimeSeries` take byte-for-byte the
+/// same inputs — a strictly increasing `i64` unix-millisecond vector plus one
+/// value per entry — and differ only in what a read of the result *means*. So
+/// `kind` picks the core constructor and nothing else varies.
+///
+/// # Safety
+///
+/// As for `infrastore_batch_add_non_sequential`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn batch_add_irregular(
+    kind: core_lib::TimeSeriesType,
+    batch: *mut InfraStoreBatchHandle,
+    owner_id: i64,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    timestamps_unix_ms: *const i64,
+    timestamps_len: u64,
+    element_type: *const c_char,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    application_data: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+    quantity_kind: *const c_char,
+    unit_system: *const c_char,
+    time_reference: *const c_char,
+    component_field: *const c_char,
+) -> i32 {
+    clear_error();
+    let batch = deref_handle!(mut batch, "batch handle is null");
+    let req = (|| {
+        if timestamps_unix_ms.is_null() || data_ptr.is_null() {
+            set_error("an input pointer is null");
+            return Err(INFRASTORE_ERR_NULL_POINTER);
+        }
+        let (common, array) = unsafe {
+            parse_add_common(
+                owner_type,
+                owner_category,
+                name,
+                element_type,
+                ndims,
+                dims_ptr,
+                data_ptr,
+                data_byte_len,
+                application_data,
+                features_json,
+                units,
+                quantity_kind,
+                unit_system,
+                time_reference,
+                component_field,
+            )
+        }?;
+        let timestamps = unsafe {
+            slice::from_raw_parts(timestamps_unix_ms, timestamps_len as usize)
+                .iter()
+                .map(|&ms| DateTime::from_timestamp_millis(ms).ok_or(ms))
+                .collect::<std::result::Result<Vec<_>, _>>()
+        }
+        .map_err(|ms| invalid_parameter(format!("invalid timestamp unix milliseconds: {ms}")))?;
+        let data = match kind {
+            core_lib::TimeSeriesType::PersistentTimeSeries => {
+                core_lib::PersistentTimeSeries::new(timestamps, array, common.name)
+                    .map(core_lib::TimeSeriesData::PersistentTimeSeries)
+            }
+            _ => core_lib::NonSequentialTimeSeries::new(timestamps, array, common.name)
+                .map(core_lib::TimeSeriesData::NonSequentialTimeSeries),
+        }
+        .map_err(invalid_parameter)?;
+        Ok(common.into_request(owner_id, data))
+    })();
+    push_request(batch, req)
 }
 
 /// Append a NonSequentialTimeSeries to a batch. Commit it with
@@ -2674,11 +2353,10 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     time_reference: *const c_char,
     component_field: *const c_char,
 ) -> i32 {
-    clear_error();
-    let batch = deref_handle!(mut batch, "batch handle is null");
-    match unsafe {
-        build_irregular_request(
+    unsafe {
+        batch_add_irregular(
             core_lib::TimeSeriesType::NonSequentialTimeSeries,
+            batch,
             owner_id,
             owner_type,
             owner_category,
@@ -2698,12 +2376,6 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             time_reference,
             component_field,
         )
-    } {
-        Ok(req) => {
-            batch.items.push(req);
-            INFRASTORE_OK
-        }
-        Err(c) => c,
     }
 }
 
@@ -2740,11 +2412,10 @@ pub unsafe extern "C" fn infrastore_batch_add_persistent(
     time_reference: *const c_char,
     component_field: *const c_char,
 ) -> i32 {
-    clear_error();
-    let batch = deref_handle!(mut batch, "batch handle is null");
-    match unsafe {
-        build_irregular_request(
+    unsafe {
+        batch_add_irregular(
             core_lib::TimeSeriesType::PersistentTimeSeries,
+            batch,
             owner_id,
             owner_type,
             owner_category,
@@ -2764,12 +2435,6 @@ pub unsafe extern "C" fn infrastore_batch_add_persistent(
             time_reference,
             component_field,
         )
-    } {
-        Ok(req) => {
-            batch.items.push(req);
-            INFRASTORE_OK
-        }
-        Err(c) => c,
     }
 }
 
@@ -2810,38 +2475,71 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
 ) -> i32 {
     clear_error();
     let batch = deref_handle!(mut batch, "batch handle is null");
-    match unsafe {
-        build_forecast_request(
-            owner_id,
-            owner_type,
-            owner_category,
-            name,
-            ts_type,
-            initial_ts_unix_ms,
-            resolution,
-            horizon,
-            interval,
-            count,
-            element_type,
-            ndims,
-            dims_ptr,
-            data_ptr,
-            data_byte_len,
-            application_data,
-            features_json,
-            units,
-            quantity_kind,
-            unit_system,
-            time_reference,
-            component_field,
-        )
-    } {
-        Ok(req) => {
-            batch.items.push(req);
-            INFRASTORE_OK
+    let req = (|| {
+        if data_ptr.is_null() {
+            set_error("data_ptr is null");
+            return Err(INFRASTORE_ERR_NULL_POINTER);
         }
-        Err(c) => c,
-    }
+        let time_series_type = time_series_type_from_int(ts_type)
+            .ok_or_else(|| invalid_parameter(format!("invalid time_series_type {ts_type}")))?;
+        let (common, array) = unsafe {
+            parse_add_common(
+                owner_type,
+                owner_category,
+                name,
+                element_type,
+                ndims,
+                dims_ptr,
+                data_ptr,
+                data_byte_len,
+                application_data,
+                features_json,
+                units,
+                quantity_kind,
+                unit_system,
+                time_reference,
+                component_field,
+            )
+        }?;
+        let initial_timestamp = initial_timestamp_from_ms(initial_ts_unix_ms)?;
+        let resolution = unsafe { cstr_to_period(resolution) }?;
+        let horizon = unsafe { cstr_to_period(horizon) }?;
+        let interval = unsafe { cstr_to_period(interval) }?;
+        let data = match time_series_type {
+            core_lib::TimeSeriesType::Deterministic => core_lib::Deterministic::new(
+                initial_timestamp,
+                resolution,
+                horizon,
+                interval,
+                count as usize,
+                array,
+                common.name,
+            )
+            .map(core_lib::TimeSeriesData::Deterministic),
+            core_lib::TimeSeriesType::Scenarios => {
+                let scenario_count = array.shape.first().copied().unwrap_or(0);
+                core_lib::Scenarios::new(
+                    initial_timestamp,
+                    resolution,
+                    horizon,
+                    interval,
+                    count as usize,
+                    scenario_count,
+                    array,
+                    common.name,
+                )
+                .map(core_lib::TimeSeriesData::Scenarios)
+            }
+            other => Err(format!(
+                "infrastore_batch_add_forecast supports Deterministic and Scenarios; {other:?} \
+                 is not directly addable (DeterministicSingleTimeSeries is derived via \
+                 infrastore_store_transform_single_time_series)"
+            )),
+        }
+        .map_err(invalid_parameter)?;
+        Ok(common.into_request(owner_id, data))
+    })();
+    push_request(batch, req)
 }
 
 /// Append a `Probabilistic` forecast to a batch. Commit it with
@@ -2883,39 +2581,48 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
 ) -> i32 {
     clear_error();
     let batch = deref_handle!(mut batch, "batch handle is null");
-    match unsafe {
-        build_probabilistic_request(
-            owner_id,
-            owner_type,
-            owner_category,
-            name,
-            initial_ts_unix_ms,
-            resolution,
-            horizon,
-            interval,
-            count,
-            percentiles_ptr,
-            percentiles_len,
-            element_type,
-            ndims,
-            dims_ptr,
-            data_ptr,
-            data_byte_len,
-            application_data,
-            features_json,
-            units,
-            quantity_kind,
-            unit_system,
-            time_reference,
-            component_field,
-        )
-    } {
-        Ok(req) => {
-            batch.items.push(req);
-            INFRASTORE_OK
+    let req = (|| {
+        if data_ptr.is_null() || percentiles_ptr.is_null() {
+            set_error("a required pointer is null");
+            return Err(INFRASTORE_ERR_NULL_POINTER);
         }
-        Err(c) => c,
-    }
+        let (common, array) = unsafe {
+            parse_add_common(
+                owner_type,
+                owner_category,
+                name,
+                element_type,
+                ndims,
+                dims_ptr,
+                data_ptr,
+                data_byte_len,
+                application_data,
+                features_json,
+                units,
+                quantity_kind,
+                unit_system,
+                time_reference,
+                component_field,
+            )
+        }?;
+        let initial_timestamp = initial_timestamp_from_ms(initial_ts_unix_ms)?;
+        let percentiles =
+            unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
+        let prob = core_lib::Probabilistic::new(
+            initial_timestamp,
+            unsafe { cstr_to_period(resolution) }?,
+            unsafe { cstr_to_period(horizon) }?,
+            unsafe { cstr_to_period(interval) }?,
+            count as usize,
+            percentiles,
+            array,
+            common.name,
+        )
+        .map_err(invalid_parameter)?;
+        let data = core_lib::TimeSeriesData::Probabilistic(prob);
+        Ok(common.into_request(owner_id, data))
+    })();
+    push_request(batch, req)
 }
 
 /// Submit every request in `batch` through one all-or-nothing bulk add — the
@@ -2943,26 +2650,22 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
     let batch = deref_handle!(mut batch, "batch handle is null");
     require_nonnull!(out_ids, out_len);
     let items = std::mem::take(&mut batch.items);
-    match store.inner.add_time_series_bulk(items) {
-        Ok(added) => {
-            let ids: Vec<i64> = added.iter().map(|i| i.get()).collect();
-            let len = added.len() as u64;
-            // An empty batch is reported as null (no free needed); otherwise
-            // the handed-out allocation is exactly `len` elements (see
-            // `vec_into_raw`), released with `infrastore_buffer_free_i64`.
-            let id_ptr = if ids.is_empty() {
-                ptr::null_mut()
-            } else {
-                vec_into_raw(ids).0
-            };
-            unsafe {
-                *out_ids = id_ptr;
-                *out_len = len;
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    let added = ffi_try!(store.inner.add_time_series_bulk(items));
+    let ids: Vec<i64> = added.iter().map(|i| i.get()).collect();
+    let len = added.len() as u64;
+    // An empty batch is reported as null (no free needed); otherwise
+    // the handed-out allocation is exactly `len` elements (see
+    // `vec_into_raw`), released with `infrastore_buffer_free_i64`.
+    let id_ptr = if ids.is_empty() {
+        ptr::null_mut()
+    } else {
+        vec_into_raw(ids).0
+    };
+    unsafe {
+        *out_ids = id_ptr;
+        *out_len = len;
     }
+    INFRASTORE_OK
 }
 
 // A bulk read fetches many full SingleTimeSeries in one call, reading each
@@ -3753,14 +3456,10 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
     require_nonnull!(out_count);
     // `owner_category < 0` means "all categories"; an empty `resolution` means
     // "all resolutions".
-    let category = match owner_category {
-        c if c < 0 => None,
-        0 => Some(core_lib::OwnerCategory::Component),
-        1 => Some(core_lib::OwnerCategory::SupplementalAttribute),
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
+    let category = if owner_category < 0 {
+        None
+    } else {
+        Some(ffi_try!(code owner_category_from_int(owner_category)))
     };
     let resolution = ffi_try!(code unsafe { cstr_to_optional_period(resolution) });
     let horizon = ffi_try!(code unsafe { cstr_to_period(horizon) });
@@ -3770,46 +3469,39 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
         normalize_single_window,
         require_uniform_forecast_grid,
     };
-    match store
-        .inner
-        .transform_single_time_series(horizon, interval, category, resolution, policy)
-    {
-        Ok(outcome) => {
-            unsafe {
-                *out_count = outcome.transformed as u64;
-                if !out_sources.is_null() {
-                    *out_sources = outcome.sources as u64;
-                }
-                if !out_interval_normalized.is_null() {
-                    *out_interval_normalized = outcome.interval_normalized;
-                }
-                if !out_interval.is_null() {
-                    let mut written = 0u64;
-                    write_str_out(
-                        &outcome.interval.to_iso8601(),
-                        out_interval,
-                        INTERVAL_BUF_LEN,
-                        &raw mut written,
-                    );
-                }
-                if !out_ids.is_null() {
-                    // `*out_count` elements, in the order they were written,
-                    // or null when nothing was. A dry run is the case to watch:
-                    // it reports the *planned* count in `*out_count` while
-                    // writing nothing, so the pointer, not the count, is the
-                    // caller's signal (documented above).
-                    let ids: Vec<i64> = outcome.written.iter().map(|i| i.get()).collect();
-                    *out_ids = if ids.is_empty() {
-                        ptr::null_mut()
-                    } else {
-                        vec_into_raw(ids).0
-                    };
-                }
-            }
-            INFRASTORE_OK
+    let outcome = ffi_try!(
+        store
+            .inner
+            .transform_single_time_series(horizon, interval, category, resolution, policy)
+    );
+    unsafe {
+        *out_count = outcome.transformed as u64;
+        write_opt(out_sources, outcome.sources as u64);
+        write_opt(out_interval_normalized, outcome.interval_normalized);
+        if !out_interval.is_null() {
+            let mut written = 0u64;
+            write_str_out(
+                &outcome.interval.to_iso8601(),
+                out_interval,
+                INTERVAL_BUF_LEN,
+                &raw mut written,
+            );
         }
-        Err(e) => map_core_error(e),
+        if !out_ids.is_null() {
+            // `*out_count` elements, in the order they were written,
+            // or null when nothing was. A dry run is the case to watch:
+            // it reports the *planned* count in `*out_count` while
+            // writing nothing, so the pointer, not the count, is the
+            // caller's signal (documented above).
+            let ids: Vec<i64> = outcome.written.iter().map(|i| i.get()).collect();
+            *out_ids = if ids.is_empty() {
+                ptr::null_mut()
+            } else {
+                vec_into_raw(ids).0
+            };
+        }
     }
+    INFRASTORE_OK
 }
 
 /// Shared emitter: write a forecast `TimeSeriesData` value into the C out-params
@@ -3838,93 +3530,68 @@ unsafe fn emit_forecast_data(
     out_percentiles: *mut *mut f64,
     out_percentiles_len: *mut u64,
 ) -> i32 {
-    // Helper: convert Duration to milliseconds.
-
-    match data {
-        core_lib::TimeSeriesData::Deterministic(det) => {
-            let dims: Vec<u64> = det.data.shape.iter().map(|&d| d as u64).collect();
-            let (dims_ptr, ndims) = vec_into_raw(dims);
-
-            let dtype = det.data.dtype.code();
-            let (data_ptr, byte_len) = vec_into_raw(det.data.bytes);
-
-            unsafe {
-                *out_initial_ts_unix_ms = det.initial_timestamp.timestamp_millis();
-                *out_resolution = period_cstr(det.resolution);
-                *out_horizon = period_cstr(det.horizon);
-                *out_interval = period_cstr(det.interval);
-                *out_count = det.count as u64;
-                *out_scenario_count = 0;
-                *out_ndims = ndims;
-                *out_dims = dims_ptr;
-                *out_dtype = dtype;
-                *out_data = data_ptr;
-                *out_data_byte_len = byte_len;
-                *out_percentiles = std::ptr::null_mut();
-                *out_percentiles_len = 0;
+    use core_lib::TimeSeriesData as D;
+    let (initial, resolution, horizon, interval, count, scenario_count, array, percentiles) =
+        match data {
+            D::Deterministic(f) => (
+                f.initial_timestamp,
+                f.resolution,
+                f.horizon,
+                f.interval,
+                f.count,
+                0,
+                f.data,
+                None,
+            ),
+            D::Probabilistic(f) => (
+                f.initial_timestamp,
+                f.resolution,
+                f.horizon,
+                f.interval,
+                f.count,
+                0,
+                f.data,
+                Some(f.percentiles),
+            ),
+            D::Scenarios(f) => (
+                f.initial_timestamp,
+                f.resolution,
+                f.horizon,
+                f.interval,
+                f.count,
+                f.scenario_count,
+                f.data,
+                None,
+            ),
+            other => {
+                set_error(format!(
+                    "key identifies a {} time series; use the matching read function",
+                    other.time_series_type().as_str()
+                ));
+                return INFRASTORE_ERR_INVALID_PARAMETER;
             }
-            INFRASTORE_OK
-        }
-        core_lib::TimeSeriesData::Probabilistic(prob) => {
-            let dims: Vec<u64> = prob.data.shape.iter().map(|&d| d as u64).collect();
-            let (dims_ptr, ndims) = vec_into_raw(dims);
-
-            let dtype = prob.data.dtype.code();
-            let (data_ptr, byte_len) = vec_into_raw(prob.data.bytes);
-
-            let (pct_ptr, pct_len) = vec_into_raw(prob.percentiles);
-
-            unsafe {
-                *out_initial_ts_unix_ms = prob.initial_timestamp.timestamp_millis();
-                *out_resolution = period_cstr(prob.resolution);
-                *out_horizon = period_cstr(prob.horizon);
-                *out_interval = period_cstr(prob.interval);
-                *out_count = prob.count as u64;
-                *out_scenario_count = 0;
-                *out_ndims = ndims;
-                *out_dims = dims_ptr;
-                *out_dtype = dtype;
-                *out_data = data_ptr;
-                *out_data_byte_len = byte_len;
-                *out_percentiles = pct_ptr;
-                *out_percentiles_len = pct_len;
-            }
-            INFRASTORE_OK
-        }
-        core_lib::TimeSeriesData::Scenarios(scen) => {
-            let scenario_count = scen.scenario_count;
-
-            let dims: Vec<u64> = scen.data.shape.iter().map(|&d| d as u64).collect();
-            let (dims_ptr, ndims) = vec_into_raw(dims);
-
-            let dtype = scen.data.dtype.code();
-            let (data_ptr, byte_len) = vec_into_raw(scen.data.bytes);
-
-            unsafe {
-                *out_initial_ts_unix_ms = scen.initial_timestamp.timestamp_millis();
-                *out_resolution = period_cstr(scen.resolution);
-                *out_horizon = period_cstr(scen.horizon);
-                *out_interval = period_cstr(scen.interval);
-                *out_count = scen.count as u64;
-                *out_scenario_count = scenario_count as u64;
-                *out_ndims = ndims;
-                *out_dims = dims_ptr;
-                *out_dtype = dtype;
-                *out_data = data_ptr;
-                *out_data_byte_len = byte_len;
-                *out_percentiles = std::ptr::null_mut();
-                *out_percentiles_len = 0;
-            }
-            INFRASTORE_OK
-        }
-        other => {
-            set_error(format!(
-                "key identifies a {} time series; use the matching read function",
-                other.time_series_type().as_str()
-            ));
-            INFRASTORE_ERR_INVALID_PARAMETER
-        }
+        };
+    let dims: Vec<u64> = array.shape.iter().map(|&d| d as u64).collect();
+    let (dims_ptr, ndims) = vec_into_raw(dims);
+    let dtype = array.dtype.code();
+    let (data_ptr, byte_len) = vec_into_raw(array.bytes);
+    let (pct_ptr, pct_len) = percentiles.map_or((std::ptr::null_mut(), 0), vec_into_raw);
+    unsafe {
+        *out_initial_ts_unix_ms = initial.timestamp_millis();
+        *out_resolution = period_cstr(resolution);
+        *out_horizon = period_cstr(horizon);
+        *out_interval = period_cstr(interval);
+        *out_count = count as u64;
+        *out_scenario_count = scenario_count as u64;
+        *out_ndims = ndims;
+        *out_dims = dims_ptr;
+        *out_dtype = dtype;
+        *out_data = data_ptr;
+        *out_data_byte_len = byte_len;
+        *out_percentiles = pct_ptr;
+        *out_percentiles_len = pct_len;
     }
+    INFRASTORE_OK
 }
 
 /// Full-metadata JSON object for one association row: the identity/descriptive
@@ -4230,13 +3897,9 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     let store = deref_handle!(mut handle);
     require_nonnull!(out_removed);
     let filter = ffi_try!(code unsafe { build_filter(filter) });
-    match store.inner.remove_by_filter(filter) {
-        Ok(n) => {
-            unsafe { *out_removed = n as u64 };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let n = ffi_try!(store.inner.remove_by_filter(filter));
+    unsafe { *out_removed = n as u64 };
+    INFRASTORE_OK
 }
 
 /// Every catalog filter the ABI accepts, as one record.
@@ -4327,14 +3990,7 @@ unsafe fn build_filter(filter: *const InfraStoreFilter) -> Result<core_lib::List
         out = out.owner_id(f.owner_id);
     }
     if f.has_owner_category {
-        let category = match f.owner_category {
-            0 => core_lib::OwnerCategory::Component,
-            1 => core_lib::OwnerCategory::SupplementalAttribute,
-            other => {
-                set_error(format!("invalid owner_category {other}"));
-                return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-            }
-        };
+        let category = owner_category_from_int(f.owner_category)?;
         out = out.owner_category(category);
     }
     if f.has_time_series_type {
@@ -4490,20 +4146,14 @@ pub unsafe extern "C" fn infrastore_store_copy_time_series(
             Err(c) => return c,
         }
     };
-    match store.inner.copy_time_series(
+    let id = ffi_try!(store.inner.copy_time_series(
         core_lib::TimeSeriesId(src_id),
         dst_owner_id,
         dst_type,
         renamed,
-    ) {
-        Ok(id) => {
-            if !out_id.is_null() {
-                unsafe { *out_id = id.get() };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    ));
+    unsafe { write_opt(out_id, id.get()) };
+    INFRASTORE_OK
 }
 
 /// Remove all time series, or all for a single owner when `has_owner` is true.
@@ -4524,22 +4174,13 @@ pub unsafe extern "C" fn infrastore_store_clear(
     clear_error();
     let store = deref_handle!(mut handle);
     let owner = if has_owner {
-        let category = match owner_category {
-            0 => core_lib::OwnerCategory::Component,
-            1 => core_lib::OwnerCategory::SupplementalAttribute,
-            other => {
-                set_error(format!("invalid owner_category {other}"));
-                return INFRASTORE_ERR_INVALID_PARAMETER;
-            }
-        };
+        let category = ffi_try!(code owner_category_from_int(owner_category));
         Some((owner_id, category))
     } else {
         None
     };
-    match store.inner.clear_time_series(owner) {
-        Ok(_) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.clear_time_series(owner));
+    INFRASTORE_OK
 }
 
 /// Reassign every time series owned by `old_owner_id` to `new_owner_id`.
@@ -4560,26 +4201,14 @@ pub unsafe extern "C" fn infrastore_store_replace_owner(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    let category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    match store
-        .inner
-        .replace_owner(old_owner_id, new_owner_id, category)
-    {
-        Ok(updated) => {
-            if !out_updated.is_null() {
-                unsafe { *out_updated = updated as u64 };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let category = ffi_try!(code owner_category_from_int(owner_category));
+    let updated = ffi_try!(
+        store
+            .inner
+            .replace_owner(old_owner_id, new_owner_id, category)
+    );
+    unsafe { write_opt(out_updated, updated as u64) };
+    INFRASTORE_OK
 }
 
 // ---- Association catalogs -------------------------------------------------
@@ -4671,6 +4300,114 @@ unsafe fn write_json_out<T: serde::Serialize>(
     }
 }
 
+// The supplemental-attribute and parent-child catalogs expose twin exports
+// (add one, add many, has, remove, replace component id) that differ only in
+// the core method and the row/filter type. The exports stay written out, since
+// cbindgen reads them from source rather than from expanded macros, and each
+// routes its body through one of the generic helpers below.
+
+type CoreResult<T> = std::result::Result<T, core_lib::TimeSeriesError>;
+
+/// Shared body of the single-row association adds: parse the two type names,
+/// hand them to `add`, and report the assigned id through `out_id` when non-null.
+///
+/// # Safety
+///
+/// As the calling export.
+unsafe fn assoc_add_one(
+    handle: *mut InfraStoreHandle,
+    first_type: *const c_char,
+    second_type: *const c_char,
+    out_id: *mut i64,
+    add: impl FnOnce(&mut core_lib::Store, String, String) -> CoreResult<i64>,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let first_type = ffi_try!(code unsafe { cstr_to_str(first_type) }).to_string();
+    let second_type = ffi_try!(code unsafe { cstr_to_str(second_type) }).to_string();
+    let id = ffi_try!(add(&mut store.inner, first_type, second_type));
+    unsafe { write_opt(out_id, id) };
+    INFRASTORE_OK
+}
+
+/// Shared body of the bulk association adds.
+///
+/// # Safety
+///
+/// As the calling export.
+unsafe fn assoc_add_many<T: serde::de::DeserializeOwned>(
+    handle: *mut InfraStoreHandle,
+    associations_json: *const c_char,
+    out_added: *mut u64,
+    out_ids: *mut *mut i64,
+    add: impl FnOnce(&mut core_lib::Store, Vec<T>) -> CoreResult<Vec<i64>>,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let assocs: Vec<T> = ffi_try!(code unsafe { assoc_rows_from_json(associations_json) });
+    let ids = ffi_try!(add(&mut store.inner, assocs));
+    unsafe { write_assigned_ids(ids, out_added, out_ids) };
+    INFRASTORE_OK
+}
+
+/// Shared body of the association existence probes.
+///
+/// # Safety
+///
+/// As the calling export.
+unsafe fn assoc_has<F: serde::de::DeserializeOwned + Default>(
+    handle: *const InfraStoreHandle,
+    filter_json: *const c_char,
+    out_found: *mut bool,
+    has: impl FnOnce(&core_lib::Store, &F) -> CoreResult<bool>,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    require_nonnull!(out_found);
+    let filter: F = ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
+    let found = ffi_try!(has(&store.inner, &filter));
+    unsafe { *out_found = found };
+    INFRASTORE_OK
+}
+
+/// Shared body of the filtered association removals.
+///
+/// # Safety
+///
+/// As the calling export.
+unsafe fn assoc_remove<F: serde::de::DeserializeOwned + Default>(
+    handle: *mut InfraStoreHandle,
+    filter_json: *const c_char,
+    out_removed: *mut u64,
+    remove: impl FnOnce(&mut core_lib::Store, &F) -> CoreResult<usize>,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let filter: F = ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
+    let n = ffi_try!(remove(&mut store.inner, &filter));
+    unsafe { write_opt(out_removed, n as u64) };
+    INFRASTORE_OK
+}
+
+/// Shared body of the component-id rewrites.
+///
+/// # Safety
+///
+/// As the calling export.
+unsafe fn assoc_replace_component_id(
+    handle: *mut InfraStoreHandle,
+    old_id: i64,
+    new_id: i64,
+    out_updated: *mut u64,
+    replace: impl FnOnce(&mut core_lib::Store, i64, i64) -> CoreResult<usize>,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let n = ffi_try!(replace(&mut store.inner, old_id, new_id));
+    unsafe { write_opt(out_updated, n as u64) };
+    INFRASTORE_OK
+}
+
 // ---- Supplemental-attribute associations ----------------------------------
 
 /// Attach supplemental attribute `(attribute_id, attribute_type)` to component
@@ -4693,33 +4430,25 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
     attribute_type: *const c_char,
     out_id: *mut i64,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let component_type = match unsafe { cstr_to_str(component_type) } {
-        Ok(s) => s.to_string(),
-        Err(c) => return c,
-    };
-    let attribute_type = match unsafe { cstr_to_str(attribute_type) } {
-        Ok(s) => s.to_string(),
-        Err(c) => return c,
-    };
-    match store.inner.add_supplemental_attribute_association(
-        core_lib::SupplementalAttributeAssociation {
-            component_id,
+    unsafe {
+        assoc_add_one(
+            handle,
             component_type,
-            attribute_id,
             attribute_type,
-            // The catalog assigns; this table's wire form carries no id.
-            id: None,
-        },
-    ) {
-        Ok(id) => {
-            if !out_id.is_null() {
-                unsafe { *out_id = id };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+            out_id,
+            |store, component_type, attribute_type| {
+                store.add_supplemental_attribute_association(
+                    core_lib::SupplementalAttributeAssociation {
+                        component_id,
+                        component_type,
+                        attribute_id,
+                        attribute_type,
+                        // The catalog assigns; this table's wire form carries no id.
+                        id: None,
+                    },
+                )
+            },
+        )
     }
 }
 
@@ -4748,16 +4477,14 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
     out_added: *mut u64,
     out_ids: *mut *mut i64,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let assocs: Vec<core_lib::SupplementalAttributeAssociation> =
-        ffi_try!(code unsafe { assoc_rows_from_json(associations_json) });
-    match store.inner.add_supplemental_attribute_associations(assocs) {
-        Ok(ids) => {
-            unsafe { write_assigned_ids(ids, out_added, out_ids) };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    unsafe {
+        assoc_add_many(
+            handle,
+            associations_json,
+            out_added,
+            out_ids,
+            core_lib::Store::add_supplemental_attribute_associations,
+        )
     }
 }
 
@@ -4776,17 +4503,13 @@ pub unsafe extern "C" fn infrastore_store_has_supplemental_attribute_association
     filter_json: *const c_char,
     out_found: *mut bool,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    require_nonnull!(out_found);
-    let filter: core_lib::SupplementalAttributeFilter =
-        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
-    match store.inner.has_supplemental_attribute_association(&filter) {
-        Ok(found) => {
-            unsafe { *out_found = found };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    unsafe {
+        assoc_has(
+            handle,
+            filter_json,
+            out_found,
+            core_lib::Store::has_supplemental_attribute_association,
+        )
     }
 }
 
@@ -4855,10 +4578,8 @@ pub unsafe extern "C" fn infrastore_store_list_supplemental_attribute_ids(
     require_nonnull!(out_len);
     let filter: core_lib::SupplementalAttributeFilter =
         ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
-    match store.inner.list_supplemental_attribute_ids(&filter) {
-        Ok(ids) => unsafe { write_json_out(&ids, buf, cap, out_len) },
-        Err(e) => map_core_error(e),
-    }
+    let ids = ffi_try!(store.inner.list_supplemental_attribute_ids(&filter));
+    unsafe { write_json_out(&ids, buf, cap, out_len) }
 }
 
 /// Distinct component ids matching `filter_json`, ascending, as a JSON array —
@@ -4881,10 +4602,8 @@ pub unsafe extern "C" fn infrastore_store_list_components_with_attributes(
     require_nonnull!(out_len);
     let filter: core_lib::SupplementalAttributeFilter =
         ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
-    match store.inner.list_components_with_attributes(&filter) {
-        Ok(ids) => unsafe { write_json_out(&ids, buf, cap, out_len) },
-        Err(e) => map_core_error(e),
-    }
+    let ids = ffi_try!(store.inner.list_components_with_attributes(&filter));
+    unsafe { write_json_out(&ids, buf, cap, out_len) }
 }
 
 /// Remove every attachment matching `filter_json`. When non-null, `out_removed`
@@ -4900,21 +4619,13 @@ pub unsafe extern "C" fn infrastore_store_remove_supplemental_attribute_associat
     filter_json: *const c_char,
     out_removed: *mut u64,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let filter: core_lib::SupplementalAttributeFilter =
-        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
-    match store
-        .inner
-        .remove_supplemental_attribute_associations(&filter)
-    {
-        Ok(n) => {
-            if !out_removed.is_null() {
-                unsafe { *out_removed = n as u64 };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    unsafe {
+        assoc_remove(
+            handle,
+            filter_json,
+            out_removed,
+            core_lib::Store::remove_supplemental_attribute_associations,
+        )
     }
 }
 
@@ -4933,19 +4644,14 @@ pub unsafe extern "C" fn infrastore_store_replace_supplemental_attribute_compone
     new_id: i64,
     out_updated: *mut u64,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    match store
-        .inner
-        .replace_supplemental_attribute_component_id(old_id, new_id)
-    {
-        Ok(n) => {
-            if !out_updated.is_null() {
-                unsafe { *out_updated = n as u64 };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    unsafe {
+        assoc_replace_component_id(
+            handle,
+            old_id,
+            new_id,
+            out_updated,
+            core_lib::Store::replace_supplemental_attribute_component_id,
+        )
     }
 }
 
@@ -4980,13 +4686,9 @@ pub unsafe extern "C" fn infrastore_store_count_supplemental_attribute_associati
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    match counted {
-        Ok(n) => {
-            unsafe { *out_count = n };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let n = ffi_try!(counted);
+    unsafe { *out_count = n };
+    INFRASTORE_OK
 }
 
 /// Attachment counts grouped by attribute type as a JSON array of
@@ -5037,10 +4739,8 @@ pub unsafe extern "C" fn infrastore_store_supplemental_attribute_summary(
     clear_error();
     let store = deref_handle!(ref handle);
     require_nonnull!(out_len);
-    match store.inner.supplemental_attribute_summary() {
-        Ok(rows) => unsafe { write_json_out(&rows, buf, cap, out_len) },
-        Err(e) => map_core_error(e),
-    }
+    let rows = ffi_try!(store.inner.supplemental_attribute_summary());
+    unsafe { write_json_out(&rows, buf, cap, out_len) }
 }
 
 // ---- Parent/child associations --------------------------------------------
@@ -5064,33 +4764,23 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
     child_type: *const c_char,
     out_id: *mut i64,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let parent_type = match unsafe { cstr_to_str(parent_type) } {
-        Ok(s) => s.to_string(),
-        Err(c) => return c,
-    };
-    let child_type = match unsafe { cstr_to_str(child_type) } {
-        Ok(s) => s.to_string(),
-        Err(c) => return c,
-    };
-    match store
-        .inner
-        .add_parent_child_association(core_lib::ParentChildAssociation {
-            parent_id,
+    unsafe {
+        assoc_add_one(
+            handle,
             parent_type,
-            child_id,
             child_type,
-            // The catalog assigns; this table's wire form carries no id.
-            id: None,
-        }) {
-        Ok(id) => {
-            if !out_id.is_null() {
-                unsafe { *out_id = id };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+            out_id,
+            |store, parent_type, child_type| {
+                store.add_parent_child_association(core_lib::ParentChildAssociation {
+                    parent_id,
+                    parent_type,
+                    child_id,
+                    child_type,
+                    // The catalog assigns; this table's wire form carries no id.
+                    id: None,
+                })
+            },
+        )
     }
 }
 
@@ -5116,16 +4806,14 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
     out_added: *mut u64,
     out_ids: *mut *mut i64,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let assocs: Vec<core_lib::ParentChildAssociation> =
-        ffi_try!(code unsafe { assoc_rows_from_json(associations_json) });
-    match store.inner.add_parent_child_associations(assocs) {
-        Ok(ids) => {
-            unsafe { write_assigned_ids(ids, out_added, out_ids) };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    unsafe {
+        assoc_add_many(
+            handle,
+            associations_json,
+            out_added,
+            out_ids,
+            core_lib::Store::add_parent_child_associations,
+        )
     }
 }
 
@@ -5143,17 +4831,13 @@ pub unsafe extern "C" fn infrastore_store_has_parent_child_association(
     filter_json: *const c_char,
     out_found: *mut bool,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(ref handle);
-    require_nonnull!(out_found);
-    let filter: core_lib::ParentChildFilter =
-        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
-    match store.inner.has_parent_child_association(&filter) {
-        Ok(found) => {
-            unsafe { *out_found = found };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    unsafe {
+        assoc_has(
+            handle,
+            filter_json,
+            out_found,
+            core_lib::Store::has_parent_child_association,
+        )
     }
 }
 
@@ -5177,10 +4861,8 @@ pub unsafe extern "C" fn infrastore_store_list_parent_child_associations(
     require_nonnull!(out_len);
     let filter: core_lib::ParentChildFilter =
         ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
-    match store.inner.list_parent_child_associations(&filter) {
-        Ok(rows) => unsafe { write_json_out(&rows, buf, cap, out_len) },
-        Err(e) => map_core_error(e),
-    }
+    let rows = ffi_try!(store.inner.list_parent_child_associations(&filter));
+    unsafe { write_json_out(&rows, buf, cap, out_len) }
 }
 
 /// Distinct ids on one end of the edges matching `filter_json`, ascending, as a
@@ -5215,10 +4897,8 @@ pub unsafe extern "C" fn infrastore_store_list_parent_child_ids(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    match ids {
-        Ok(ids) => unsafe { write_json_out(&ids, buf, cap, out_len) },
-        Err(e) => map_core_error(e),
-    }
+    let ids = ffi_try!(ids);
+    unsafe { write_json_out(&ids, buf, cap, out_len) }
 }
 
 /// Remove every edge matching `filter_json`. When non-null, `out_removed`
@@ -5234,18 +4914,13 @@ pub unsafe extern "C" fn infrastore_store_remove_parent_child_associations(
     filter_json: *const c_char,
     out_removed: *mut u64,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    let filter: core_lib::ParentChildFilter =
-        ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
-    match store.inner.remove_parent_child_associations(&filter) {
-        Ok(n) => {
-            if !out_removed.is_null() {
-                unsafe { *out_removed = n as u64 };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    unsafe {
+        assoc_remove(
+            handle,
+            filter_json,
+            out_removed,
+            core_lib::Store::remove_parent_child_associations,
+        )
     }
 }
 
@@ -5264,19 +4939,14 @@ pub unsafe extern "C" fn infrastore_store_replace_parent_child_component_id(
     new_id: i64,
     out_updated: *mut u64,
 ) -> i32 {
-    clear_error();
-    let store = deref_handle!(mut handle);
-    match store
-        .inner
-        .replace_parent_child_component_id(old_id, new_id)
-    {
-        Ok(n) => {
-            if !out_updated.is_null() {
-                unsafe { *out_updated = n as u64 };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
+    unsafe {
+        assoc_replace_component_id(
+            handle,
+            old_id,
+            new_id,
+            out_updated,
+            core_lib::Store::replace_parent_child_component_id,
+        )
     }
 }
 
@@ -5297,13 +4967,9 @@ pub unsafe extern "C" fn infrastore_store_count_parent_child_associations(
     require_nonnull!(out_count);
     let filter: core_lib::ParentChildFilter =
         ffi_try!(code unsafe { assoc_filter_from_json(filter_json) });
-    match store.inner.count_parent_child_associations(&filter) {
-        Ok(n) => {
-            unsafe { *out_count = n };
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let n = ffi_try!(store.inner.count_parent_child_associations(&filter));
+    unsafe { *out_count = n };
+    INFRASTORE_OK
 }
 
 // ---- Store attributes ------------------------------------------------------
@@ -5337,10 +5003,8 @@ pub unsafe extern "C" fn infrastore_store_set_store_attribute(
     let store = deref_handle!(mut handle);
     let key = ffi_try!(code unsafe { cstr_to_str(key) });
     let value = ffi_try!(code unsafe { cstr_to_str(value) });
-    match store.inner.set_store_attribute(key, value) {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.set_store_attribute(key, value));
+    INFRASTORE_OK
 }
 
 /// The value of store attribute `key`, through `out_value` as an **owned**
@@ -5373,31 +5037,23 @@ pub unsafe extern "C" fn infrastore_store_get_store_attribute(
     let store = deref_handle!(ref handle);
     require_nonnull!(out_value, out_len);
     let key = ffi_try!(code unsafe { cstr_to_str(key) });
-    match store.inner.get_store_attribute(key) {
-        Ok(None) => {
-            unsafe {
-                *out_value = std::ptr::null_mut();
-                *out_len = 0;
-            }
-            INFRASTORE_OK
+    let Some(value) = ffi_try!(store.inner.get_store_attribute(key)) else {
+        unsafe {
+            *out_value = std::ptr::null_mut();
+            *out_len = 0;
         }
-        // A value is the consumer's own text, so unlike the JSON payloads that
-        // go through `write_owned_str_out` it really can carry an interior NUL.
-        // Reporting that as an integrity error is what keeps a truncated value
-        // from being mistaken for the whole one.
-        Ok(Some(value)) => match opt_attr_cstring(Some(&value)) {
-            Ok(c) => {
-                let len = value.len() as u64;
-                unsafe {
-                    *out_value = into_raw_or_null(c);
-                    *out_len = len;
-                }
-                INFRASTORE_OK
-            }
-            Err(c) => c,
-        },
-        Err(e) => map_core_error(e),
+        return INFRASTORE_OK;
+    };
+    // A value is the consumer's own text, so unlike the JSON payloads that
+    // go through `write_owned_str_out` it really can carry an interior NUL.
+    // Reporting that as an integrity error is what keeps a truncated value
+    // from being mistaken for the whole one.
+    let c = ffi_try!(code opt_attr_cstring(Some(&value)));
+    unsafe {
+        *out_value = into_raw_or_null(c);
+        *out_len = value.len() as u64;
     }
+    INFRASTORE_OK
 }
 
 /// Every store attribute as a JSON object of key to value, through `out_json`
@@ -5455,15 +5111,9 @@ pub unsafe extern "C" fn infrastore_store_remove_store_attribute(
     clear_error();
     let store = deref_handle!(mut handle);
     let key = ffi_try!(code unsafe { cstr_to_str(key) });
-    match store.inner.remove_store_attribute(key) {
-        Ok(removed) => {
-            if !out_removed.is_null() {
-                unsafe { *out_removed = removed };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let removed = ffi_try!(store.inner.remove_store_attribute(key));
+    unsafe { write_opt(out_removed, removed) };
+    INFRASTORE_OK
 }
 
 // ---- OpenAPI-row association serde -----------------------------------------
@@ -5562,15 +5212,9 @@ pub unsafe extern "C" fn infrastore_store_import_time_series_associations_openap
     clear_error();
     let store = deref_handle!(mut handle);
     let json = ffi_try!(code unsafe { cstr_to_str(json) });
-    match store.inner.import_time_series_associations_openapi(json) {
-        Ok(n) => {
-            if !out_added.is_null() {
-                unsafe { *out_added = n as u64 };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let n = ffi_try!(store.inner.import_time_series_associations_openapi(json));
+    unsafe { write_opt(out_added, n as u64) };
+    INFRASTORE_OK
 }
 
 /// Bulk-ingest a JSON array of supplemental-attribute association OpenAPI rows
@@ -5591,18 +5235,13 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
     clear_error();
     let store = deref_handle!(mut handle);
     let json = ffi_try!(code unsafe { cstr_to_str(json) });
-    match store
-        .inner
-        .import_supplemental_attribute_associations_openapi(json)
-    {
-        Ok(n) => {
-            if !out_added.is_null() {
-                unsafe { *out_added = n as u64 };
-            }
-            INFRASTORE_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let n = ffi_try!(
+        store
+            .inner
+            .import_supplemental_attribute_associations_openapi(json)
+    );
+    unsafe { write_opt(out_added, n as u64) };
+    INFRASTORE_OK
 }
 
 // ---- Free helpers ---------------------------------------------------------
@@ -6281,10 +5920,8 @@ pub unsafe extern "C" fn infrastore_static_reader_read(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    match store.inner.static_read(&mut reader.inner, at) {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.static_read(&mut reader.inner, at));
+    INFRASTORE_OK
 }
 
 /// Expose group `group_idx`'s value bytes from the most recent read. The pointer
@@ -6602,10 +6239,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_read(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    match store.inner.forecast_read(&mut reader.inner, at) {
-        Ok(()) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
-    }
+    ffi_try!(store.inner.forecast_read(&mut reader.inner, at));
+    INFRASTORE_OK
 }
 
 /// Expose entry `entry_idx`'s window bytes from the most recent read. The

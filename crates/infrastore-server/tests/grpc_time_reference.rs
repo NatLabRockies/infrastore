@@ -53,9 +53,9 @@ fn store_with_every_spelling() -> Store {
         (4, Some(TimeReference::Zoneless)),
         (5, None),
     ] {
-        let s = SingleTimeSeries::new(initial, Duration::hours(1), values.clone(), "load");
-        let mut data = TimeSeriesData::SingleTimeSeries(s);
-        data.set_time_reference(reference);
+        let mut s = SingleTimeSeries::new(initial, Duration::hours(1), values.clone(), "load");
+        s.time_reference = reference;
+        let data = TimeSeriesData::SingleTimeSeries(s);
         store
             .add_time_series(
                 owner,
@@ -292,8 +292,8 @@ async fn an_irregular_series_carries_its_spelling_too() {
         "irregular",
     )
     .unwrap();
-    let mut data = TimeSeriesData::NonSequentialTimeSeries(nsts);
-    data.set_time_reference(Some(TimeReference::Zoneless));
+    let data =
+        TimeSeriesData::NonSequentialTimeSeries(nsts).with_time_reference(TimeReference::Zoneless);
     store
         .add_time_series(
             9,

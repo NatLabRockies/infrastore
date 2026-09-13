@@ -44,16 +44,10 @@ pub fn list(
             let items: Vec<Value> = metas.iter().map(list_json).collect();
             output::print_items(f, &items)?;
         }
-        Format::Csv => {
-            let headers = list_headers(wide);
+        f => {
             let rows: Vec<Vec<String>> = metas.iter().map(|m| list_row(m, wide)).collect();
-            output::display_csv_rows(&headers, &rows)?;
-        }
-        _ => {
-            let headers = list_headers(wide);
-            let rows: Vec<Vec<String>> = metas.iter().map(|m| list_row(m, wide)).collect();
-            output::display_table_dyn(&headers, &rows);
-            if metas.len() < total {
+            output::print_rows(f, &list_headers(wide), &rows)?;
+            if f != Format::Csv && metas.len() < total {
                 println!(
                     "{}",
                     color::dim(&format!(
@@ -236,11 +230,14 @@ impl RowWindow {
     /// Which of `len` rows this window keeps, and how many the display bound
     /// dropped.
     ///
-    /// Returns the selection rather than the rows: a caller that only needs
-    /// fifty rows of a million-row series has no reason to build the other
-    /// 999,950 first, and [`Selection`] is the arithmetic that lets it build
-    /// only what it prints.
-    fn select(&self, len: usize, format: Format) -> Result<(Selection, usize), String> {
+    /// Returns the kept row indices and their count rather than the rows: a
+    /// caller that only needs fifty rows of a million-row series has no reason
+    /// to build the other 999,950 first.
+    pub(crate) fn select(
+        &self,
+        len: usize,
+        format: Format,
+    ) -> Result<(Selection, usize, usize), String> {
         let step = match self.stride {
             Some(0) => return Err("--stride must be at least 1".to_string()),
             Some(n) => n,
@@ -248,7 +245,7 @@ impl RowWindow {
         };
         let strided = len.div_ceil(step);
         if format != Format::Table {
-            return Ok((Selection::new(0, step, strided), 0));
+            return Ok(((0..).step_by(step).take(strided), strided, 0));
         }
         let max = match (self.full, self.limit) {
             (true, _) => strided,
@@ -258,39 +255,19 @@ impl RowWindow {
         let shown = strided.min(max);
         let dropped = strided - shown;
         let first = if self.tail { strided - shown } else { 0 };
-        Ok((Selection::new(first * step, step, shown), dropped))
+        Ok(((first * step..).step_by(step).take(shown), shown, dropped))
     }
 
     /// Apply the window to rows that are already built, returning the kept rows
     /// and the number that were dropped.
     fn apply<T: Clone>(&self, rows: &[T], format: Format) -> Result<(Vec<T>, usize), String> {
-        let (sel, dropped) = self.select(rows.len(), format)?;
-        Ok((sel.iter().map(|i| rows[i].clone()).collect(), dropped))
+        let (sel, _, dropped) = self.select(rows.len(), format)?;
+        Ok((sel.map(|i| rows[i].clone()).collect(), dropped))
     }
 }
 
-/// An arithmetic run of row indices: `count` rows starting at `start`, `step`
-/// apart. The output of [`RowWindow::select`].
-#[derive(Debug, Clone, Copy)]
-struct Selection {
-    start: usize,
-    step: usize,
-    count: usize,
-}
-
-impl Selection {
-    fn new(start: usize, step: usize, count: usize) -> Self {
-        Self { start, step, count }
-    }
-
-    fn iter(self) -> impl Iterator<Item = usize> {
-        (0..self.count).map(move |k| self.start + k * self.step)
-    }
-
-    fn len(self) -> usize {
-        self.count
-    }
-}
+/// The row indices a [`RowWindow`] keeps: an arithmetic run.
+pub(crate) type Selection = std::iter::Take<std::iter::StepBy<std::ops::RangeFrom<usize>>>;
 
 // The `get` command's flags, handed to [`get`] as parsed.
 #[derive(Debug, clap::Args)]
@@ -334,7 +311,7 @@ pub fn get(store_path: &Path, opts: &GetArgs, format: Format) -> Result<(), Stri
         return render_plot(&meta, &data, opts.plot_width);
     }
 
-    match static_points(&data)? {
+    match static_points(&data) {
         // A `PersistentTimeSeries` is rendered as breakpoint/value pairs,
         // exactly as stored. A step function's value *between* those rows is
         // not printed: expanding it would need a target grid the caller has not
@@ -359,19 +336,13 @@ pub type StaticPoints<'a> = (Vec<DateTime<Utc>>, &'a TypedArray);
 ///
 /// A `SingleTimeSeries` grid is materialized by the core, which is what steps a
 /// calendar resolution correctly; the irregular types store their instants.
-pub fn static_points(data: &TimeSeriesData) -> Result<Option<StaticPoints<'_>>, String> {
-    Ok(Some(match data {
-        TimeSeriesData::SingleTimeSeries(s) => {
-            let times = (0..s.length)
-                .map(|i| s.timestamp_at(i))
-                .collect::<Result<_, _>>()
-                .map_err(|e| e.to_string())?;
-            (times, &s.data)
-        }
+pub fn static_points(data: &TimeSeriesData) -> Option<StaticPoints<'_>> {
+    Some(match data {
+        TimeSeriesData::SingleTimeSeries(s) => (s.timestamps().collect(), &s.data),
         TimeSeriesData::NonSequentialTimeSeries(ns) => (ns.timestamps.clone(), &ns.data),
         TimeSeriesData::PersistentTimeSeries(p) => (p.timestamps.clone(), &p.data),
-        _ => return Ok(None),
-    }))
+        _ => return None,
+    })
 }
 
 /// The window grid of a dense forecast *as it was read*.
@@ -441,7 +412,7 @@ impl ForecastGrid {
     }
 
     /// The issue time of window `c`.
-    fn issue_time(&self, c: usize) -> Result<DateTime<Utc>, String> {
+    pub(crate) fn issue_time(&self, c: usize) -> Result<DateTime<Utc>, String> {
         self.interval
             .add_to(self.initial_timestamp, c as i64)
             .ok_or_else(|| format!("timestamp overflow at window {c}"))
@@ -644,13 +615,9 @@ pub fn info(
             let obj: Map<String, Value> = rows.into_iter().collect();
             output::print_value(f, &Value::Object(obj))?;
         }
-        Format::Csv => {
-            let table = flat_rows(&rows, false);
-            output::display_csv_rows(&field_value_header(), &table)?;
-        }
-        _ => {
-            let table = flat_rows(&rows, true);
-            output::display_table_dyn(&field_value_header(), &table);
+        f => {
+            let table = flat_rows(&rows, f != Format::Csv);
+            output::print_rows(f, &field_value_header(), &table)?;
         }
     }
     Ok(())
@@ -699,7 +666,7 @@ fn render_sequential(
     let length = arr.length();
     // Select the rows before decoding any of them: a table showing fifty rows of
     // a year of five-minute data would otherwise stringify all 105,120 first.
-    let (sel, dropped) = window.select(length, format)?;
+    let (sel, kept, dropped) = window.select(length, format)?;
 
     match format {
         f if f.is_json() => {
@@ -709,19 +676,19 @@ fn render_sequential(
             // emitted grid really is shorter than the stored one — and the shape
             // printed beside it has to say so instead of describing an array
             // this document does not contain.
-            if sel.len() != length {
+            if kept != length {
                 let mut shape = arr.shape.clone();
                 if let Some(rows) = shape.first_mut() {
-                    *rows = sel.len();
+                    *rows = kept;
                 }
                 obj.insert("shape".into(), json!(shape));
             }
-            if sel.step > 1 {
-                obj.insert("stride".into(), json!(sel.step));
+            if let Some(n) = window.stride.filter(|&n| n > 1) {
+                obj.insert("stride".into(), json!(n));
             }
-            let ts: Vec<String> = sel.iter().map(|i| timestamp_at(timestamps, i)).collect();
+            let ts: Vec<String> = sel.clone().map(|i| timestamp_at(timestamps, i)).collect();
             let values: Vec<Value> = sel
-                .iter()
+                .clone()
                 .flat_map(|i| csv_io::bytes_to_json_values(arr.dtype, row_bytes(arr, i)))
                 .collect();
             obj.insert("timestamps".into(), json!(ts));
@@ -730,7 +697,7 @@ fn render_sequential(
             // packed slots, hand a JSON consumer the curves themselves. Narrowed
             // to the same rows the values above describe. The CSV form stays raw
             // on purpose — it is the shape `add` reads back.
-            if let Some(decoded) = selected_element_values(meta, arr, sel.iter()) {
+            if let Some(decoded) = selected_element_values(meta, arr, sel) {
                 obj.insert("element_values".into(), decoded);
             }
             output::print_value(f, &Value::Object(obj))?;
@@ -740,13 +707,9 @@ fn render_sequential(
         // initial_timestamp + resolution, but those live in the metadata rather
         // than in the file being piped.
         _ => {
-            let (header, rows) = sequential_table(timestamps, arr, sel.iter());
-            if format == Format::Csv {
-                output::display_csv_rows(&header, &rows)?;
-            } else {
-                output::display_table_dyn(&header, &rows);
-                report_dropped(dropped);
-            }
+            let (header, rows) = sequential_table(timestamps, arr, sel);
+            output::print_rows(format, &header, &rows)?;
+            report_dropped(dropped);
         }
     }
     Ok(())
@@ -857,20 +820,16 @@ fn render_forecast(
             }
             output::print_value(f, &Value::Object(obj))?;
         }
-        Format::Csv => {
-            let (shown, _) = rows_window.apply(&rows, format)?;
-            output::display_csv_rows(&headers, &shown)?;
-        }
-        _ => {
-            let (shown, dropped) = rows_window.apply(&rows, format)?;
-            output::display_table_dyn(&headers, &shown);
+        f => {
+            let (shown, dropped) = rows_window.apply(&rows, f)?;
+            output::print_rows(f, &headers, &shown)?;
             report_dropped(dropped);
         }
     }
     Ok(())
 }
 
-fn report_dropped(dropped: usize) {
+pub(crate) fn report_dropped(dropped: usize) {
     if dropped > 0 {
         println!(
             "{}",

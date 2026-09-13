@@ -27,7 +27,6 @@ clap = { workspace = true }
 serde = { workspace = true }
 infrastore-core = { workspace = true }
 infrastore-proto = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 tonic = { workspace = true }

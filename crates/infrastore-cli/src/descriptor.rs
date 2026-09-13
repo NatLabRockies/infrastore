@@ -374,35 +374,18 @@ fn parse_descriptors(text: &str, path: &str) -> Result<Vec<Descriptor>, String> 
                 .enumerate()
                 .map(|(i, v)| {
                     serde_json::from_value(v.clone())
-                        .map_err(|e| format!("parsing descriptor[{i}] in {path}: {}", explain(e)))
+                        .map_err(|e| format!("parsing descriptor[{i}] in {path}: {e}"))
                 })
                 .collect::<Result<_, _>>()?;
             Ok(series)
         }
         serde_json::Value::Object(_) => {
             let one: Descriptor = serde_json::from_value(value)
-                .map_err(|e| format!("parsing descriptor {path}: {}", explain(e)))?;
+                .map_err(|e| format!("parsing descriptor {path}: {e}"))?;
             Ok(vec![one])
         }
         _ => Err(format!("descriptor {path} must be a JSON object or array")),
     }
-}
-
-/// A serde error, plus a migration note for a retired field.
-///
-/// `deny_unknown_fields` reports a retired key as `unknown field ...`, which is
-/// accurate but does not tell a reader carrying an older descriptor what to do
-/// instead.
-fn explain(e: serde_json::Error) -> String {
-    let msg = e.to_string();
-    if msg.contains("has_header") {
-        return format!(
-            "{msg}\n  note: `has_header` was removed — every data CSV must now have a \
-             header row. Drop the key; if the CSV has no header, add one (e.g. `value`, \
-             or `timestamp,value`)."
-        );
-    }
-    msg
 }
 
 impl Descriptor {
@@ -629,9 +612,13 @@ impl Descriptor {
         let mut data = self.build_data(ts_type, dtype, per_step, &csv, layout)?;
         // The descriptor's `element_type`, `units`, and `application_data` describe the
         // series, so they are set on it rather than on the request.
-        data.set_descriptors(self.descriptors(element_type)?);
+        let descriptors = self.descriptors(element_type)?;
         self.warn_on_mixed_spellings(ts_type, &csv);
-        data.set_time_reference(self.time_reference(self.anchor_timestamp(ts_type, &csv))?);
+        let time_reference = self.time_reference(self.anchor_timestamp(ts_type, &csv))?;
+        data.set_descriptors(Descriptors {
+            time_reference,
+            ..descriptors
+        });
 
         Ok(AddRequest {
             owner_id,
@@ -781,8 +768,10 @@ impl Descriptor {
                     ))
                 }
             };
-            data.set_descriptors(self.descriptors(element_type)?);
-            data.set_time_reference(time_reference.clone());
+            data.set_descriptors(Descriptors {
+                time_reference: time_reference.clone(),
+                ..self.descriptors(element_type)?
+            });
             out.push(AddRequest {
                 owner_id,
                 owner_type,
@@ -963,7 +952,9 @@ impl Descriptor {
                 let horizon = self.period_field("horizon")?;
                 let interval = self.period_field("interval")?;
                 let count = self.usize_field("count", self.count)?;
-                let h = parse::period_horizon_steps(horizon, resolution)?;
+                let h = resolution
+                    .divide_into(&horizon)
+                    .map_err(|e| e.to_string())?;
                 let shape = with_elem(vec![h, count], elem);
                 let values = forecast_values(csv, layout, 1, h, count, per_step)?;
                 let arr = csv_io::build_typed_array(dtype, shape, &values)?;
@@ -981,7 +972,9 @@ impl Descriptor {
                     .percentiles
                     .clone()
                     .ok_or_else(|| "Probabilistic requires `percentiles`".to_string())?;
-                let h = parse::period_horizon_steps(horizon, resolution)?;
+                let h = resolution
+                    .divide_into(&horizon)
+                    .map_err(|e| e.to_string())?;
                 let shape = with_elem(vec![percentiles.len(), h, count], elem);
                 let values = forecast_values(csv, layout, percentiles.len(), h, count, per_step)?;
                 let arr = csv_io::build_typed_array(dtype, shape, &values)?;
@@ -1002,7 +995,9 @@ impl Descriptor {
                 let horizon = self.period_field("horizon")?;
                 let interval = self.period_field("interval")?;
                 let count = self.usize_field("count", self.count)?;
-                let h = parse::period_horizon_steps(horizon, resolution)?;
+                let h = resolution
+                    .divide_into(&horizon)
+                    .map_err(|e| e.to_string())?;
                 let denom = h * count * per_step;
                 let scenario_count = match self.scenario_count {
                     Some(s) => s,
@@ -1122,34 +1117,19 @@ fn read_owner_map_csv(path: &Path) -> Result<BTreeMap<String, (i64, Option<Strin
         }
     };
 
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(false)
-        .trim(csv::Trim::All)
-        .from_path(path)
-        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    const COLUMNS: [&str; 3] = ["column", "owner_id", "owner_type"];
+    let mut reader = csv_io::open_reader(path)?;
     let mut out: BTreeMap<String, (i64, Option<String>)> = BTreeMap::new();
     for (row, record) in reader.records().enumerate() {
-        let record =
-            record.map_err(|e| format!("reading {} row {}: {e}", path.display(), row + 1))?;
-        let column = record.get(0).unwrap_or_default().trim().to_string();
-        let raw_id = record.get(1).unwrap_or_default().trim();
-        let owner_id = raw_id.parse::<i64>().map_err(|_| {
-            format!(
-                "{} row {}: owner_id '{raw_id}' is not an integer",
-                path.display(),
-                row + 1
-            )
-        })?;
-        let owner_type = if has_type {
-            record
-                .get(2)
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-        } else {
-            None
-        };
+        let mut record = record.map_err(|e| csv_io::row_error(path, row, &COLUMNS, &e))?;
+        // An empty `owner_type` cell reads as `None`, so a two-column file is
+        // padded with one.
+        if !has_type {
+            record.push_field("");
+        }
+        let (column, owner_id, owner_type): (String, i64, Option<String>) = record
+            .deserialize(None)
+            .map_err(|e| csv_io::row_error(path, row, &COLUMNS, &e))?;
         if out.insert(column.clone(), (owner_id, owner_type)).is_some() {
             return Err(format!("{} maps column '{column}' twice", path.display()));
         }

@@ -118,10 +118,6 @@ fn print_column(header: &str, values: &[String], format: Format) -> Result<(), S
     let rows: Vec<Vec<String>> = values.iter().map(|v| vec![v.clone()]).collect();
     match format {
         f if f.is_json() => output::print_items(f, values),
-        Format::Csv => output::display_csv_rows(&headers, &rows),
-        _ => {
-            output::display_table_dyn(&headers, &rows);
-            Ok(())
-        }
+        f => output::print_rows(f, &headers, &rows),
     }
 }

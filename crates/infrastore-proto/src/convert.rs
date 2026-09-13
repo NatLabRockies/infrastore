@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use infrastore_core::{
-    Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow,
+    Descriptors, Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow,
     NonSequentialTimeSeries, OwnerCategory, Period, PersistentTimeSeries, Probabilistic, Scenarios,
     SingleTimeSeries, StaticSummaryRow, TimeReference, TimeSeriesData, TimeSeriesId,
     TimeSeriesMetadata, TimeSeriesType, TypedArray, UnitSystem,
@@ -169,17 +169,14 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
     let mut data_hash = [0u8; 32];
     data_hash.copy_from_slice(&m.data_hash);
 
-    let initial_timestamp = match &m.initial_timestamp_rfc3339 {
-        Some(s) => Some(DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))?),
-        None => None,
-    };
+    let initial_timestamp = parse_opt_rfc3339(m.initial_timestamp_rfc3339.as_deref())?;
     let timestamps = if m.timestamps_rfc3339.is_empty() {
         None
     } else {
         Some(
             m.timestamps_rfc3339
                 .iter()
-                .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
+                .map(|s| rfc3339(s))
                 .collect::<Result<Vec<_>, _>>()?,
         )
     };
@@ -380,8 +377,7 @@ pub fn read_resp_to_time_series_data(
     })?;
     let series: Result<TimeSeriesData, ConvertError> = match ts_type {
         TimeSeriesType::SingleTimeSeries => {
-            let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
-                .map(|d| d.with_timezone(&Utc))?;
+            let initial_timestamp = rfc3339(&resp.initial_timestamp_rfc3339)?;
             Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
                 initial_timestamp,
                 resolution: period_from_iso(&resp.resolution)?,
@@ -399,38 +395,27 @@ pub fn read_resp_to_time_series_data(
                 application_data: None,
             }))
         }
-        TimeSeriesType::NonSequentialTimeSeries => {
+        // Wire-identical, as on the way out: only the constructor differs.
+        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
             let timestamps = resp
                 .timestamps_rfc3339
                 .iter()
-                .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
+                .map(|s| rfc3339(s))
                 .collect::<Result<Vec<_>, _>>()?;
-            let series =
-                NonSequentialTimeSeries::new(timestamps, data, name).map_err(|message| {
-                    ConvertError::InvalidValue {
-                        field: "timestamps_rfc3339",
-                        message,
-                    }
-                })?;
-            Ok(TimeSeriesData::NonSequentialTimeSeries(series))
-        }
-        TimeSeriesType::PersistentTimeSeries => {
-            let timestamps = resp
-                .timestamps_rfc3339
-                .iter()
-                .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
-                .collect::<Result<Vec<_>, _>>()?;
-            let series = PersistentTimeSeries::new(timestamps, data, name).map_err(|message| {
-                ConvertError::InvalidValue {
-                    field: "timestamps_rfc3339",
-                    message,
-                }
-            })?;
-            Ok(TimeSeriesData::PersistentTimeSeries(series))
+            if ts_type == TimeSeriesType::NonSequentialTimeSeries {
+                NonSequentialTimeSeries::new(timestamps, data, name)
+                    .map(TimeSeriesData::NonSequentialTimeSeries)
+            } else {
+                PersistentTimeSeries::new(timestamps, data, name)
+                    .map(TimeSeriesData::PersistentTimeSeries)
+            }
+            .map_err(|message| ConvertError::InvalidValue {
+                field: "timestamps_rfc3339",
+                message,
+            })
         }
         TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => {
-            let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
-                .map(|d| d.with_timezone(&Utc))?;
+            let initial_timestamp = rfc3339(&resp.initial_timestamp_rfc3339)?;
             let det = Deterministic::new(
                 initial_timestamp,
                 period_from_iso(&resp.resolution)?,
@@ -447,8 +432,7 @@ pub fn read_resp_to_time_series_data(
             Ok(TimeSeriesData::Deterministic(det))
         }
         TimeSeriesType::Probabilistic => {
-            let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
-                .map(|d| d.with_timezone(&Utc))?;
+            let initial_timestamp = rfc3339(&resp.initial_timestamp_rfc3339)?;
             let prob = Probabilistic::new(
                 initial_timestamp,
                 period_from_iso(&resp.resolution)?,
@@ -466,8 +450,7 @@ pub fn read_resp_to_time_series_data(
             Ok(TimeSeriesData::Probabilistic(prob))
         }
         TimeSeriesType::Scenarios => {
-            let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
-                .map(|d| d.with_timezone(&Utc))?;
+            let initial_timestamp = rfc3339(&resp.initial_timestamp_rfc3339)?;
             let scen = Scenarios::new(
                 initial_timestamp,
                 period_from_iso(&resp.resolution)?,
@@ -492,12 +475,17 @@ pub fn read_resp_to_time_series_data(
     // descriptors ride along for the same reason: they describe the values, the
     // core attaches them on a local read, and a client should not be able to
     // tell the two paths apart.
-    let mut series = series?.with_element_type(element_type);
-    series.set_units(units);
-    series.set_quantity_kind(quantity_kind);
-    series.set_unit_system(unit_system);
-    series.set_time_reference(time_reference);
-    series.set_component_field(component_field);
+    let mut series = series?;
+    series.set_descriptors(Descriptors {
+        element_type,
+        units,
+        quantity_kind,
+        unit_system,
+        time_reference,
+        component_field,
+        // Not on the wire; the constructors leave it unset too.
+        application_data: None,
+    });
     Ok(series)
 }
 
@@ -519,15 +507,7 @@ fn parse_time_reference(s: Option<&str>) -> Result<Option<TimeReference>, Conver
 
 /// Decode an optional ISO-8601 period from a proto3 `optional string` field.
 pub fn opt_period(s: Option<&str>) -> Result<Option<Period>, ConvertError> {
-    match s {
-        Some(s) => Period::from_iso8601(s)
-            .map(Some)
-            .map_err(|e| ConvertError::InvalidValue {
-                field: "period",
-                message: e.to_string(),
-            }),
-        None => Ok(None),
-    }
+    s.map(period_from_iso).transpose()
 }
 
 /// Decode a required ISO-8601 period string.
@@ -623,13 +603,12 @@ fn unknown_enum(field: &'static str, v: i32) -> ConvertError {
     }
 }
 
+fn rfc3339(s: &str) -> Result<DateTime<Utc>, ConvertError> {
+    Ok(DateTime::parse_from_rfc3339(s)?.with_timezone(&Utc))
+}
+
 fn parse_opt_rfc3339(s: Option<&str>) -> Result<Option<DateTime<Utc>>, ConvertError> {
-    match s {
-        Some(s) => Ok(Some(
-            DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))?,
-        )),
-        None => Ok(None),
-    }
+    s.map(rfc3339).transpose()
 }
 
 #[cfg(test)]

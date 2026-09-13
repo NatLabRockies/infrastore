@@ -10,10 +10,10 @@ use sha2::{Digest, Sha256};
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{
-    AssociationIdentity, MetadataFilter, MetadataStore, ParentChildAssociation, ParentChildFilter,
-    SeriesFamily, SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
-    SupplementalAttributeSummaryRow, TypeMatch, array_is_referenced_in_tx,
-    timestamps_are_referenced_in_tx,
+    AssociationIdentity, Endpoint, MetadataFilter, MetadataStore, PARENT_CHILD_TABLE,
+    ParentChildAssociation, ParentChildFilter, SUPPLEMENTAL_ATTRIBUTE_TABLE, SeriesFamily,
+    SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
+    SupplementalAttributeSummaryRow, TypeMatch, hash_is_referenced_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
@@ -378,9 +378,13 @@ impl ReadWindow {
 
     fn resolve_single(&self, meta: &TimeSeriesMetadata) -> Result<TimeRange> {
         self.reject_count("a SingleTimeSeries")?;
-        let initial = required_initial(meta, "SingleTimeSeries")?;
-        let resolution = required_resolution(meta, "SingleTimeSeries")?;
-        let length = required_length(meta, "SingleTimeSeries")?;
+        let initial = required(
+            meta.initial_timestamp,
+            "SingleTimeSeries",
+            "initial_timestamp",
+        )?;
+        let resolution = required(meta.resolution, "SingleTimeSeries", "resolution")?;
+        let length = required(meta.length, "SingleTimeSeries", "length")?;
         let start = self.start.unwrap_or(initial);
         // `steps_between` is the strict counterpart of the `floor_steps` a raw
         // range would use: a start between two steps is off the grid, not the
@@ -422,10 +426,7 @@ impl ReadWindow {
             "timestamps"
         };
         self.reject_count(&format!("a {label}"))?;
-        let timestamps = meta
-            .timestamps
-            .as_ref()
-            .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing {vector}")))?;
+        let timestamps = required(meta.timestamps.as_ref(), label, vector)?;
         let total = timestamps.len();
         if total == 0 {
             return Err(TimeSeriesError::InvalidParameter(format!(
@@ -467,9 +468,9 @@ impl ReadWindow {
     fn resolve_forecast(&self, meta: &TimeSeriesMetadata) -> Result<TimeRange> {
         let label = format!("a {:?}", meta.time_series_type);
         self.reject_len(&label)?;
-        let initial = required_initial(meta, &label)?;
-        let interval = required_interval(meta, &label)?;
-        let stored = required_count(meta, &label)?;
+        let initial = required(meta.initial_timestamp, &label, "initial_timestamp")?;
+        let interval = required(meta.interval, &label, "interval")?;
+        let stored = required(meta.count, &label, "count")?;
         let start = self.start.unwrap_or(initial);
         // A single-window forecast carries a zero interval — there is no second
         // window to step to — so its only valid start is `initial`.
@@ -1003,21 +1004,18 @@ struct Mark {
     timestamps: usize,
 }
 
-/// The distinct hashes in `candidates` that `referenced` says no catalog row
-/// references, probed inside the caller's savepoint.
-///
-/// `referenced` is what "references" means for the kind of hash: an array is
-/// referenced through `data_hash`, an explicit time axis through
-/// `timestamps_hash`.
+/// The distinct hashes in `candidates` that no catalog row references through
+/// `column`, probed inside the caller's savepoint. An array is referenced
+/// through `data_hash`, an explicit time axis through `timestamps_hash`.
 fn unreferenced_in(
     tx: &rusqlite::Connection,
     candidates: &[[u8; 32]],
-    referenced: impl Fn(&rusqlite::Connection, &[u8; 32]) -> Result<bool>,
+    column: &str,
 ) -> Result<Vec<[u8; 32]>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for hash in candidates {
-        if seen.insert(*hash) && !referenced(tx, hash)? {
+        if seen.insert(*hash) && !hash_is_referenced_in_tx(tx, column, hash)? {
             out.push(*hash);
         }
     }
@@ -1032,8 +1030,8 @@ fn unreferenced(metadata: &mut MetadataStore, candidates: &FileObjects) -> Resul
     }
     let tx = metadata.savepoint()?;
     let out = FileObjects {
-        arrays: unreferenced_in(&tx, &candidates.arrays, array_is_referenced_in_tx)?,
-        timestamps: unreferenced_in(&tx, &candidates.timestamps, timestamps_are_referenced_in_tx)?,
+        arrays: unreferenced_in(&tx, &candidates.arrays, "data_hash")?,
+        timestamps: unreferenced_in(&tx, &candidates.timestamps, "timestamps_hash")?,
     };
     tx.commit()?;
     Ok(out)
@@ -1183,29 +1181,46 @@ pub struct Store {
 }
 
 impl Store {
+    /// Assemble a store from its opened halves, with no transaction open.
+    fn from_parts(
+        backend: Box<dyn StorageBackend>,
+        metadata: MetadataStore,
+        read_only: bool,
+        file_path: Option<&Path>,
+        catalog: CatalogMode,
+        open_guard: Option<OpenGuard>,
+    ) -> Self {
+        Self {
+            backend,
+            metadata,
+            read_only,
+            file_path: file_path.map(Path::to_path_buf),
+            catalog,
+            txn: OpenTxn::default(),
+            write_buffer: WriteBuffer::new(),
+            _open_guard: open_guard,
+        }
+    }
+
     /// Create a new store. With `in_memory=true`, no filesystem I/O occurs;
     /// otherwise an HDF5 file is created at `path` and a catalog SQLite
     /// file at `<path>.sqlite` holds metadata.
     ///
     /// Uses the default compression policy ([`Compression::default`]). Use
-    /// [`Self::create_with_compression`] to choose a different filter.
+    /// [`Self::create_with_catalog`] to choose a different filter.
     pub fn create(path: Option<&Path>, in_memory: bool) -> Result<Self> {
-        Self::create_with_compression(path, in_memory, Compression::default())
+        Self::create_with_catalog(
+            path,
+            in_memory,
+            Compression::default(),
+            default_catalog(in_memory),
+        )
     }
 
-    /// Like [`Self::create`], but applies `compression` to HDF5 data
-    /// variables. The setting is persisted with the store so later appends
-    /// reuse it. It is ignored for `in_memory` stores, which never touch disk.
-    pub fn create_with_compression(
-        path: Option<&Path>,
-        in_memory: bool,
-        compression: Compression,
-    ) -> Result<Self> {
-        Self::create_with_catalog(path, in_memory, compression, default_catalog(in_memory))
-    }
-
-    /// Like [`Self::create_with_compression`], but places the catalog
-    /// explicitly. See [`CatalogMode`].
+    /// Like [`Self::create`], but applies `compression` to HDF5 data variables
+    /// and places the catalog explicitly. See [`CatalogMode`]. The compression
+    /// setting is persisted with the store so later appends reuse it; it is
+    /// ignored for `in_memory` stores, which never touch disk.
     ///
     /// `in_memory=true` admits only [`CatalogMode::InMemory`]: there is no
     /// artifact on disk for a catalog file to sit beside.
@@ -1237,16 +1252,14 @@ impl Store {
                     "an in-memory store has no file for CatalogMode::Attached to sit beside".into(),
                 ));
             }
-            return Ok(Self {
-                backend: Box::new(MemoryBackend::new()),
-                metadata: MetadataStore::open_in_memory()?,
-                read_only: false,
-                file_path: None,
+            return Ok(Self::from_parts(
+                Box::new(MemoryBackend::new()),
+                MetadataStore::open_in_memory()?,
+                false,
+                None,
                 catalog,
-                txn: OpenTxn::default(),
-                write_buffer: WriteBuffer::new(),
-                _open_guard: None,
-            });
+                None,
+            ));
         }
         let file_path = path.ok_or_else(|| {
             TimeSeriesError::InvalidParameter("path is required when in_memory=false".into())
@@ -1266,16 +1279,14 @@ impl Store {
         let generation = mint_generation();
         backend.set_generation(&generation)?;
         metadata.set_generation(&generation)?;
-        Ok(Self {
-            backend: Box::new(backend),
+        Ok(Self::from_parts(
+            Box::new(backend),
             metadata,
-            read_only: false,
-            file_path: Some(file_path.to_path_buf()),
+            false,
+            Some(file_path),
             catalog,
-            txn: OpenTxn::default(),
-            write_buffer: WriteBuffer::new(),
-            _open_guard: Some(open_guard),
-        })
+            Some(open_guard),
+        ))
     }
 
     /// Like [`Self::create_with_catalog`], but discards any artifact already at
@@ -1308,8 +1319,8 @@ impl Store {
         let sqlite = catalog_sqlite_path(path);
         // Sidecars before the database they belong to: a `-wal` outliving its
         // database is the one ordering SQLite would try to recover from.
-        remove_if_exists(&sqlite_sidecar(&sqlite, "-wal"))?;
-        remove_if_exists(&sqlite_sidecar(&sqlite, "-shm"))?;
+        remove_if_exists(&append_to_file_name(&sqlite, "-wal"))?;
+        remove_if_exists(&append_to_file_name(&sqlite, "-shm"))?;
         remove_if_exists(&sqlite)?;
         remove_if_exists(path)?;
         drop(guard);
@@ -1487,16 +1498,14 @@ impl Store {
         // cannot change the generation (migrating is not a save), so on any
         // ordinary path the two agree and this is free.
         check_generation_pair(backend.generation(), metadata.generation()?)?;
-        Ok(Self {
+        Ok(Self::from_parts(
             backend,
             metadata,
             read_only,
-            file_path: Some(path.to_path_buf()),
+            Some(path),
             catalog,
-            txn: OpenTxn::default(),
-            write_buffer: WriteBuffer::new(),
-            _open_guard: Some(open_guard),
-        })
+            Some(open_guard),
+        ))
     }
 
     /// Open the array half of an artifact whose catalog is **absent**, minting
@@ -1561,16 +1570,14 @@ impl Store {
         if let Some(generation) = backend.generation() {
             metadata.set_generation(&generation)?;
         }
-        Ok(Self {
+        Ok(Self::from_parts(
             backend,
             metadata,
-            read_only: false,
-            file_path: Some(path.to_path_buf()),
+            false,
+            Some(path),
             catalog,
-            txn: OpenTxn::default(),
-            write_buffer: WriteBuffer::new(),
-            _open_guard: Some(open_guard),
-        })
+            Some(open_guard),
+        ))
     }
 
     pub fn read_only(&self) -> bool {
@@ -2108,14 +2115,10 @@ impl Store {
         len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        if let Some(array) = self.write_buffer.get(hash) {
-            check_dtype(hash, array.dtype, dtype)?;
-            let slice = slice_axis(array, 0, start..start + len)?;
-            out.clear();
-            out.extend_from_slice(&slice.bytes);
-            return Ok(());
-        }
-        self.backend.read_range_into(hash, dtype, start, len, out)
+        let slice = self.get_slice(hash, dtype, start..start + len)?;
+        out.clear();
+        out.extend_from_slice(&slice.bytes);
+        Ok(())
     }
 
     /// Whole arrays, one per hash, in `hashes` order. The ones the file holds
@@ -2637,7 +2640,7 @@ impl Store {
             // rows removed in the same batch is reclaimed as well.
             Self::check_no_orphaned_dst(tx, removed_sts)?;
             let garbage = FileObjects {
-                arrays: unreferenced_in(tx, &removed_hashes, array_is_referenced_in_tx)?,
+                arrays: unreferenced_in(tx, &removed_hashes, "data_hash")?,
                 timestamps: Vec::new(),
             };
             Ok((removed_hashes.len(), garbage))
@@ -2683,10 +2686,7 @@ impl Store {
                 Some((id, category)) => MetadataStore::delete_by_owner(tx, id, category)?,
                 None => MetadataStore::delete_all(tx)?,
             };
-            Ok((
-                removed.len(),
-                unreferenced_in(tx, &removed, array_is_referenced_in_tx)?,
-            ))
+            Ok((removed.len(), unreferenced_in(tx, &removed, "data_hash")?))
         })?;
         // Clearing is the one removal that reclaims time axes eagerly, for the
         // reason the feature sets go in the same breath: it orphans them
@@ -3039,17 +3039,13 @@ impl Store {
         };
         match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => {
-                let initial = meta.initial_timestamp.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(
-                        "SingleTimeSeries missing initial_timestamp".into(),
-                    )
-                })?;
-                let resolution = meta.resolution.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError("SingleTimeSeries missing resolution".into())
-                })?;
-                let length = meta.length.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
-                })?;
+                let initial = required(
+                    meta.initial_timestamp,
+                    "SingleTimeSeries",
+                    "initial_timestamp",
+                )?;
+                let resolution = required(meta.resolution, "SingleTimeSeries", "resolution")?;
+                let length = required(meta.length, "SingleTimeSeries", "length")?;
 
                 let (data, sliced_initial, sliced_length) = match time_range {
                     None => {
@@ -3119,14 +3115,12 @@ impl Store {
                 }))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
-                let timestamps = meta.timestamps.clone().ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(
-                        "NonSequentialTimeSeries missing timestamps".into(),
-                    )
-                })?;
-                let length = meta.length.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError("NonSequentialTimeSeries missing length".into())
-                })?;
+                let timestamps = required(
+                    meta.timestamps.clone(),
+                    "NonSequentialTimeSeries",
+                    "timestamps",
+                )?;
+                let length = required(meta.length, "NonSequentialTimeSeries", "length")?;
                 if timestamps.len() != length {
                     return Err(TimeSeriesError::IntegrityError(format!(
                         "NonSequentialTimeSeries has {} timestamps but length {length}",
@@ -3159,14 +3153,12 @@ impl Store {
                 Ok(TimeSeriesData::NonSequentialTimeSeries(series))
             }
             TimeSeriesType::PersistentTimeSeries => {
-                let timestamps = meta.timestamps.clone().ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(
-                        "PersistentTimeSeries missing breakpoints".into(),
-                    )
-                })?;
-                let length = meta.length.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError("PersistentTimeSeries missing length".into())
-                })?;
+                let timestamps = required(
+                    meta.timestamps.clone(),
+                    "PersistentTimeSeries",
+                    "breakpoints",
+                )?;
+                let length = required(meta.length, "PersistentTimeSeries", "length")?;
                 if timestamps.len() != length {
                     return Err(TimeSeriesError::IntegrityError(format!(
                         "PersistentTimeSeries has {} breakpoints but length {length}",
@@ -3249,11 +3241,12 @@ impl Store {
             }
             TimeSeriesType::Deterministic => {
                 let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
-                let initial = required_initial(meta, "Deterministic")?;
-                let resolution = required_resolution(meta, "Deterministic")?;
-                let horizon = required_horizon(meta, "Deterministic")?;
-                let interval = required_interval(meta, "Deterministic")?;
-                let count = required_count(meta, "Deterministic")?;
+                let initial =
+                    required(meta.initial_timestamp, "Deterministic", "initial_timestamp")?;
+                let resolution = required(meta.resolution, "Deterministic", "resolution")?;
+                let horizon = required(meta.horizon, "Deterministic", "horizon")?;
+                let interval = required(meta.interval, "Deterministic", "interval")?;
+                let count = required(meta.count, "Deterministic", "count")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // Validate stored shape: [H, count, *E].
                 validate_forecast_shape(&arr, &[h, count], "Deterministic")?;
@@ -3280,14 +3273,14 @@ impl Store {
 
             TimeSeriesType::Probabilistic => {
                 let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
-                let initial = required_initial(meta, "Probabilistic")?;
-                let resolution = required_resolution(meta, "Probabilistic")?;
-                let horizon = required_horizon(meta, "Probabilistic")?;
-                let interval = required_interval(meta, "Probabilistic")?;
-                let count = required_count(meta, "Probabilistic")?;
-                let percentiles = meta.percentiles.clone().ok_or_else(|| {
-                    TimeSeriesError::IntegrityError("Probabilistic missing percentiles".into())
-                })?;
+                let initial =
+                    required(meta.initial_timestamp, "Probabilistic", "initial_timestamp")?;
+                let resolution = required(meta.resolution, "Probabilistic", "resolution")?;
+                let horizon = required(meta.horizon, "Probabilistic", "horizon")?;
+                let interval = required(meta.interval, "Probabilistic", "interval")?;
+                let count = required(meta.count, "Probabilistic", "count")?;
+                let percentiles =
+                    required(meta.percentiles.clone(), "Probabilistic", "percentiles")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 let p = percentiles.len();
                 // Validate stored shape: [P, H, count, *E].
@@ -3316,11 +3309,11 @@ impl Store {
 
             TimeSeriesType::Scenarios => {
                 let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
-                let initial = required_initial(meta, "Scenarios")?;
-                let resolution = required_resolution(meta, "Scenarios")?;
-                let horizon = required_horizon(meta, "Scenarios")?;
-                let interval = required_interval(meta, "Scenarios")?;
-                let count = required_count(meta, "Scenarios")?;
+                let initial = required(meta.initial_timestamp, "Scenarios", "initial_timestamp")?;
+                let resolution = required(meta.resolution, "Scenarios", "resolution")?;
+                let horizon = required(meta.horizon, "Scenarios", "horizon")?;
+                let interval = required(meta.interval, "Scenarios", "interval")?;
+                let count = required(meta.count, "Scenarios", "count")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // scenario_count = arr.shape[0]; validate remaining dims.
                 if arr.shape.len() < 3 {
@@ -3358,11 +3351,20 @@ impl Store {
                 // [total_len, *E]. Synthesize a Deterministic of shape
                 // [H, count, *E] by gathering windows.
                 let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
-                let initial = required_initial(meta, "DeterministicSingleTimeSeries")?;
-                let resolution = required_resolution(meta, "DeterministicSingleTimeSeries")?;
-                let horizon = required_horizon(meta, "DeterministicSingleTimeSeries")?;
-                let interval = required_interval(meta, "DeterministicSingleTimeSeries")?;
-                let count = required_count(meta, "DeterministicSingleTimeSeries")?;
+                let initial = required(
+                    meta.initial_timestamp,
+                    "DeterministicSingleTimeSeries",
+                    "initial_timestamp",
+                )?;
+                let resolution = required(
+                    meta.resolution,
+                    "DeterministicSingleTimeSeries",
+                    "resolution",
+                )?;
+                let horizon = required(meta.horizon, "DeterministicSingleTimeSeries", "horizon")?;
+                let interval =
+                    required(meta.interval, "DeterministicSingleTimeSeries", "interval")?;
+                let count = required(meta.count, "DeterministicSingleTimeSeries", "count")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // A single-window view carries a zero interval; its one window
                 // starts at index 0, so the step width is irrelevant.
@@ -3447,7 +3449,7 @@ impl Store {
         &self,
         filter: ListFilter,
     ) -> Result<Vec<TimeSeriesMetadata>> {
-        self.metadata.list(&filter.into(), &*self.backend)
+        self.metadata.list(&filter.into(), Some(&*self.backend))
     }
 
     /// The stored timestamp vector content-addressed by `hash`, or
@@ -3486,7 +3488,7 @@ impl Store {
     /// one part of a row that costs a read per row, and a listing almost never
     /// wants it. Read the series itself ([`Self::read_by_id`]) to get it.
     pub fn list_metadata(&self, filter: ListFilter) -> Result<Vec<TimeSeriesMetadata>> {
-        self.metadata.list_without_timestamps(&filter.into())
+        self.metadata.list(&filter.into(), None)
     }
 
     /// The catalog rows `ids` names, in the order asked for.
@@ -3507,7 +3509,7 @@ impl Store {
     #[tracing::instrument(skip(self, ids), fields(count = ids.len()))]
     pub fn list_metadata_by_ids(&self, ids: &[TimeSeriesId]) -> Result<Vec<TimeSeriesMetadata>> {
         let raw: Vec<i64> = ids.iter().map(|i| i.get()).collect();
-        let found = self.metadata.list_by_ids_without_timestamps(&raw)?;
+        let found = self.metadata.list_by_ids(&raw, None)?;
         let by_id: HashMap<TimeSeriesId, &TimeSeriesMetadata> = found
             .iter()
             .filter_map(|m| m.id.map(|id| (id, m)))
@@ -3807,16 +3809,8 @@ impl Store {
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
         // All-or-nothing, exactly as in `static_read`.
-        match self.forecast_read_into(reader, at) {
-            Ok(()) => {
-                reader.mark_read(at);
-                Ok(())
-            }
-            Err(e) => {
-                reader.invalidate();
-                Err(e)
-            }
-        }
+        self.forecast_read_into(reader, at)
+            .inspect_err(|_| reader.invalidate())
     }
 
     /// The body of [`Self::forecast_read`], so that every `?` in it lands on
@@ -3913,7 +3907,7 @@ impl Store {
     /// no row, because a read is already committed to acting on the reference.
     fn rows_for_ids(&self, ids: &[TimeSeriesId]) -> Result<Vec<TimeSeriesMetadata>> {
         let raw: Vec<i64> = ids.iter().map(|i| i.get()).collect();
-        let found = self.metadata.list_by_ids(&raw, &*self.backend)?;
+        let found = self.metadata.list_by_ids(&raw, Some(&*self.backend))?;
         // The catalog returns each row once, in its own order; the caller asked
         // for a specific order and may have repeated an id.
         let by_id: HashMap<TimeSeriesId, &TimeSeriesMetadata> = found
@@ -4067,33 +4061,21 @@ impl Store {
                         "bulk_read: fewer arrays returned than SingleTimeSeries rows".into(),
                     )
                 })?;
-                let initial = meta.initial_timestamp.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(
-                        "SingleTimeSeries missing initial_timestamp".into(),
-                    )
-                })?;
-                let resolution = meta.resolution.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError("SingleTimeSeries missing resolution".into())
-                })?;
-                let length = meta.length.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
-                })?;
-                out.push(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
-                    initial_timestamp: initial,
-                    resolution,
+                let initial = required(
+                    meta.initial_timestamp,
+                    "SingleTimeSeries",
+                    "initial_timestamp",
+                )?;
+                let resolution = required(meta.resolution, "SingleTimeSeries", "resolution")?;
+                let length = required(meta.length, "SingleTimeSeries", "length")?;
+                let mut series = TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
                     length,
-                    data,
-                    name: meta.name.clone(),
-                    // This fast path bypasses `materialize_time_series`, so the
-                    // descriptors come straight off the row it already loaded.
-                    element_type: meta.element_type,
-                    units: meta.units.clone(),
-                    quantity_kind: meta.quantity_kind.clone(),
-                    unit_system: meta.unit_system,
-                    time_reference: meta.time_reference.clone(),
-                    component_field: meta.component_field.clone(),
-                    application_data: meta.application_data.clone(),
-                }));
+                    ..SingleTimeSeries::new(initial, resolution, data, meta.name.clone())
+                });
+                // This fast path bypasses `materialize_time_series`, so the
+                // descriptors come straight off the row it already loaded.
+                series.set_descriptors(descriptors_of(meta));
+                out.push(series);
             } else {
                 // Materialize from the row already in hand rather than looking
                 // it up a second time: for an irregular series a second lookup
@@ -4266,7 +4248,7 @@ impl Store {
                 resolution,
                 ..Default::default()
             },
-            &*self.backend,
+            Some(&*self.backend),
         )?;
 
         // Series that already have a DeterministicSingleTimeSeries view *at this
@@ -4329,7 +4311,8 @@ impl Store {
             // distinct grids, which cover exactly these sources. Re-deriving
             // them here would be a `divide_into` per series for an answer
             // already known.
-            let resolution = required_resolution(src, "transform_single_time_series")?;
+            let resolution =
+                required(src.resolution, "transform_single_time_series", "resolution")?;
             let GridPlan { interval, count } = plan.for_resolution(resolution)?;
             // The interval is stored in whichever single-window encoding the
             // caller's policy selected — verbatim (`interval == horizon`, for
@@ -4435,7 +4418,8 @@ impl Store {
     }
 
     pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
-        self.metadata.distinct_resolutions(time_series_type)
+        self.metadata
+            .distinct_periods("resolution", time_series_type)
     }
 
     /// Distinct forecast intervals, optionally scoped to one time series type.
@@ -4443,7 +4427,7 @@ impl Store {
     /// ISO-8601 text (mixed period kinds have no numeric order). Non-forecast
     /// types have no interval, so they return an empty list.
     pub fn get_intervals(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
-        self.metadata.distinct_intervals(time_series_type)
+        self.metadata.distinct_periods("interval", time_series_type)
     }
 
     /// Every distinct [`TimeReference`] the catalog holds, sorted, plus whether
@@ -4516,7 +4500,7 @@ impl Store {
                     interval,
                     ..Default::default()
                 },
-                &*self.backend,
+                Some(&*self.backend),
             )?;
             if let Some(row) = rows.into_iter().next() {
                 return Ok(ForecastParameters {
@@ -4590,23 +4574,17 @@ impl Store {
     }
 
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts> {
-        let forecasts = self.metadata.count_by_type(TimeSeriesType::Deterministic)?
-            + self
-                .metadata
-                .count_by_type(TimeSeriesType::DeterministicSingleTimeSeries)?
-            + self.metadata.count_by_type(TimeSeriesType::Probabilistic)?
-            + self.metadata.count_by_type(TimeSeriesType::Scenarios)?;
+        let (mut static_time_series, mut forecasts) = (0, 0);
+        for (ts_type, n) in self.metadata.counts_by_type()? {
+            if ts_type.is_forecast() {
+                forecasts += n;
+            } else {
+                static_time_series += n;
+            }
+        }
         Ok(TimeSeriesCounts {
             components_with_time_series: self.metadata.count_distinct_owners()?,
-            static_time_series: self
-                .metadata
-                .count_by_type(TimeSeriesType::SingleTimeSeries)?
-                + self
-                    .metadata
-                    .count_by_type(TimeSeriesType::NonSequentialTimeSeries)?
-                + self
-                    .metadata
-                    .count_by_type(TimeSeriesType::PersistentTimeSeries)?,
+            static_time_series,
             forecasts,
         })
     }
@@ -4626,17 +4604,6 @@ impl Store {
     /// vs forecast), counted in the catalog so no binding has to scan every row
     /// and group owners and hashes in memory.
     pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed> {
-        const STATIC: [TimeSeriesType; 3] = [
-            TimeSeriesType::SingleTimeSeries,
-            TimeSeriesType::NonSequentialTimeSeries,
-            TimeSeriesType::PersistentTimeSeries,
-        ];
-        const FORECAST: [TimeSeriesType; 4] = [
-            TimeSeriesType::Deterministic,
-            TimeSeriesType::DeterministicSingleTimeSeries,
-            TimeSeriesType::Probabilistic,
-            TimeSeriesType::Scenarios,
-        ];
         Ok(TimeSeriesCountsDetailed {
             components_with_time_series: self
                 .metadata
@@ -4644,8 +4611,12 @@ impl Store {
             supplemental_attributes_with_time_series: self
                 .metadata
                 .count_distinct_owners_in_category(OwnerCategory::SupplementalAttribute)?,
-            static_time_series_count: self.metadata.count_distinct_arrays_for_types(&STATIC)?,
-            forecast_count: self.metadata.count_distinct_arrays_for_types(&FORECAST)?,
+            static_time_series_count: self
+                .metadata
+                .count_distinct_arrays_for_types(TimeSeriesType::static_codes())?,
+            forecast_count: self
+                .metadata
+                .count_distinct_arrays_for_types(TimeSeriesType::forecast_codes())?,
         })
     }
 
@@ -4722,7 +4693,8 @@ impl Store {
         &self,
         filter: &SupplementalAttributeFilter,
     ) -> Result<bool> {
-        self.metadata.has_supplemental_attribute_association(filter)
+        self.metadata
+            .assoc_has(SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())
     }
 
     /// Full attachment rows matching `filter`, in insertion order. The default
@@ -4731,8 +4703,22 @@ impl Store {
         &self,
         filter: &SupplementalAttributeFilter,
     ) -> Result<Vec<SupplementalAttributeAssociation>> {
-        self.metadata
-            .list_supplemental_attribute_associations(filter)
+        Ok(self
+            .metadata
+            .assoc_list(SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())?
+            .into_iter()
+            .map(
+                |(id, component_id, component_type, attribute_id, attribute_type)| {
+                    SupplementalAttributeAssociation {
+                        component_id,
+                        component_type,
+                        attribute_id,
+                        attribute_type,
+                        id: Some(id),
+                    }
+                },
+            )
+            .collect())
     }
 
     /// Distinct attribute ids matching `filter`, ascending — the attributes
@@ -4741,7 +4727,11 @@ impl Store {
         &self,
         filter: &SupplementalAttributeFilter,
     ) -> Result<Vec<i64>> {
-        self.metadata.list_supplemental_attribute_ids(filter)
+        self.metadata.assoc_ids(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            Endpoint::Right,
+        )
     }
 
     /// Distinct component ids matching `filter`, ascending — the components
@@ -4750,7 +4740,11 @@ impl Store {
         &self,
         filter: &SupplementalAttributeFilter,
     ) -> Result<Vec<i64>> {
-        self.metadata.list_components_with_attributes(filter)
+        self.metadata.assoc_ids(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            Endpoint::Left,
+        )
     }
 
     /// Remove every attachment matching `filter`, returning the number removed.
@@ -4761,7 +4755,7 @@ impl Store {
         filter: &SupplementalAttributeFilter,
     ) -> Result<usize> {
         self.write_catalog(|tx| {
-            MetadataStore::delete_supplemental_attribute_associations(tx, filter)
+            MetadataStore::assoc_delete(tx, SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())
         })
     }
 
@@ -4783,8 +4777,11 @@ impl Store {
         &self,
         filter: &SupplementalAttributeFilter,
     ) -> Result<i64> {
-        self.metadata
-            .count_supplemental_attribute_associations(filter)
+        self.metadata.assoc_count(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            "COUNT(*)",
+        )
     }
 
     /// Number of *distinct* attributes among the attachments matching `filter`.
@@ -4792,7 +4789,11 @@ impl Store {
         &self,
         filter: &SupplementalAttributeFilter,
     ) -> Result<i64> {
-        self.metadata.count_supplemental_attributes(filter)
+        self.metadata.assoc_count(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            "COUNT(DISTINCT attribute_id)",
+        )
     }
 
     /// Number of *distinct* components among the attachments matching `filter`.
@@ -4800,12 +4801,17 @@ impl Store {
         &self,
         filter: &SupplementalAttributeFilter,
     ) -> Result<i64> {
-        self.metadata.count_components_with_attributes(filter)
+        self.metadata.assoc_count(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            "COUNT(DISTINCT component_id)",
+        )
     }
 
     /// Attachment counts grouped by attribute type.
     pub fn supplemental_attribute_counts_by_type(&self) -> Result<Vec<(String, i64)>> {
-        self.metadata.supplemental_attribute_counts_by_type()
+        self.metadata
+            .assoc_counts_by_type(SUPPLEMENTAL_ATTRIBUTE_TABLE, Endpoint::Right)
     }
 
     /// Attachment counts grouped by both type names, ordered by attribute type
@@ -4845,7 +4851,8 @@ impl Store {
 
     /// Whether any edge matches `filter`.
     pub fn has_parent_child_association(&self, filter: &ParentChildFilter) -> Result<bool> {
-        self.metadata.has_parent_child_association(filter)
+        self.metadata
+            .assoc_has(PARENT_CHILD_TABLE, &filter.endpoints())
     }
 
     /// Full edge rows matching `filter`, in insertion order.
@@ -4853,19 +4860,34 @@ impl Store {
         &self,
         filter: &ParentChildFilter,
     ) -> Result<Vec<ParentChildAssociation>> {
-        self.metadata.list_parent_child_associations(filter)
+        Ok(self
+            .metadata
+            .assoc_list(PARENT_CHILD_TABLE, &filter.endpoints())?
+            .into_iter()
+            .map(
+                |(id, parent_id, parent_type, child_id, child_type)| ParentChildAssociation {
+                    parent_id,
+                    parent_type,
+                    child_id,
+                    child_type,
+                    id: Some(id),
+                },
+            )
+            .collect())
     }
 
     /// Distinct child ids matching `filter`, ascending — the children of a
     /// component when `filter.parent_id` is set.
     pub fn list_children(&self, filter: &ParentChildFilter) -> Result<Vec<i64>> {
-        self.metadata.list_children(filter)
+        self.metadata
+            .assoc_ids(PARENT_CHILD_TABLE, &filter.endpoints(), Endpoint::Right)
     }
 
     /// Distinct parent ids matching `filter`, ascending — the parents of a
     /// component when `filter.child_id` is set.
     pub fn list_parents(&self, filter: &ParentChildFilter) -> Result<Vec<i64>> {
-        self.metadata.list_parents(filter)
+        self.metadata
+            .assoc_ids(PARENT_CHILD_TABLE, &filter.endpoints(), Endpoint::Left)
     }
 
     /// Remove every edge matching `filter`, returning the number removed.
@@ -4874,7 +4896,9 @@ impl Store {
         &mut self,
         filter: &ParentChildFilter,
     ) -> Result<usize> {
-        self.write_catalog(|tx| MetadataStore::delete_parent_child_associations(tx, filter))
+        self.write_catalog(|tx| {
+            MetadataStore::assoc_delete(tx, PARENT_CHILD_TABLE, &filter.endpoints())
+        })
     }
 
     /// Rewrite component `old_id` to `new_id` on both ends of every edge,
@@ -4889,7 +4913,8 @@ impl Store {
 
     /// Number of edges matching `filter`.
     pub fn count_parent_child_associations(&self, filter: &ParentChildFilter) -> Result<i64> {
-        self.metadata.count_parent_child_associations(filter)
+        self.metadata
+            .assoc_count(PARENT_CHILD_TABLE, &filter.endpoints(), "COUNT(*)")
     }
 
     // ---- Store attributes -------------------------------------------------
@@ -5062,7 +5087,7 @@ impl Store {
         // through the same path — see `temp_tag`. A crash mid-rewrite leaves the
         // original intact plus this temp file, which is left for the caller to
         // remove.
-        let tmp = repack_temp_path(&path, &temp_tag());
+        let tmp = append_to_file_name(&path, &format!(".repack-{}", temp_tag()));
         match std::fs::remove_file(&tmp) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -5315,8 +5340,8 @@ impl Store {
         // Unique per save, so a concurrent save to this same destination cannot
         // clear this one's in-flight temp out from under it — see `temp_tag`.
         let tag = temp_tag();
-        let tmp_h5 = persist_temp_path(path, &tag);
-        let tmp_sqlite = persist_temp_path(&sqlite_path, &tag);
+        let tmp_h5 = append_to_file_name(path, &format!(".persist-{tag}"));
+        let tmp_sqlite = append_to_file_name(&sqlite_path, &format!(".persist-{tag}"));
         // `VACUUM INTO` refuses an existing target. With a unique tag nothing
         // should be here, so this only covers a tag that repeated against a
         // leftover.
@@ -5416,7 +5441,7 @@ impl Store {
         self.flush()?;
 
         let tag = temp_tag();
-        let tmp_h5 = persist_temp_path(path, &tag);
+        let tmp_h5 = append_to_file_name(path, &format!(".persist-{tag}"));
         remove_if_exists(&tmp_h5)?;
         let generation = mint_generation();
 
@@ -5488,7 +5513,7 @@ impl Store {
         self.flush_arrays()?;
 
         let sqlite_path = catalog_sqlite_path(&path);
-        let tmp_sqlite = persist_temp_path(&sqlite_path, &temp_tag());
+        let tmp_sqlite = append_to_file_name(&sqlite_path, &format!(".persist-{}", temp_tag()));
         remove_if_exists(&tmp_sqlite)?;
 
         let staged = (|| -> Result<()> {
@@ -5509,8 +5534,8 @@ impl Store {
             // Sidecars of the catalog being replaced, for the reason spelled
             // out in `swap_into_place`: SQLite would recover a stale `-wal` over
             // the database landing in its place.
-            remove_if_exists(&sqlite_sidecar(&sqlite_path, "-wal"))?;
-            remove_if_exists(&sqlite_sidecar(&sqlite_path, "-shm"))?;
+            remove_if_exists(&append_to_file_name(&sqlite_path, "-wal"))?;
+            remove_if_exists(&append_to_file_name(&sqlite_path, "-shm"))?;
             std::fs::rename(&tmp_sqlite, &sqlite_path)?;
             sync_parent_dir(&sqlite_path)
         })();
@@ -5584,8 +5609,8 @@ impl Store {
         // *before* the rename keeps the crash window harmless: what it can
         // interrupt is the replacement of a catalog that is already outlived by
         // the HDF5 half renamed above, and which the stamp already flags.
-        remove_if_exists(&sqlite_sidecar(sqlite, "-wal"))?;
-        remove_if_exists(&sqlite_sidecar(sqlite, "-shm"))?;
+        remove_if_exists(&append_to_file_name(sqlite, "-wal"))?;
+        remove_if_exists(&append_to_file_name(sqlite, "-shm"))?;
         std::fs::rename(tmp_sqlite, sqlite)?;
         sync_parent_dir(h5)
     }
@@ -6712,30 +6737,16 @@ fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>>
 /// paths needs the same derivation the store itself uses rather than its own
 /// copy of the rule.
 pub fn catalog_sqlite_path(data_path: &Path) -> PathBuf {
-    let mut p = data_path.to_path_buf();
-    let new_name = match p.file_name().and_then(|n| n.to_str()) {
-        Some(name) => format!("{name}.sqlite"),
-        None => "metadata.sqlite".to_string(),
-    };
-    p.set_file_name(new_name);
-    p
+    append_to_file_name(data_path, ".sqlite")
 }
 
-/// Sibling temp path a `persist_to` half is staged at. A sibling, not a temp
-/// directory, so the rename that follows stays within one filesystem and is
-/// therefore atomic.
-///
-/// `tag` makes the name unique per staging — see [`temp_tag`]. Both halves of
-/// one save share a tag, so an interrupted save's leftovers are identifiable as
-/// a pair.
-fn persist_temp_path(target: &Path, tag: &str) -> PathBuf {
-    let mut p = target.to_path_buf();
-    let new_name = match p.file_name().and_then(|n| n.to_str()) {
-        Some(name) => format!("{name}.persist-{tag}"),
-        None => format!("store.persist-{tag}"),
-    };
-    p.set_file_name(new_name);
-    p
+/// `path` with `suffix` appended to its final component, extension included —
+/// which is why `set_extension` is the wrong tool. A path with no final
+/// component (`/`, `..`) gets `store<suffix>` as a new one.
+pub(crate) fn append_to_file_name(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or("store".as_ref()).to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
 }
 
 /// A short, effectively-unique tag for a staged temporary file's name.
@@ -6801,15 +6812,6 @@ fn reject_existing_artifact(path: &Path) -> Result<()> {
     }
 }
 
-/// SQLite's `-wal` / `-shm` sidecar beside a database file. The suffix is
-/// appended to the whole filename, extension included, so `set_extension` is the
-/// wrong tool here.
-fn sqlite_sidecar(sqlite: &Path, suffix: &str) -> PathBuf {
-    let mut name = sqlite.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
 /// Whether two paths name the same file. Falls back to comparing the paths as
 /// written when either cannot be canonicalized — a destination that does not
 /// exist yet is the common case, and it is by definition not the source.
@@ -6862,21 +6864,6 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn sync_parent_dir(_path: &Path) -> Result<()> {
     Ok(())
-}
-
-/// Where [`Store::compact`] builds the rewritten HDF5 file before swapping it
-/// over the original: a sibling of `data_path`, so the two are on one
-/// filesystem and the swap is a plain atomic rename. `tag` makes the name unique
-/// per compaction — see [`temp_tag`], including why a leftover from an
-/// interrupted compaction is left in place rather than swept by the next one.
-fn repack_temp_path(data_path: &Path, tag: &str) -> PathBuf {
-    let mut p = data_path.to_path_buf();
-    let new_name = match p.file_name().and_then(|n| n.to_str()) {
-        Some(name) => format!("{name}.repack-{tag}"),
-        None => format!("store.h5.repack-{tag}"),
-    };
-    p.set_file_name(new_name);
-    p
 }
 
 // ---------------------------------------------------------------------------
@@ -7084,52 +7071,9 @@ fn identity_filter(key: &KeyIdentity) -> MetadataFilter {
     }
 }
 
-// --- Metadata field accessors that return IntegrityError on None ---
-
-fn required_initial(
-    meta: &crate::types::metadata::TimeSeriesMetadata,
-    label: &str,
-) -> Result<chrono::DateTime<chrono::Utc>> {
-    meta.initial_timestamp.ok_or_else(|| {
-        TimeSeriesError::IntegrityError(format!("{label} missing initial_timestamp"))
-    })
-}
-
-fn required_resolution(
-    meta: &crate::types::metadata::TimeSeriesMetadata,
-    label: &str,
-) -> Result<Period> {
-    meta.resolution
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing resolution")))
-}
-
-fn required_horizon(
-    meta: &crate::types::metadata::TimeSeriesMetadata,
-    label: &str,
-) -> Result<Period> {
-    meta.horizon
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing horizon")))
-}
-
-fn required_interval(
-    meta: &crate::types::metadata::TimeSeriesMetadata,
-    label: &str,
-) -> Result<Period> {
-    meta.interval
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing interval")))
-}
-
-fn required_count(meta: &crate::types::metadata::TimeSeriesMetadata, label: &str) -> Result<usize> {
-    meta.count
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing count")))
-}
-
-fn required_length(
-    meta: &crate::types::metadata::TimeSeriesMetadata,
-    label: &str,
-) -> Result<usize> {
-    meta.length
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing length")))
+/// Unwrap a catalog field the row's type requires, or report the row as corrupt.
+fn required<T>(value: Option<T>, label: &str, field: &str) -> Result<T> {
+    value.ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing {field}")))
 }
 
 /// Validate that the leading shape dims of `arr` match `expected_prefix`,

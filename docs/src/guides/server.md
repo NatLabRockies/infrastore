@@ -24,7 +24,7 @@ files.
    port = 50051
 
    [data]
-   files = ["./system.h5"]   # the .h5.sqlite catalog must sit beside it
+   file = "./system.h5"   # the .h5.sqlite catalog must sit beside it
 
    [authentication]
    method = "none"
@@ -38,10 +38,8 @@ files.
    ./target/release/infrastore-server --config my_server.toml
    ```
 
-On startup the server validates the auth section, opens the first `[data].files` entry read-only,
-and serves the `CatalogStore` service on `host:port`. Set `RUST_LOG=debug` for verbose logs.
-
-v0 serves the **first** `[data].files` entry; multi-file serving is reserved for later.
+On startup the server validates the auth section, opens `[data].file` read-only, and serves the
+`CatalogStore` service on `host:port`. Set `RUST_LOG=debug` for verbose logs.
 
 ### Check that it is up
 

@@ -262,7 +262,7 @@ fn render(
 }
 
 fn render_csv(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<String, String> {
-    let (headers, rows) = match show::static_points(data)? {
+    let (headers, rows) = match show::static_points(data) {
         // For a `PersistentTimeSeries` these are the breakpoints and their
         // values, which is the whole series and exactly what `add` reads back.
         Some((times, arr)) => show::sequential_table(
@@ -436,7 +436,8 @@ fn write_parquet(
         .collect();
     let series = report.series();
     output::report(
-        format_for_status(format),
+        // `-f parquet` names the payload; the status renders as prose.
+        format,
         || {
             json!({
                 "exported": series,
@@ -480,17 +481,6 @@ fn write_parquet(
             );
         },
     )
-}
-
-/// `-f parquet` names the *payload*, not how the status report renders, so the
-/// report falls back to the table form unless JSON was asked for.
-#[cfg(feature = "parquet")]
-fn format_for_status(format: Format) -> Format {
-    if format.is_json() {
-        format
-    } else {
-        Format::Table
-    }
 }
 
 #[cfg(feature = "parquet")]

@@ -474,15 +474,14 @@ fn a_csv_whose_first_row_is_data_is_rejected_rather_than_losing_a_value() {
 }
 
 /// A descriptor written for an older release names a field that no longer
-/// exists. Serde's bare "unknown field" is accurate but says nothing about what
-/// changed, so `add` attaches the migration note.
+/// exists, and serde's "unknown field" error names it.
 #[test]
-fn a_descriptor_carrying_has_header_is_rejected_with_a_migration_note() {
+fn a_descriptor_carrying_has_header_is_rejected() {
     let (_dir, store, descriptor) = fixture("1.0\n2.0\n3.0\n", &[("has_header", "true")]);
     let stderr = add_err(&store, &descriptor);
     assert!(
-        stderr.contains("has_header") && stderr.contains("header row"),
-        "expected a has_header migration note, got: {stderr}"
+        stderr.contains("has_header"),
+        "expected the unknown has_header field to be named, got: {stderr}"
     );
 }
 

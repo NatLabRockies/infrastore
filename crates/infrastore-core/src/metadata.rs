@@ -37,11 +37,10 @@ pub type ReferencedArrays = (Vec<([u8; 32], ElementType)>, Vec<String>);
 /// verification must report that rather than fail.
 pub type ReferencedTimestamps = (HashSet<[u8; 32]>, Vec<String>);
 
-/// A catalog row paired with its `INTEGER PRIMARY KEY` (SQLite rowid) and the
-/// hash of its timestamp vector (`None` for a row that carries none). Used
-/// internally by [`Self::list_inner`]; public APIs surface metadata without the
-/// raw storage id, and only the reader build path wants the hash.
-pub(crate) type IdentifiedRow = (i64, TimeSeriesMetadata, Option<[u8; 32]>);
+/// A catalog row paired with the hash of its timestamp vector (`None` for a row
+/// that carries none). Used internally by [`MetadataStore::list_inner`]; only
+/// the reader build path wants the hash.
+pub(crate) type RowWithAxis = (TimeSeriesMetadata, Option<[u8; 32]>);
 
 /// The hash every featureless row carries, which names no `feature_sets` rows.
 static EMPTY_FEATURES_HASH: std::sync::LazyLock<[u8; 32]> =
@@ -193,7 +192,7 @@ pub struct ForecastSummaryRow {
 /// chosen in this module, never caller text, so interpolating them into SQL is
 /// safe by construction.
 #[derive(Debug, Clone, Copy)]
-struct AssocTable {
+pub(crate) struct AssocTable {
     name: &'static str,
     left_id: &'static str,
     left_type: &'static str,
@@ -201,7 +200,7 @@ struct AssocTable {
     right_type: &'static str,
 }
 
-const SUPPLEMENTAL_ATTRIBUTE_TABLE: AssocTable = AssocTable {
+pub(crate) const SUPPLEMENTAL_ATTRIBUTE_TABLE: AssocTable = AssocTable {
     name: "supplemental_attribute_associations",
     left_id: "component_id",
     left_type: "component_type",
@@ -209,7 +208,7 @@ const SUPPLEMENTAL_ATTRIBUTE_TABLE: AssocTable = AssocTable {
     right_type: "attribute_type",
 };
 
-const PARENT_CHILD_TABLE: AssocTable = AssocTable {
+pub(crate) const PARENT_CHILD_TABLE: AssocTable = AssocTable {
     name: "parent_child_associations",
     left_id: "parent_id",
     left_type: "parent_type",
@@ -221,7 +220,7 @@ const PARENT_CHILD_TABLE: AssocTable = AssocTable {
 /// public API names both endpoints outright (`list_children`,
 /// `list_supplemental_attribute_ids`) rather than making callers pass a side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Endpoint {
+pub(crate) enum Endpoint {
     Left,
     Right,
 }
@@ -245,7 +244,7 @@ impl AssocTable {
 /// Table-agnostic predicate over an association table's four columns. Public
 /// filters convert into this; it is never exposed.
 #[derive(Debug, Default, Clone)]
-struct EndpointFilter {
+pub(crate) struct EndpointFilter {
     left_id: Option<i64>,
     left_types: Option<Vec<String>>,
     right_id: Option<i64>,
@@ -270,7 +269,7 @@ impl EndpointFilter {
 /// catalog `id`, then the left endpoint's `(id, type)` and the right's. Named
 /// because both tables share the same shape, so both `assoc_list` callers
 /// destructure the same tuple.
-type AssocRow = (i64, i64, String, i64, String);
+pub(crate) type AssocRow = (i64, i64, String, i64, String);
 
 /// One row of `supplemental_attribute_associations`: a supplemental attribute
 /// attached to a component.
@@ -415,7 +414,7 @@ impl SupplementalAttributeFilter {
         self
     }
 
-    fn endpoints(&self) -> EndpointFilter {
+    pub(crate) fn endpoints(&self) -> EndpointFilter {
         EndpointFilter {
             left_id: self.component_id,
             left_types: self.component_types.clone(),
@@ -457,7 +456,7 @@ impl ParentChildFilter {
         self
     }
 
-    fn endpoints(&self) -> EndpointFilter {
+    pub(crate) fn endpoints(&self) -> EndpointFilter {
         EndpointFilter {
             left_id: self.parent_id,
             left_types: self.parent_types.clone(),
@@ -824,7 +823,7 @@ impl MetadataFilter {
         }
         if let Some(resolution) = self.resolution {
             sql.push_str(" AND resolution = ?");
-            params_vec.push(Box::new(period_to_iso(resolution)));
+            params_vec.push(Box::new(resolution.to_iso8601()));
         }
         if let Some(initial_timestamp) = self.initial_timestamp {
             // The column is TEXT, written by `to_rfc3339` from a `DateTime<Utc>`
@@ -841,7 +840,7 @@ impl MetadataFilter {
         }
         if let Some(interval) = self.interval {
             sql.push_str(" AND interval = ?");
-            params_vec.push(Box::new(period_to_iso(interval)));
+            params_vec.push(Box::new(interval.to_iso8601()));
         }
         if let Some(ref f_hash) = self.features_hash {
             sql.push_str(" AND features_hash = ?");
@@ -1153,9 +1152,9 @@ impl MetadataStore {
     ) -> Result<i64> {
         let f_hash = features_hash(&meta.features);
         let initial_ts = meta.initial_timestamp.map(|t| t.to_rfc3339());
-        let resolution_iso = meta.resolution.map(period_to_iso);
-        let horizon_iso = meta.horizon.map(period_to_iso);
-        let interval_iso = meta.interval.map(period_to_iso);
+        let resolution_iso = meta.resolution.map(|p| p.to_iso8601());
+        let horizon_iso = meta.horizon.map(|p| p.to_iso8601());
+        let interval_iso = meta.interval.map(|p| p.to_iso8601());
         let timestamps_hash = meta.timestamps.as_deref().map(timestamps_hash);
         let percentiles_json = match &meta.percentiles {
             Some(p) => Some(serde_json::to_string(p)?),
@@ -1346,7 +1345,7 @@ impl MetadataStore {
                 ));
                 continue;
             };
-            match bytes_to_hash32(&bytes) {
+            match <[u8; 32]>::try_from(bytes.as_slice()).ok() {
                 Some(hash) => {
                     out.insert(hash);
                 }
@@ -1424,18 +1423,22 @@ impl MetadataStore {
         }
         tx.prepare_cached("DELETE FROM time_series_associations WHERE id = ?1")?
             .execute(params![id])?;
-        let hash = bytes_to_hash32(&hash_bytes).ok_or_else(|| {
-            TimeSeriesError::IntegrityError(format!(
-                "malformed catalog row: data_hash is {} bytes, expected 32",
-                hash_bytes.len()
-            ))
-        })?;
-        let features_hash = bytes_to_hash32(&features_hash_bytes).ok_or_else(|| {
-            TimeSeriesError::IntegrityError(format!(
-                "malformed catalog row: features_hash is {} bytes, expected 32",
-                features_hash_bytes.len()
-            ))
-        })?;
+        let hash = <[u8; 32]>::try_from(hash_bytes.as_slice())
+            .ok()
+            .ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!(
+                    "malformed catalog row: data_hash is {} bytes, expected 32",
+                    hash_bytes.len()
+                ))
+            })?;
+        let features_hash = <[u8; 32]>::try_from(features_hash_bytes.as_slice())
+            .ok()
+            .ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!(
+                    "malformed catalog row: features_hash is {} bytes, expected 32",
+                    features_hash_bytes.len()
+                ))
+            })?;
         Ok(Some(DeletedRow {
             data_hash: hash,
             time_series_type: decode_type(type_code)?,
@@ -1462,7 +1465,7 @@ impl MetadataStore {
         )?;
         let hashes = bytes_list
             .into_iter()
-            .filter_map(|bytes| bytes_to_hash32(&bytes))
+            .filter_map(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
             .collect::<Vec<_>>();
         tx.execute(
             "DELETE FROM time_series_associations WHERE owner_id = ?1 AND owner_category = ?2",
@@ -1501,7 +1504,7 @@ impl MetadataStore {
         )?;
         let hashes = bytes_list
             .into_iter()
-            .filter_map(|bytes| bytes_to_hash32(&bytes))
+            .filter_map(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
             .collect::<Vec<_>>();
         tx.execute("DELETE FROM time_series_associations", [])?;
         // Clearing the store empties it, so every feature set is unreachable by
@@ -1514,38 +1517,27 @@ impl MetadataStore {
         Ok(hashes)
     }
 
+    /// The rows matching `filter`, each irregular one's timestamp vector read
+    /// from `vectors`.
+    ///
+    /// With `vectors` `None` the vectors are not hydrated. That is for callers
+    /// that only need each row's *identity*, which never carries the vector: an
+    /// irregular series comes back with `timestamps: None` and its axis unread,
+    /// which is what keeps an identity listing from fetching every axis the
+    /// match spans out of the array file only to discard it. Not for a caller
+    /// that will write the row back: [`Self::insert`] derives `timestamps_hash`
+    /// from `timestamps`, so re-inserting an unhydrated row would drop its time
+    /// axis.
     pub fn list(
         &self,
         filter: &MetadataFilter,
-        vectors: &dyn StorageBackend,
+        vectors: Option<&dyn StorageBackend>,
     ) -> Result<Vec<TimeSeriesMetadata>> {
         Ok(self
-            .list_inner(filter, Some(vectors))?
+            .list_inner(filter, vectors)?
             .0
             .into_iter()
-            .map(|(_, m, _)| m)
-            .collect())
-    }
-
-    /// Like [`Self::list`], but without hydrating the timestamp vectors.
-    ///
-    /// For callers that only need each row's *identity*, which never carries
-    /// the vector. An irregular series comes back with `timestamps: None` and
-    /// its axis unread, which is what keeps an identity listing from fetching
-    /// every axis the match spans out of the array file only to discard it.
-    ///
-    /// Not for a caller that will write the row back: [`Self::insert`] derives
-    /// `timestamps_hash` from `timestamps`, so re-inserting an unhydrated row
-    /// would drop its time axis.
-    pub fn list_without_timestamps(
-        &self,
-        filter: &MetadataFilter,
-    ) -> Result<Vec<TimeSeriesMetadata>> {
-        Ok(self
-            .list_inner(filter, None)?
-            .0
-            .into_iter()
-            .map(|(_, m, _)| m)
+            .map(|(m, _)| m)
             .collect())
     }
 
@@ -1563,7 +1555,7 @@ impl MetadataStore {
         filter: &MetadataFilter,
     ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
         let (rows, cohorts) = self.list_inner(filter, None)?;
-        Ok((rows.into_iter().map(|(_, m, _)| m).collect(), cohorts))
+        Ok((rows.into_iter().map(|(m, _)| m).collect(), cohorts))
     }
 
     /// Rows tagged with the *interned index* of the timestamp vector each one
@@ -1592,7 +1584,7 @@ impl MetadataStore {
         let interned: HashMap<[u8; 32], usize> =
             cohorts.iter().enumerate().map(|(i, h)| (*h, i)).collect();
         let mut out = Vec::with_capacity(rows.len());
-        for (_, meta, hash) in rows {
+        for (meta, hash) in rows {
             // Every row this is called for is an irregular static type, which
             // by construction carries a vector. A row without one is a damaged
             // catalog, not an empty timeline.
@@ -1615,14 +1607,13 @@ impl MetadataStore {
         Ok((out, decoded))
     }
 
-    /// Shared body of [`Self::list`] and [`Self::list_timeline_cohorts`]. Each
-    /// row carries its catalog `id` alongside the metadata; the wrappers that
-    /// don't need it drop it.
+    /// Shared body of [`Self::list`], [`Self::list_timeline_cohorts`] and
+    /// [`Self::list_timeline_rows`].
     fn list_inner(
         &self,
         filter: &MetadataFilter,
         vectors: Option<&dyn StorageBackend>,
-    ) -> Result<(Vec<IdentifiedRow>, Vec<[u8; 32]>)> {
+    ) -> Result<(Vec<RowWithAxis>, Vec<[u8; 32]>)> {
         let (where_clause, params_vec) = filter.to_sql();
 
         let sql = format!(
@@ -1756,9 +1747,8 @@ impl MetadataStore {
                     }
                 }
             };
-            let id = partial.id;
             let hash = partial.timestamps_hash;
-            out.push((id, partial.into_metadata(features, timestamps), hash));
+            out.push((partial.into_metadata(features, timestamps), hash));
         }
         Ok((out, cohorts))
     }
@@ -1934,7 +1924,7 @@ impl MetadataStore {
                 ids: Some(vec![id]),
                 ..Default::default()
             },
-            vectors,
+            Some(vectors),
         )?;
         Ok(matches.pop())
     }
@@ -1943,27 +1933,13 @@ impl MetadataStore {
     /// callers that need them in *their* order reorder by [`TimeSeriesMetadata::id`].
     ///
     /// One query per chunk of ids rather than one per id, so a bulk read by
-    /// reference costs what a filtered listing does.
+    /// reference costs what a filtered listing does. `vectors` is as on
+    /// [`Self::list`]: `None` is the identity-question form, for a caller that
+    /// wants the rows rather than the series.
     pub fn list_by_ids(
         &self,
         ids: &[i64],
-        vectors: &dyn StorageBackend,
-    ) -> Result<Vec<TimeSeriesMetadata>> {
-        self.list_by_ids_with(ids, |f| self.list(f, vectors))
-    }
-
-    /// [`Self::list_by_ids`] without loading each irregular row's timestamp
-    /// vector — the identity-question form, for a caller that wants the rows
-    /// rather than the series.
-    pub fn list_by_ids_without_timestamps(&self, ids: &[i64]) -> Result<Vec<TimeSeriesMetadata>> {
-        self.list_by_ids_with(ids, |f| self.list_without_timestamps(f))
-    }
-
-    /// The chunking shared by both by-id listings.
-    fn list_by_ids_with(
-        &self,
-        ids: &[i64],
-        mut list: impl FnMut(&MetadataFilter) -> Result<Vec<TimeSeriesMetadata>>,
+        vectors: Option<&dyn StorageBackend>,
     ) -> Result<Vec<TimeSeriesMetadata>> {
         // Each id is one bound `?`, so a model-sized set (tens of thousands of
         // references) would trip SQLite's variable limit — and every distinct
@@ -1975,10 +1951,13 @@ impl MetadataStore {
         sorted.dedup();
         let mut rows = Vec::with_capacity(sorted.len());
         for chunk in sorted.chunks(IDS_PER_QUERY) {
-            rows.extend(list(&MetadataFilter {
-                ids: Some(chunk.to_vec()),
-                ..Default::default()
-            })?);
+            rows.extend(self.list(
+                &MetadataFilter {
+                    ids: Some(chunk.to_vec()),
+                    ..Default::default()
+                },
+                vectors,
+            )?);
         }
         Ok(rows)
     }
@@ -1997,42 +1976,20 @@ impl MetadataStore {
         Ok(found.is_some())
     }
 
-    pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
-        let mut sql = String::from(
-            "SELECT DISTINCT resolution FROM time_series_associations
-             WHERE resolution IS NOT NULL",
-        );
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(t) = ts_type {
-            // Standalone predicate on `idx_ts_type` (no composite seek to
-            // truncate), so the cheaper range form applies — see `SpanForm`.
-            push_type_predicate(
-                &mut sql,
-                &mut params_vec,
-                TypeMatch::Requested(t),
-                SpanForm::Range,
-            );
-        }
-        sql.push_str(" ORDER BY resolution ASC");
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(&params_vec), |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        rows.into_iter().map(|s| iso_to_period(&s)).collect()
-    }
-
-    /// Distinct forecast `interval`s, optionally scoped to one time series type.
-    /// Ordered by the ISO-8601 text (lexical, like [`Self::distinct_resolutions`]):
+    /// Distinct values of the period `column` (`"resolution"` or `"interval"`,
+    /// always a literal, never caller text),
+    /// optionally scoped to one time series type. Ordered by the ISO-8601 text:
     /// mixed period kinds have no numeric order, so text order is the stable
     /// choice. Only forecast rows carry an interval, so non-forecast types yield
-    /// an empty list.
-    pub fn distinct_intervals(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
-        let mut sql = String::from(
-            "SELECT DISTINCT interval FROM time_series_associations
-             WHERE interval IS NOT NULL",
+    /// no intervals.
+    pub fn distinct_periods(
+        &self,
+        column: &'static str,
+        ts_type: Option<TimeSeriesType>,
+    ) -> Result<Vec<Period>> {
+        let mut sql = format!(
+            "SELECT DISTINCT {column} FROM time_series_associations
+             WHERE {column} IS NOT NULL"
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
@@ -2045,7 +2002,7 @@ impl MetadataStore {
                 SpanForm::Range,
             );
         }
-        sql.push_str(" ORDER BY interval ASC");
+        sql.push_str(&format!(" ORDER BY {column} ASC"));
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -2084,15 +2041,6 @@ impl MetadataStore {
             }
         }
         Ok((out, unspecified))
-    }
-
-    pub fn count_by_type(&self, ts_type: TimeSeriesType) -> Result<i64> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM time_series_associations WHERE time_series_type = ?1",
-            params![ts_type.code()],
-            |r| r.get(0),
-        )?;
-        Ok(n)
     }
 
     /// Count `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations
@@ -2256,22 +2204,17 @@ impl MetadataStore {
         Ok(n)
     }
 
-    /// Number of distinct stored arrays referenced by associations of any of
-    /// `types`. Empty `types` yields 0.
-    pub fn count_distinct_arrays_for_types(&self, types: &[TimeSeriesType]) -> Result<i64> {
-        if types.is_empty() {
-            return Ok(0);
-        }
-        let placeholders = vec!["?"; types.len()].join(",");
+    /// Number of distinct stored arrays referenced by associations whose type
+    /// code is in `codes` — [`TimeSeriesType::static_codes`] or
+    /// [`TimeSeriesType::forecast_codes`], literals interpolated as in
+    /// [`Self::static_summary`].
+    pub fn count_distinct_arrays_for_types(&self, codes: &[i64]) -> Result<i64> {
         let sql = format!(
             "SELECT COUNT(DISTINCT data_hash) FROM time_series_associations
-             WHERE time_series_type IN ({placeholders})"
+             WHERE time_series_type IN ({})",
+            code_list(codes)
         );
-        let codes: Vec<i64> = types.iter().map(|t| t.code()).collect();
-        let n: i64 = self
-            .conn
-            .query_row(&sql, rusqlite::params_from_iter(codes), |r| r.get(0))?;
-        Ok(n)
+        Ok(self.conn.query_row(&sql, [], |r| r.get(0))?)
     }
 
     /// Grouped summary of the static series (SingleTimeSeries +
@@ -2384,7 +2327,7 @@ impl MetadataStore {
         resolution: Option<Period>,
         owner_category: Option<OwnerCategory>,
     ) -> Result<Vec<(Period, DateTime<Utc>, i64)>> {
-        let res_iso = resolution.map(period_to_iso);
+        let res_iso = resolution.map(|p| p.to_iso8601());
         let category = owner_category.map(|c| c.code());
         let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT resolution, initial_timestamp, length
@@ -2442,7 +2385,7 @@ impl MetadataStore {
         }
         if let Some(res) = resolution {
             sql.push_str(" AND resolution = ?");
-            params_vec.push(Box::new(period_to_iso(res)));
+            params_vec.push(Box::new(res.to_iso8601()));
         }
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(&params_vec), |r| {
@@ -2472,7 +2415,11 @@ impl MetadataStore {
     }
 
     /// Every matching row's id and both endpoint pairs, in insertion order.
-    fn assoc_list(&self, table: AssocTable, filter: &EndpointFilter) -> Result<Vec<AssocRow>> {
+    pub(crate) fn assoc_list(
+        &self,
+        table: AssocTable,
+        filter: &EndpointFilter,
+    ) -> Result<Vec<AssocRow>> {
         if !self.assoc_present(table) {
             return Ok(Vec::new());
         }
@@ -2491,7 +2438,7 @@ impl MetadataStore {
             .map_err(Into::into)
     }
 
-    fn assoc_has(&self, table: AssocTable, filter: &EndpointFilter) -> Result<bool> {
+    pub(crate) fn assoc_has(&self, table: AssocTable, filter: &EndpointFilter) -> Result<bool> {
         if !self.assoc_present(table) {
             return Ok(false);
         }
@@ -2505,7 +2452,7 @@ impl MetadataStore {
     }
 
     /// Distinct ids at `endpoint` among the matching rows, ascending.
-    fn assoc_ids(
+    pub(crate) fn assoc_ids(
         &self,
         table: AssocTable,
         filter: &EndpointFilter,
@@ -2528,7 +2475,7 @@ impl MetadataStore {
 
     /// Shared body of the counting queries: `projection` is a literal aggregate
     /// built from a fixed column name, never caller text.
-    fn assoc_count(
+    pub(crate) fn assoc_count(
         &self,
         table: AssocTable,
         filter: &EndpointFilter,
@@ -2544,7 +2491,7 @@ impl MetadataStore {
     }
 
     /// Row counts grouped by the type label at `endpoint`, ordered by type.
-    fn assoc_counts_by_type(
+    pub(crate) fn assoc_counts_by_type(
         &self,
         table: AssocTable,
         endpoint: Endpoint,
@@ -2642,7 +2589,11 @@ impl MetadataStore {
         Ok(tx.last_insert_rowid())
     }
 
-    fn assoc_delete(tx: &Connection, table: AssocTable, filter: &EndpointFilter) -> Result<usize> {
+    pub(crate) fn assoc_delete(
+        tx: &Connection,
+        table: AssocTable,
+        filter: &EndpointFilter,
+    ) -> Result<usize> {
         let (where_clause, params) = filter.to_sql(table);
         let sql = format!("DELETE FROM {} {where_clause}", table.name);
         Ok(tx.execute(&sql, rusqlite::params_from_iter(&params))?)
@@ -2666,13 +2617,6 @@ impl MetadataStore {
                 assoc.attribute_id, assoc.component_id
             ),
         )
-    }
-
-    pub fn delete_supplemental_attribute_associations(
-        tx: &Connection,
-        filter: &SupplementalAttributeFilter,
-    ) -> Result<usize> {
-        Self::assoc_delete(tx, SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())
     }
 
     /// Rewrite `old_id` to `new_id` wherever it names a component, e.g. after a
@@ -2726,98 +2670,6 @@ impl MetadataStore {
         })
     }
 
-    pub fn list_supplemental_attribute_associations(
-        &self,
-        filter: &SupplementalAttributeFilter,
-    ) -> Result<Vec<SupplementalAttributeAssociation>> {
-        Ok(self
-            .assoc_list(SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())?
-            .into_iter()
-            .map(
-                |(id, component_id, component_type, attribute_id, attribute_type)| {
-                    SupplementalAttributeAssociation {
-                        component_id,
-                        component_type,
-                        attribute_id,
-                        attribute_type,
-                        id: Some(id),
-                    }
-                },
-            )
-            .collect())
-    }
-
-    pub fn has_supplemental_attribute_association(
-        &self,
-        filter: &SupplementalAttributeFilter,
-    ) -> Result<bool> {
-        self.assoc_has(SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())
-    }
-
-    /// Distinct attribute ids matching `filter` — the attributes attached to a
-    /// component when `filter.component_id` is set.
-    pub fn list_supplemental_attribute_ids(
-        &self,
-        filter: &SupplementalAttributeFilter,
-    ) -> Result<Vec<i64>> {
-        self.assoc_ids(
-            SUPPLEMENTAL_ATTRIBUTE_TABLE,
-            &filter.endpoints(),
-            Endpoint::Right,
-        )
-    }
-
-    /// Distinct component ids matching `filter` — the components carrying an
-    /// attribute when `filter.attribute_id` is set.
-    pub fn list_components_with_attributes(
-        &self,
-        filter: &SupplementalAttributeFilter,
-    ) -> Result<Vec<i64>> {
-        self.assoc_ids(
-            SUPPLEMENTAL_ATTRIBUTE_TABLE,
-            &filter.endpoints(),
-            Endpoint::Left,
-        )
-    }
-
-    pub fn count_supplemental_attribute_associations(
-        &self,
-        filter: &SupplementalAttributeFilter,
-    ) -> Result<i64> {
-        self.assoc_count(
-            SUPPLEMENTAL_ATTRIBUTE_TABLE,
-            &filter.endpoints(),
-            "COUNT(*)",
-        )
-    }
-
-    pub fn count_supplemental_attributes(
-        &self,
-        filter: &SupplementalAttributeFilter,
-    ) -> Result<i64> {
-        self.assoc_count(
-            SUPPLEMENTAL_ATTRIBUTE_TABLE,
-            &filter.endpoints(),
-            "COUNT(DISTINCT attribute_id)",
-        )
-    }
-
-    pub fn count_components_with_attributes(
-        &self,
-        filter: &SupplementalAttributeFilter,
-    ) -> Result<i64> {
-        self.assoc_count(
-            SUPPLEMENTAL_ATTRIBUTE_TABLE,
-            &filter.endpoints(),
-            "COUNT(DISTINCT component_id)",
-        )
-    }
-
-    /// Attachment counts grouped by attribute type.
-    pub fn supplemental_attribute_counts_by_type(&self) -> Result<Vec<(String, i64)>> {
-        self.assoc_counts_by_type(SUPPLEMENTAL_ATTRIBUTE_TABLE, Endpoint::Right)
-    }
-
     /// Attachment counts grouped by both type labels.
     pub fn supplemental_attribute_summary(&self) -> Result<Vec<SupplementalAttributeSummaryRow>> {
         if !self.has_supplemental_attribute_table {
@@ -2858,13 +2710,6 @@ impl MetadataStore {
                 assoc.parent_id, assoc.child_id
             ),
         )
-    }
-
-    pub fn delete_parent_child_associations(
-        tx: &Connection,
-        filter: &ParentChildFilter,
-    ) -> Result<usize> {
-        Self::assoc_delete(tx, PARENT_CHILD_TABLE, &filter.endpoints())
     }
 
     /// Rewrite `old_id` to `new_id` wherever it names a component, on either end
@@ -2909,45 +2754,6 @@ impl MetadataStore {
                 &format!("rewriting component {old_id} to {new_id} would duplicate an edge"),
             )
         })
-    }
-
-    pub fn list_parent_child_associations(
-        &self,
-        filter: &ParentChildFilter,
-    ) -> Result<Vec<ParentChildAssociation>> {
-        Ok(self
-            .assoc_list(PARENT_CHILD_TABLE, &filter.endpoints())?
-            .into_iter()
-            .map(
-                |(id, parent_id, parent_type, child_id, child_type)| ParentChildAssociation {
-                    parent_id,
-                    parent_type,
-                    child_id,
-                    child_type,
-                    id: Some(id),
-                },
-            )
-            .collect())
-    }
-
-    pub fn has_parent_child_association(&self, filter: &ParentChildFilter) -> Result<bool> {
-        self.assoc_has(PARENT_CHILD_TABLE, &filter.endpoints())
-    }
-
-    /// Distinct child ids matching `filter` — the children of a component when
-    /// `filter.parent_id` is set.
-    pub fn list_children(&self, filter: &ParentChildFilter) -> Result<Vec<i64>> {
-        self.assoc_ids(PARENT_CHILD_TABLE, &filter.endpoints(), Endpoint::Right)
-    }
-
-    /// Distinct parent ids matching `filter` — the parents of a component when
-    /// `filter.child_id` is set.
-    pub fn list_parents(&self, filter: &ParentChildFilter) -> Result<Vec<i64>> {
-        self.assoc_ids(PARENT_CHILD_TABLE, &filter.endpoints(), Endpoint::Left)
-    }
-
-    pub fn count_parent_child_associations(&self, filter: &ParentChildFilter) -> Result<i64> {
-        self.assoc_count(PARENT_CHILD_TABLE, &filter.endpoints(), "COUNT(*)")
     }
 
     // ---- Store attributes -------------------------------------------------
@@ -3162,7 +2968,7 @@ fn open_read_only(path: &Path) -> Result<Connection> {
     let Err(e) = direct else {
         return direct;
     };
-    if sqlite_sidecar(path, "-wal").exists() {
+    if crate::store::append_to_file_name(path, "-wal").exists() {
         return Err(e);
     }
     let immutable = Connection::open_with_flags(sqlite_uri(path, "immutable=1"), flags)
@@ -3194,20 +3000,8 @@ fn sqlite_uri(path: &Path, query: &str) -> String {
     out
 }
 
-/// The `-wal` / `-shm` companion of a SQLite database path.
-fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    std::path::PathBuf::from(name)
-}
-
-/// Canonical ISO-8601 encoding of a period for storage in the catalog.
-fn period_to_iso(p: Period) -> String {
-    p.to_iso8601()
-}
-
 /// Parse a period from its catalog ISO-8601 encoding. A parse failure is an
-/// integrity error: the value was written by [`period_to_iso`].
+/// integrity error: the value was written by [`Period::to_iso8601`].
 fn iso_to_period(s: &str) -> Result<Period> {
     Period::from_iso8601(s)
         .map_err(|e| TimeSeriesError::IntegrityError(format!("bad period '{s}' in catalog: {e}")))
@@ -3217,10 +3011,6 @@ fn is_subset(required: &Features, actual: &Features) -> bool {
     required
         .iter()
         .all(|(k, v)| actual.get(k).is_some_and(|a| a == v))
-}
-
-fn bytes_to_hash32(bytes: &[u8]) -> Option<[u8; 32]> {
-    bytes.try_into().ok()
 }
 
 /// Helper to run a `SELECT data_hash` query and collect raw bytes, isolating
@@ -3415,7 +3205,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
 
     let timestamps_hash = timestamps_hash
         .map(|bytes| {
-            bytes_to_hash32(&bytes).ok_or_else(|| {
+            <[u8; 32]>::try_from(bytes.as_slice()).ok().ok_or_else(|| {
                 rusqlite::Error::FromSqlConversionFailure(
                     13,
                     rusqlite::types::Type::Blob,
@@ -3473,16 +3263,18 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let horizon = parse_period(10, horizon_iso)?;
     let interval = parse_period(11, interval_iso)?;
 
-    let features_hash = bytes_to_hash32(&features_hash).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Blob,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "features_hash must be 32 bytes",
-            )),
-        )
-    })?;
+    let features_hash = <[u8; 32]>::try_from(features_hash.as_slice())
+        .ok()
+        .ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Blob,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "features_hash must be 32 bytes",
+                )),
+            )
+        })?;
 
     Ok((
         features_hash,
@@ -3518,37 +3310,21 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
 // `Store` layer where a tx is already in-flight for atomicity). Implemented as
 // helper free fns so we don't have two parallel Send/Sync wrappers.
 
-/// Whether any association references the array `data_hash`, inside an
-/// in-flight transaction.
+/// Whether any association references `hash` through `column` — `data_hash`
+/// for an array, `timestamps_hash` for an explicit time axis — inside an
+/// in-flight transaction. `column` is always a literal, never caller text.
 ///
 /// An existence probe, not a count: a content-addressed array can be shared by
 /// every component in a model, and counting 200k `idx_hash` entries to learn
-/// "not zero" made removing one such series ~5 ms.
-pub fn array_is_referenced_in_tx(tx: &Connection, data_hash: &[u8; 32]) -> Result<bool> {
+/// "not zero" made removing one such series ~5 ms. `timestamps_hash` is
+/// unindexed, so a miss there scans the table; that probe only runs when a
+/// transaction commits a removal or rolls back a write.
+pub fn hash_is_referenced_in_tx(tx: &Connection, column: &str, hash: &[u8; 32]) -> Result<bool> {
     Ok(tx
-        .prepare_cached("SELECT 1 FROM time_series_associations WHERE data_hash = ?1 LIMIT 1")?
-        .query_row(params![data_hash.as_slice()], |_| Ok(()))
-        .optional()?
-        .is_some())
-}
-
-/// Whether any association sits on the explicit time axis `timestamps_hash`,
-/// inside an in-flight transaction.
-///
-/// The timestamp-vector counterpart of [`array_is_referenced_in_tx`], and the
-/// reason it is a separate function rather than a parameter: an axis is
-/// referenced through its own column, so an array's references say nothing
-/// about it. The column is unindexed, so a miss scans the table; this only runs
-/// when a transaction commits a removal or rolls back a write.
-pub fn timestamps_are_referenced_in_tx(
-    tx: &Connection,
-    timestamps_hash: &[u8; 32],
-) -> Result<bool> {
-    Ok(tx
-        .prepare_cached(
-            "SELECT 1 FROM time_series_associations WHERE timestamps_hash = ?1 LIMIT 1",
-        )?
-        .query_row(params![timestamps_hash.as_slice()], |_| Ok(()))
+        .prepare_cached(&format!(
+            "SELECT 1 FROM time_series_associations WHERE {column} = ?1 LIMIT 1"
+        ))?
+        .query_row(params![hash.as_slice()], |_| Ok(()))
         .optional()?
         .is_some())
 }
@@ -3573,7 +3349,7 @@ pub fn forecast_family_conflict(
     features_hash: &[u8; 32],
     conflicting_type: TimeSeriesType,
 ) -> Result<bool> {
-    let resolution_iso = resolution.map(period_to_iso);
+    let resolution_iso = resolution.map(|p| p.to_iso8601());
     // `prepare_cached`: this runs once per Deterministic row in a bulk add, and
     // an uncached prepare (SQL parse + query plan) costs more than executing
     // the point query itself.
@@ -3625,7 +3401,7 @@ pub fn forecast_family_conflict_on_array(
     row: &DeletedRow,
     conflicting_type: TimeSeriesType,
 ) -> Result<bool> {
-    let resolution_iso = row.resolution.map(period_to_iso);
+    let resolution_iso = row.resolution.map(|p| p.to_iso8601());
     let exists: Option<i64> = tx
         .prepare_cached(
             "SELECT 1 FROM time_series_associations

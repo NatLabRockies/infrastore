@@ -30,14 +30,10 @@ use chrono::{DateTime, Utc};
 use infrastore_core::{StaticReader, Store, TimeSeriesMetadata};
 use serde_json::{Value, json};
 
-use crate::color;
 use crate::csv_io;
 use crate::output::{self, Format};
 use crate::select::SelectorArgs;
 use crate::store_access;
-
-/// Rows a table shows before truncating, matching `get`.
-const DEFAULT_LIMIT: usize = 50;
 
 /// How a grid column is named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -75,12 +71,8 @@ pub struct GridArgs {
     /// --window-start decides which rows it has at all.
     #[arg(long)]
     pub time_range: Option<String>,
-    /// Max rows to show in table output (default 50).
-    #[arg(long)]
-    pub limit: Option<usize>,
-    /// Show all rows in table output.
-    #[arg(long)]
-    pub full: bool,
+    #[command(flatten)]
+    pub rows: super::show::RowWindow,
     /// How to name the columns.
     #[arg(long, value_name = "MODE", default_value = "auto")]
     pub label: ColumnLabel,
@@ -135,16 +127,10 @@ pub fn run(store_path: &Path, args: &GridArgs, format: Format) -> Result<(), Str
     // back by `add`, and a truncated file is still a valid wide CSV, so
     // shortening one here would surface much later as a series that ends early.
     // Slice a pipe with `--time-range` instead.
-    let max = match (format, args.full, args.limit) {
-        (Format::Table, false, Some(n)) => n,
-        (Format::Table, false, None) => DEFAULT_LIMIT,
-        _ => all.len(),
-    };
-    let shown = all.len().min(max);
-
+    let (sel, shown, dropped) = args.rows.select(all.len(), format)?;
     let mut rows: Vec<Vec<String>> = Vec::with_capacity(shown);
-    for at in all.iter().take(shown) {
-        rows.push(read_row(&store, &mut reader, *at)?);
+    for i in sel {
+        rows.push(read_row(&store, &mut reader, all[i])?);
     }
 
     match format {
@@ -166,18 +152,9 @@ pub fn run(store_path: &Path, args: &GridArgs, format: Format) -> Result<(), Str
                 }),
             )?;
         }
-        Format::Csv => output::display_csv_rows(&headers, &rows)?,
-        _ => {
-            output::display_table_dyn(&headers, &rows);
-            if all.len() > shown {
-                println!(
-                    "{}",
-                    color::dim(&format!(
-                        "... {} more rows (use --full, --limit, or -f csv)",
-                        all.len() - shown
-                    ))
-                );
-            }
+        f => {
+            output::print_rows(f, &headers, &rows)?;
+            super::show::report_dropped(dropped);
         }
     }
     Ok(())

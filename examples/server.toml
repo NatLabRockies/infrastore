@@ -9,7 +9,7 @@ port = 50051
 # max_read_ids = 4096
 
 [data]
-files = ["./store.h5"]
+file = "./store.h5"
 
 [authentication]
 # "none" or "api_key". For api_key, populate `keys` and clients must send

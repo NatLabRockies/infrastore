@@ -50,7 +50,18 @@ jobs:
         run: python3 .github/scripts/check-doc-links.py --internal --external
 
       - name: Setup gh-pages branch
-        run: .github/scripts/gh-pages-setup.sh
+        run: |
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git clone --depth 1 --branch gh-pages "$REPO_URL" gh-pages-deploy 2>/dev/null || {
+            # Branch doesn't exist yet — create it
+            mkdir gh-pages-deploy
+            git -C gh-pages-deploy init
+            git -C gh-pages-deploy checkout -b gh-pages
+            git -C gh-pages-deploy remote add origin "$REPO_URL"
+          }
+          touch gh-pages-deploy/.nojekyll
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -68,4 +79,10 @@ jobs:
       - name: Commit and push
         run: |
           cd gh-pages-deploy
-          ../.github/scripts/gh-pages-commit.sh "Deploy docs ${VERSION} from ${GITHUB_SHA::8}"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to deploy"
+          else
+            git commit -m "Deploy docs ${VERSION} from ${GITHUB_SHA::8}"
+            git push origin gh-pages
+          fi

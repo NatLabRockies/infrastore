@@ -35,11 +35,6 @@ always `Period`. Instants (`DateTime<Utc>`) remain chrono types.
 ```rust
 impl Store {
     pub fn create(path: Option<&Path>, in_memory: bool) -> Result<Store>
-    pub fn create_with_compression(
-        path: Option<&Path>,
-        in_memory: bool,
-        compression: Compression,
-    ) -> Result<Store>
     pub fn create_with_catalog(
         path: Option<&Path>,
         in_memory: bool,
@@ -63,7 +58,8 @@ impl Store {
   with [`StoreExists`](#errors) if either half is already there**; see
   [protecting a saved artifact](../explanation/storage-model.md#protecting-a-saved-artifact) for why
   creating over an existing store is refused rather than allowed to truncate it.
-- `Store::create_with_compression(...)` — as above but with an explicit HDF5 compression policy.
+- `Store::create_with_catalog(...)` — as above but with an explicit HDF5 compression policy and
+  `CatalogMode`.
 - `Store::create_replacing(...)` — discards any artifact already at `path`, both halves plus the
   catalog's `-wal`/`-shm` sidecars, then creates. Destructive and not atomic: an interrupted call
   can leave neither the old store nor the new one.
@@ -1524,7 +1520,6 @@ pub enum TimeReference {
 }
 
 impl TimeReference {
-    pub fn is_zoned(&self) -> bool;
     pub fn is_zoneless(&self) -> bool;
     pub fn accepts_zoned_bound(reference: Option<&TimeReference>) -> bool;
     pub fn as_storage_string(&self) -> String;   // "utc" / "-07:00" / "America/Denver" / "zoneless"
@@ -1576,10 +1571,6 @@ pub struct Descriptors {
     pub time_reference: Option<TimeReference>,
     pub component_field: Option<String>,
     pub application_data: Option<String>,
-}
-
-impl Descriptors {
-    pub fn new(element_type: ElementType) -> Self;   // everything else unset
 }
 ```
 
@@ -1899,12 +1890,15 @@ pub trait StorageBackend: Send + Sync {
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;   // no-op if absent
     fn contains(&self, hash: &[u8; 32]) -> Result<bool>;
-    fn compact(&mut self) -> Result<CompactionReport>;   // in-memory path only; `Store::compact`
-                                                        // rewrites the file for an on-disk store
-    fn verify(&self) -> Result<IntegrityReport>;
     fn flush(&mut self) -> Result<()>;
 
     // --- provided (overridden by Hdf5Backend) ---
+
+    // In-memory path only: the default refuses, and `Store::compact` rewrites the file
+    // for an on-disk store.
+    fn compact(&mut self) -> Result<CompactionReport>;
+    // Re-read and rehash every array, via `get_array`.
+    fn verify(&self) -> Result<IntegrityReport>;
 
     // Write a block of same-shaped packed arrays at once (the bulk-add write path).
     // The returned Vec is aligned to `hashes`: `true` where this call wrote new content.
@@ -1928,14 +1922,6 @@ pub trait StorageBackend: Send + Sync {
         hash: &[u8; 32],
         count_axis: usize,
         window_index: usize,
-        out: &mut Vec<u8>,
-    ) -> Result<()>;
-    // `len` consecutive steps from `start` along axis 0 (backs DST window reads).
-    fn read_range_into(
-        &self,
-        hash: &[u8; 32],
-        start: usize,
-        len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()>;
     // The compression policy applied to writes; defaults to `Compression::None`

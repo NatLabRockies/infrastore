@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -187,13 +185,6 @@ impl TimeSeriesType {
     /// The storage codes of the forecast types. See [`Self::static_codes`].
     pub fn forecast_codes() -> &'static [i64] {
         &[2, 3, 4, 5]
-    }
-}
-
-impl FromStr for TimeSeriesType {
-    type Err = ();
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        Self::parse(s).ok_or(())
     }
 }
 
@@ -1504,21 +1495,6 @@ pub struct Descriptors {
     pub application_data: Option<String>,
 }
 
-impl Descriptors {
-    /// The descriptors of a series that declares nothing but its element type.
-    pub fn new(element_type: ElementType) -> Self {
-        Self {
-            element_type,
-            units: None,
-            quantity_kind: None,
-            unit_system: None,
-            time_reference: None,
-            component_field: None,
-            application_data: None,
-        }
-    }
-}
-
 /// Runtime variant container for all supported time-series types.
 ///
 /// `DeterministicSingleTimeSeries` is synthesized into `Deterministic` on
@@ -1628,79 +1604,44 @@ impl TimeSeriesData {
 
     /// Declare the logical element type of the wrapped series.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.set_element_type(element_type);
+        each_variant!(&mut self, s => s.element_type = element_type);
         self
     }
 
     /// Set the user-declared units label on the wrapped series.
     pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.set_units(Some(units.into()));
+        each_variant!(&mut self, s => s.units = Some(units.into()));
         self
     }
 
     /// Set the quantity kind on the wrapped series.
     pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
-        self.set_quantity_kind(Some(quantity_kind.into()));
+        each_variant!(&mut self, s => s.quantity_kind = Some(quantity_kind.into()));
         self
     }
 
     /// Declare the unit basis on the wrapped series.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
-        self.set_unit_system(Some(unit_system));
+        each_variant!(&mut self, s => s.unit_system = Some(unit_system));
         self
     }
 
     /// Declare how the wrapped series' timestamps were spelled.
     pub fn with_time_reference(mut self, time_reference: TimeReference) -> Self {
-        self.set_time_reference(Some(time_reference));
+        each_variant!(&mut self, s => s.time_reference = Some(time_reference));
         self
     }
 
     /// Name the component field on the wrapped series.
     pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
-        self.set_component_field(Some(component_field.into()));
+        each_variant!(&mut self, s => s.component_field = Some(component_field.into()));
         self
     }
 
     /// Set the opaque application payload on the wrapped series.
     pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
-        self.set_application_data(Some(application_data.into()));
+        each_variant!(&mut self, s => s.application_data = Some(application_data.into()));
         self
-    }
-
-    /// Set the element type in place.
-    pub fn set_element_type(&mut self, element_type: ElementType) {
-        each_variant!(self, s => s.element_type = element_type)
-    }
-
-    /// Set the units label in place.
-    pub fn set_units(&mut self, units: Option<String>) {
-        each_variant!(self, s => s.units = units)
-    }
-
-    /// Set the quantity kind in place.
-    pub fn set_quantity_kind(&mut self, quantity_kind: Option<String>) {
-        each_variant!(self, s => s.quantity_kind = quantity_kind)
-    }
-
-    /// Set the unit basis in place.
-    pub fn set_unit_system(&mut self, unit_system: Option<UnitSystem>) {
-        each_variant!(self, s => s.unit_system = unit_system)
-    }
-
-    /// Set the timestamp spelling in place.
-    pub fn set_time_reference(&mut self, time_reference: Option<TimeReference>) {
-        each_variant!(self, s => s.time_reference = time_reference)
-    }
-
-    /// Set the component field in place.
-    pub fn set_component_field(&mut self, component_field: Option<String>) {
-        each_variant!(self, s => s.component_field = component_field)
-    }
-
-    /// Set the application payload in place.
-    pub fn set_application_data(&mut self, application_data: Option<String>) {
-        each_variant!(self, s => s.application_data = application_data)
     }
 
     /// Set the descriptive attributes in place. Used on the read path to fill
@@ -1715,13 +1656,15 @@ impl TimeSeriesData {
             component_field,
             application_data,
         } = descriptors;
-        self.set_element_type(element_type);
-        self.set_units(units);
-        self.set_quantity_kind(quantity_kind);
-        self.set_unit_system(unit_system);
-        self.set_time_reference(time_reference);
-        self.set_component_field(component_field);
-        self.set_application_data(application_data);
+        each_variant!(self, s => {
+            s.element_type = element_type;
+            s.units = units;
+            s.quantity_kind = quantity_kind;
+            s.unit_system = unit_system;
+            s.time_reference = time_reference;
+            s.component_field = component_field;
+            s.application_data = application_data;
+        })
     }
 
     pub fn as_single(&self) -> Option<&SingleTimeSeries> {
@@ -1945,13 +1888,12 @@ mod tests {
     fn time_series_type_str_round_trip_is_exhaustive() {
         for t in ALL_TYPES {
             assert_eq!(TimeSeriesType::parse(t.as_str()), Some(t));
-            assert_eq!(t.as_str().parse::<TimeSeriesType>(), Ok(t));
         }
         assert_eq!(TimeSeriesType::parse("NotAType"), None);
         // Case sensitivity is part of the contract: the catalog stores exactly
         // `as_str()`, so a lower-cased spelling must not silently match.
         assert_eq!(TimeSeriesType::parse("singletimeseries"), None);
-        assert!("".parse::<TimeSeriesType>().is_err());
+        assert_eq!(TimeSeriesType::parse(""), None);
     }
 
     #[test]
