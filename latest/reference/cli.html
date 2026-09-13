@@ -377,8 +377,8 @@ language's own writer, which is a much smaller ask than linking Arrow into a whe
 the two reach different formats:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Applies to</th><th>Why</th></tr></thead><tbody>
 <tr><td><code>--time-range START..END</code></td><td>every format</td><td>A time slice is a different span of the series, so a pipe should carry exactly the rows asked for.</td></tr>
-<tr><td><code>--stride N</code> (<code>get</code>)</td><td>every format</td><td>Every <code>N</code>th row is a different series, not a shorter view of one. <code>-f json</code> reports the strided <code>shape</code> and echoes <code>stride</code>.</td></tr>
-<tr><td><code>--limit N</code>, <code>--full</code>, <code>--tail</code> (<code>get</code>); <code>--limit N</code>, <code>--full</code> (<code>grid</code>)</td><td>the table only</td><td>A CSV or JSON stream is read by another program, and a silently short one is a data bug in whatever reads it — not a shorter table.</td></tr>
+<tr><td><code>--stride N</code> (<code>get</code>, <code>grid</code>)</td><td>every format</td><td>Every <code>N</code>th row is a different series, not a shorter view of one. <code>-f json</code> reports the strided <code>shape</code> and echoes <code>stride</code>.</td></tr>
+<tr><td><code>--limit N</code>, <code>--full</code>, <code>--tail</code> (<code>get</code>, <code>grid</code>)</td><td>the table only</td><td>A CSV or JSON stream is read by another program, and a silently short one is a data bug in whatever reads it — not a shorter table.</td></tr>
 </tbody></table>
 </div>
 <p>So <code>-f csv get --limit 3</code> still writes every row; thin a pipe with <code>--stride</code>, or slice it with
@@ -586,7 +586,7 @@ infrastore --store &lt;PATH&gt; add --parquet &lt;PATH&gt; [--parquet &lt;PATH&g
 infrastore --store &lt;PATH&gt; merge --from &lt;PATH.h5&gt; [SELECTOR...] [--replace] [--dry-run]
 infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time &lt;TS&gt;]
-infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--window-start &lt;TS&gt; [--window-length N]] [--time-range START..END] [--limit N | --full] [--label &lt;auto|owner|full&gt;]
+infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--window-start &lt;TS&gt; [--window-length N]] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--label &lt;auto|owner|full&gt;]
 infrastore --store &lt;PATH&gt; plot    [SELECTOR...] [--out &lt;FILE.svg|FILE.html|-&gt;] [--kind &lt;line|duration|heatmap|fan|overlay&gt;] [--time-range START..END] [--title &lt;T&gt;] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store &lt;PATH&gt; info    [SELECTOR...] [--no-stats]
 infrastore --store &lt;PATH&gt; export  [SELECTOR...] [--dir &lt;DIR&gt;] [--time-range START..END]
@@ -770,8 +770,7 @@ another. The lowercase forms are a command-line shorthand, not a second vocabula
 calendar ones. This is also the spelling every command <em>prints</em>, so a duration copied out of
 <code>list</code>, <code>info</code>, or <code>export -f json</code> can be pasted straight back into a descriptor.</p>
 <p>The human form the CLI used to accept (<code>1h</code>, <code>15min</code>, <code>7d</code>, and a bare integer meaning
-<em>milliseconds</em>) is rejected, with the ISO-8601 translation attached:
-<code>invalid duration '1h': durations are ISO-8601 — did you mean 'PT1H'?</code></p>
+<em>milliseconds</em>) is rejected.</p>
 </li>
 <li>
 <p><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column, <code>--time-range</code> bounds,
@@ -970,8 +969,8 @@ across runs and two grid exports can be diffed.</p>
 opens in a browser, drops into a report, and survives being emailed. Both light and dark themes are
 written into the document, keyed on <code>prefers-color-scheme</code>. An <code>.html</code> destination wraps the same
 SVG in a minimal page; <code>--out -</code> writes to stdout, and the default is <code>chart.svg</code> in the working
-directory. <code>--width</code>/<code>--height</code> default to 960 × 440 (CSS pixels, fractional values allowed);
-<code>--limit</code> caps an <code>overlay</code> at 8 windows unless told otherwise.</p>
+directory. <code>--width</code>/<code>--height</code> default to 960 × 440 (whole CSS pixels, at least 50); <code>--limit</code> caps
+an <code>overlay</code> at 8 windows unless told otherwise.</p>
 <div class="table-wrapper"><table><thead><tr><th><code>--kind</code></th><th>What it shows</th></tr></thead><tbody>
 <tr><td><code>line</code></td><td>The profile itself, one or more series against time.</td></tr>
 <tr><td><code>duration</code></td><td>The load duration curve: values sorted descending against the percent of time at</td></tr>

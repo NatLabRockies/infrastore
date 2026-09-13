@@ -218,11 +218,6 @@ always <code>Period</code>. Instants (<code>DateTime&lt;Utc&gt;</code>) remain c
 </span><span class="boring">fn main() {
 </span>impl Store {
     pub fn create(path: Option&lt;&amp;Path&gt;, in_memory: bool) -&gt; Result&lt;Store&gt;
-    pub fn create_with_compression(
-        path: Option&lt;&amp;Path&gt;,
-        in_memory: bool,
-        compression: Compression,
-    ) -&gt; Result&lt;Store&gt;
     pub fn create_with_catalog(
         path: Option&lt;&amp;Path&gt;,
         in_memory: bool,
@@ -246,7 +241,8 @@ always <code>Period</code>. Instants (<code>DateTime&lt;Utc&gt;</code>) remain c
 with <a href="#errors"><code>StoreExists</code></a> if either half is already there</strong>; see
 <a href="../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a> for why
 creating over an existing store is refused rather than allowed to truncate it.</li>
-<li><code>Store::create_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
+<li><code>Store::create_with_catalog(...)</code> — as above but with an explicit HDF5 compression policy and
+<code>CatalogMode</code>.</li>
 <li><code>Store::create_replacing(...)</code> — discards any artifact already at <code>path</code>, both halves plus the
 catalog's <code>-wal</code>/<code>-shm</code> sidecars, then creates. Destructive and not atomic: an interrupted call
 can leave neither the old store nor the new one.</li>
@@ -1600,7 +1596,6 @@ impl UnitSystem {
 }
 
 impl TimeReference {
-    pub fn is_zoned(&amp;self) -&gt; bool;
     pub fn is_zoneless(&amp;self) -&gt; bool;
     pub fn accepts_zoned_bound(reference: Option&lt;&amp;TimeReference&gt;) -&gt; bool;
     pub fn as_storage_string(&amp;self) -&gt; String;   // "utc" / "-07:00" / "America/Denver" / "zoneless"
@@ -1647,10 +1642,6 @@ by <code>TimeSeriesData::set_descriptors</code>:</p>
     pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
-}
-
-impl Descriptors {
-    pub fn new(element_type: ElementType) -&gt; Self;   // everything else unset
 }
 <span class="boring">}</span></code></pre></pre>
 <p>It is a struct rather than a positional argument list because four of the seven fields are
@@ -1949,12 +1940,15 @@ crate root — import it (and the backends) from the <code>storage</code> module
     fn get_slice(&amp;self, hash: &amp;[u8; 32], range: Range&lt;usize&gt;) -&gt; Result&lt;TypedArray&gt;;
     fn remove_array(&amp;mut self, hash: &amp;[u8; 32]) -&gt; Result&lt;()&gt;;   // no-op if absent
     fn contains(&amp;self, hash: &amp;[u8; 32]) -&gt; Result&lt;bool&gt;;
-    fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;   // in-memory path only; `Store::compact`
-                                                        // rewrites the file for an on-disk store
-    fn verify(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
 
     // --- provided (overridden by Hdf5Backend) ---
+
+    // In-memory path only: the default refuses, and `Store::compact` rewrites the file
+    // for an on-disk store.
+    fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;
+    // Re-read and rehash every array, via `get_array`.
+    fn verify(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
 
     // Write a block of same-shaped packed arrays at once (the bulk-add write path).
     // The returned Vec is aligned to `hashes`: `true` where this call wrote new content.
@@ -1978,14 +1972,6 @@ crate root — import it (and the backends) from the <code>storage</code> module
         hash: &amp;[u8; 32],
         count_axis: usize,
         window_index: usize,
-        out: &amp;mut Vec&lt;u8&gt;,
-    ) -&gt; Result&lt;()&gt;;
-    // `len` consecutive steps from `start` along axis 0 (backs DST window reads).
-    fn read_range_into(
-        &amp;self,
-        hash: &amp;[u8; 32],
-        start: usize,
-        len: usize,
         out: &amp;mut Vec&lt;u8&gt;,
     ) -&gt; Result&lt;()&gt;;
     // The compression policy applied to writes; defaults to `Compression::None`

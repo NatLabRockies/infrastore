@@ -5656,7 +5656,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./system.h5"]   # the .h5.sqlite catalog must sit beside it
+file = "./system.h5"   # the .h5.sqlite catalog must sit beside it
 
 [authentication]
 method = "none"
@@ -5670,9 +5670,8 @@ method = "none"
 </code></pre>
 </li>
 </ol>
-<p>On startup the server validates the auth section, opens the first <code>[data].files</code> entry read-only,
-and serves the <code>CatalogStore</code> service on <code>host:port</code>. Set <code>RUST_LOG=debug</code> for verbose logs.</p>
-<p>v0 serves the <strong>first</strong> <code>[data].files</code> entry; multi-file serving is reserved for later.</p>
+<p>On startup the server validates the auth section, opens <code>[data].file</code> read-only, and serves the
+<code>CatalogStore</code> service on <code>host:port</code>. Set <code>RUST_LOG=debug</code> for verbose logs.</p>
 <h3 id="check-that-it-is-up"><a class="header" href="#check-that-it-is-up">Check that it is up</a></h3>
 <p>With <a href="https://github.com/fullstorydev/grpcurl"><code>grpcurl</code></a> and the proto file:</p>
 <pre><code class="language-sh">grpcurl -plaintext -proto proto/infrastore/v1/store.proto \
@@ -7139,11 +7138,6 @@ always <code>Period</code>. Instants (<code>DateTime&lt;Utc&gt;</code>) remain c
 </span><span class="boring">fn main() {
 </span>impl Store {
     pub fn create(path: Option&lt;&amp;Path&gt;, in_memory: bool) -&gt; Result&lt;Store&gt;
-    pub fn create_with_compression(
-        path: Option&lt;&amp;Path&gt;,
-        in_memory: bool,
-        compression: Compression,
-    ) -&gt; Result&lt;Store&gt;
     pub fn create_with_catalog(
         path: Option&lt;&amp;Path&gt;,
         in_memory: bool,
@@ -7167,7 +7161,8 @@ always <code>Period</code>. Instants (<code>DateTime&lt;Utc&gt;</code>) remain c
 with <a href="reference/rust-api.html#errors"><code>StoreExists</code></a> if either half is already there</strong>; see
 <a href="reference/../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a> for why
 creating over an existing store is refused rather than allowed to truncate it.</li>
-<li><code>Store::create_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
+<li><code>Store::create_with_catalog(...)</code> — as above but with an explicit HDF5 compression policy and
+<code>CatalogMode</code>.</li>
 <li><code>Store::create_replacing(...)</code> — discards any artifact already at <code>path</code>, both halves plus the
 catalog's <code>-wal</code>/<code>-shm</code> sidecars, then creates. Destructive and not atomic: an interrupted call
 can leave neither the old store nor the new one.</li>
@@ -8521,7 +8516,6 @@ impl UnitSystem {
 }
 
 impl TimeReference {
-    pub fn is_zoned(&amp;self) -&gt; bool;
     pub fn is_zoneless(&amp;self) -&gt; bool;
     pub fn accepts_zoned_bound(reference: Option&lt;&amp;TimeReference&gt;) -&gt; bool;
     pub fn as_storage_string(&amp;self) -&gt; String;   // "utc" / "-07:00" / "America/Denver" / "zoneless"
@@ -8568,10 +8562,6 @@ by <code>TimeSeriesData::set_descriptors</code>:</p>
     pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
-}
-
-impl Descriptors {
-    pub fn new(element_type: ElementType) -&gt; Self;   // everything else unset
 }
 <span class="boring">}</span></code></pre></pre>
 <p>It is a struct rather than a positional argument list because four of the seven fields are
@@ -8870,12 +8860,15 @@ crate root — import it (and the backends) from the <code>storage</code> module
     fn get_slice(&amp;self, hash: &amp;[u8; 32], range: Range&lt;usize&gt;) -&gt; Result&lt;TypedArray&gt;;
     fn remove_array(&amp;mut self, hash: &amp;[u8; 32]) -&gt; Result&lt;()&gt;;   // no-op if absent
     fn contains(&amp;self, hash: &amp;[u8; 32]) -&gt; Result&lt;bool&gt;;
-    fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;   // in-memory path only; `Store::compact`
-                                                        // rewrites the file for an on-disk store
-    fn verify(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
 
     // --- provided (overridden by Hdf5Backend) ---
+
+    // In-memory path only: the default refuses, and `Store::compact` rewrites the file
+    // for an on-disk store.
+    fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;
+    // Re-read and rehash every array, via `get_array`.
+    fn verify(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
 
     // Write a block of same-shaped packed arrays at once (the bulk-add write path).
     // The returned Vec is aligned to `hashes`: `true` where this call wrote new content.
@@ -8899,14 +8892,6 @@ crate root — import it (and the backends) from the <code>storage</code> module
         hash: &amp;[u8; 32],
         count_axis: usize,
         window_index: usize,
-        out: &amp;mut Vec&lt;u8&gt;,
-    ) -&gt; Result&lt;()&gt;;
-    // `len` consecutive steps from `start` along axis 0 (backs DST window reads).
-    fn read_range_into(
-        &amp;self,
-        hash: &amp;[u8; 32],
-        start: usize,
-        len: usize,
         out: &amp;mut Vec&lt;u8&gt;,
     ) -&gt; Result&lt;()&gt;;
     // The compression policy applied to writes; defaults to `Compression::None`
@@ -13125,7 +13110,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./store.h5"]
+file = "./store.h5"
 
 [authentication]
 # "none" or "api_key". For api_key, populate `keys`; clients must send the
@@ -13142,11 +13127,10 @@ method = "none"
 </div>
 <h3 id="data"><a class="header" href="#data"><code>[data]</code></a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>files</code></td><td>array of string</td><td>yes</td><td>HDF5 file paths to serve read-only</td></tr>
+<tr><td><code>file</code></td><td>string</td><td>yes</td><td>HDF5 file path to serve read-only</td></tr>
 </tbody></table>
 </div>
-<p>v0 serves a <strong>single</strong> file (the first entry). Multiple entries are reserved for a later milestone.
-The matching <code>&lt;path&gt;.sqlite</code> catalog must sit beside each HDF5 file. The server opens the store
+<p>The matching <code>&lt;path&gt;.sqlite</code> catalog must sit beside the HDF5 file. The server opens the store
 read-only.</p>
 <h3 id="authentication-2"><a class="header" href="#authentication-2"><code>[authentication]</code></a></h3>
 <p>The whole section is optional; omitting it defaults to <code>method = "none"</code>.</p>
@@ -13158,14 +13142,18 @@ read-only.</p>
 <p>Validation runs at startup, so a bad <code>[authentication]</code> section fails loudly rather than at the
 first request:</p>
 <ul>
-<li><code>method = "api_key"</code> with an empty <code>keys</code> list is rejected.</li>
-<li>An unknown <code>method</code> value is rejected.</li>
+<li>
+<p><code>method = "api_key"</code> with an empty <code>keys</code> list is rejected.</p>
+</li>
+<li>
+<p>An unknown <code>method</code> value is rejected.</p>
+</li>
+<li>
+<p>An unknown key or section is rejected, in every section. A misspelled <code>[authenticaton]</code> (sic)
+fails the parse instead of silently falling back to <code>method = "none"</code>. The cost is that a config
+carrying a key from a newer version is refused rather than partly honored.</p>
+</li>
 </ul>
-<p>That validation covers the values, not the key names. <code>ServerConfig</code> does not reject unknown fields,
-so a <strong>misspelled TOML key is silently ignored</strong> and the default (or a missing-field parse error,
-for a required key) applies instead. A server that starts with <code>[authenticaton]</code> (sic) is running
-with <code>method = "none"</code> — check the startup logs and confirm the effective settings rather than
-assuming a typo would have been caught.</p>
 <p>When <code>method = "api_key"</code>, each request must carry a matching value in the <code>x-api-key</code> metadata
 header. Keys are compared without early-exit — every configured key of the same length as the
 supplied one is checked, so timing does not reveal which key matched or how far a wrong key got. The
@@ -13176,7 +13164,7 @@ compare, treating length as non-secret.</p>
 <ol>
 <li>Loads and parses the TOML file.</li>
 <li>Validates the <code>[authentication]</code> section.</li>
-<li>Opens the first <code>[data].files</code> entry as a read-only store (errors if the list is empty).</li>
+<li>Opens <code>[data].file</code> as a read-only store.</li>
 <li>Binds <code>host:port</code> and serves the <code>CatalogStore</code> gRPC service.</li>
 </ol>
 <p>Logging honors the <code>RUST_LOG</code> environment variable (default <code>info</code>):</p>
@@ -13377,8 +13365,8 @@ language's own writer, which is a much smaller ask than linking Arrow into a whe
 the two reach different formats:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Applies to</th><th>Why</th></tr></thead><tbody>
 <tr><td><code>--time-range START..END</code></td><td>every format</td><td>A time slice is a different span of the series, so a pipe should carry exactly the rows asked for.</td></tr>
-<tr><td><code>--stride N</code> (<code>get</code>)</td><td>every format</td><td>Every <code>N</code>th row is a different series, not a shorter view of one. <code>-f json</code> reports the strided <code>shape</code> and echoes <code>stride</code>.</td></tr>
-<tr><td><code>--limit N</code>, <code>--full</code>, <code>--tail</code> (<code>get</code>); <code>--limit N</code>, <code>--full</code> (<code>grid</code>)</td><td>the table only</td><td>A CSV or JSON stream is read by another program, and a silently short one is a data bug in whatever reads it — not a shorter table.</td></tr>
+<tr><td><code>--stride N</code> (<code>get</code>, <code>grid</code>)</td><td>every format</td><td>Every <code>N</code>th row is a different series, not a shorter view of one. <code>-f json</code> reports the strided <code>shape</code> and echoes <code>stride</code>.</td></tr>
+<tr><td><code>--limit N</code>, <code>--full</code>, <code>--tail</code> (<code>get</code>, <code>grid</code>)</td><td>the table only</td><td>A CSV or JSON stream is read by another program, and a silently short one is a data bug in whatever reads it — not a shorter table.</td></tr>
 </tbody></table>
 </div>
 <p>So <code>-f csv get --limit 3</code> still writes every row; thin a pipe with <code>--stride</code>, or slice it with
@@ -13586,7 +13574,7 @@ infrastore --store &lt;PATH&gt; add --parquet &lt;PATH&gt; [--parquet &lt;PATH&g
 infrastore --store &lt;PATH&gt; merge --from &lt;PATH.h5&gt; [SELECTOR...] [--replace] [--dry-run]
 infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time &lt;TS&gt;]
-infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--window-start &lt;TS&gt; [--window-length N]] [--time-range START..END] [--limit N | --full] [--label &lt;auto|owner|full&gt;]
+infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--window-start &lt;TS&gt; [--window-length N]] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--label &lt;auto|owner|full&gt;]
 infrastore --store &lt;PATH&gt; plot    [SELECTOR...] [--out &lt;FILE.svg|FILE.html|-&gt;] [--kind &lt;line|duration|heatmap|fan|overlay&gt;] [--time-range START..END] [--title &lt;T&gt;] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store &lt;PATH&gt; info    [SELECTOR...] [--no-stats]
 infrastore --store &lt;PATH&gt; export  [SELECTOR...] [--dir &lt;DIR&gt;] [--time-range START..END]
@@ -13770,8 +13758,7 @@ another. The lowercase forms are a command-line shorthand, not a second vocabula
 calendar ones. This is also the spelling every command <em>prints</em>, so a duration copied out of
 <code>list</code>, <code>info</code>, or <code>export -f json</code> can be pasted straight back into a descriptor.</p>
 <p>The human form the CLI used to accept (<code>1h</code>, <code>15min</code>, <code>7d</code>, and a bare integer meaning
-<em>milliseconds</em>) is rejected, with the ISO-8601 translation attached:
-<code>invalid duration '1h': durations are ISO-8601 — did you mean 'PT1H'?</code></p>
+<em>milliseconds</em>) is rejected.</p>
 </li>
 <li>
 <p><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column, <code>--time-range</code> bounds,
@@ -13970,8 +13957,8 @@ across runs and two grid exports can be diffed.</p>
 opens in a browser, drops into a report, and survives being emailed. Both light and dark themes are
 written into the document, keyed on <code>prefers-color-scheme</code>. An <code>.html</code> destination wraps the same
 SVG in a minimal page; <code>--out -</code> writes to stdout, and the default is <code>chart.svg</code> in the working
-directory. <code>--width</code>/<code>--height</code> default to 960 × 440 (CSS pixels, fractional values allowed);
-<code>--limit</code> caps an <code>overlay</code> at 8 windows unless told otherwise.</p>
+directory. <code>--width</code>/<code>--height</code> default to 960 × 440 (whole CSS pixels, at least 50); <code>--limit</code> caps
+an <code>overlay</code> at 8 windows unless told otherwise.</p>
 <div class="table-wrapper"><table><thead><tr><th><code>--kind</code></th><th>What it shows</th></tr></thead><tbody>
 <tr><td><code>line</code></td><td>The profile itself, one or more series against time.</td></tr>
 <tr><td><code>duration</code></td><td>The load duration curve: values sorted descending against the percent of time at</td></tr>

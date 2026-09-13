@@ -207,7 +207,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./system.h5"]   # the .h5.sqlite catalog must sit beside it
+file = "./system.h5"   # the .h5.sqlite catalog must sit beside it
 
 [authentication]
 method = "none"
@@ -221,9 +221,8 @@ method = "none"
 </code></pre>
 </li>
 </ol>
-<p>On startup the server validates the auth section, opens the first <code>[data].files</code> entry read-only,
-and serves the <code>CatalogStore</code> service on <code>host:port</code>. Set <code>RUST_LOG=debug</code> for verbose logs.</p>
-<p>v0 serves the <strong>first</strong> <code>[data].files</code> entry; multi-file serving is reserved for later.</p>
+<p>On startup the server validates the auth section, opens <code>[data].file</code> read-only, and serves the
+<code>CatalogStore</code> service on <code>host:port</code>. Set <code>RUST_LOG=debug</code> for verbose logs.</p>
 <h3 id="check-that-it-is-up"><a class="header" href="#check-that-it-is-up">Check that it is up</a></h3>
 <p>With <a href="https://github.com/fullstorydev/grpcurl"><code>grpcurl</code></a> and the proto file:</p>
 <pre><code class="language-sh">grpcurl -plaintext -proto proto/infrastore/v1/store.proto \
