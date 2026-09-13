@@ -392,6 +392,23 @@ fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
         ));
     }
     let rows = store.list_with_timestamps(filter.clone())?;
+    // The store keeps an infinite float feature, but JSON cannot spell one:
+    // `features_to_plain` would write `null`, which the import then refuses.
+    // Refuse the export instead of emitting a document that cannot come back.
+    for meta in &rows {
+        if let Some((key, _)) = meta
+            .features
+            .iter()
+            .find(|(_, v)| matches!(v, FeatureValue::Float(f) if !f.is_finite()))
+        {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "cannot export series {} ('{}'): feature {key:?} is not finite, which JSON \
+                 cannot represent",
+                meta.id.map_or(-1, |id| id.0),
+                meta.name
+            )));
+        }
+    }
     let mut keyed: Vec<(SortKey, Value)> = rows
         .iter()
         .filter(|meta| meta.time_series_type != TimeSeriesType::PersistentTimeSeries)

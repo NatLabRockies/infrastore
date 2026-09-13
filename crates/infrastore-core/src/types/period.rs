@@ -104,7 +104,12 @@ impl Period {
     /// resolution, horizon, or interval).
     pub fn is_positive(&self) -> bool {
         match self {
-            Period::Fixed(d) => d.num_milliseconds() > 0,
+            // A sub-millisecond remainder is refused too: the ISO-8601 encoding
+            // drops it, so `PT1H` plus a microsecond would name the same packed
+            // dataset as `PT1H` while keying a different pool.
+            Period::Fixed(d) => {
+                d.num_milliseconds() > 0 && d.subsec_nanos().rem_euclid(1_000_000) == 0
+            }
             Period::Months(m) => *m > 0,
         }
     }

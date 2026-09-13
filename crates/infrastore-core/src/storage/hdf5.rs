@@ -1531,8 +1531,11 @@ impl Inner {
     /// [`StorageBackend::remove_array`], factored out so a write that fails
     /// part-way ([`Self::put_packed_block`]) can unwind what it indexed.
     fn remove_array_locked(&mut self, hash: &[u8; 32]) -> Result<()> {
-        let loc = match self.by_hash.remove(hash) {
-            Some(v) => v,
+        // Index state is only dropped once the on-disk change succeeds: a
+        // failed clear would otherwise leave the file naming a hash this
+        // session thinks is gone, and a re-add would store it twice.
+        let loc = match self.by_hash.get(hash) {
+            Some(v) => v.clone(),
             None => return Ok(()),
         };
         match loc {
@@ -1548,9 +1551,10 @@ impl Inner {
                 // Drop any cached handle first: it keeps the object alive past
                 // the unlink and would serve stale reads.
                 self.handles.borrow_mut().remove(&var);
+                self.single()?.unlink(&var).map_err(map_h5)?;
                 self.standalone_vars.remove(&var);
-                let single = self.single()?;
-                single.unlink(&var).map_err(map_h5)
+                self.by_hash.remove(hash);
+                Ok(())
             }
             // Packed: drop the column from the index, clear its hash companion
             // so a reopen does not re-index it, and zero the column's data so
@@ -1560,9 +1564,6 @@ impl Inner {
             Location::Packed { dataset, col } => {
                 let (hash_name, dtype, element_shape, length, slab_shape) = {
                     let state = self.dataset_state_mut(&dataset)?;
-                    if col < state.columns.len() {
-                        state.columns[col] = None;
-                    }
                     (
                         state.hash_name.clone(),
                         state.dtype,
@@ -1583,6 +1584,11 @@ impl Inner {
                         packed_ranges(0..length, col, &element_shape),
                     )?;
                 }
+                let state = self.dataset_state_mut(&dataset)?;
+                if col < state.columns.len() {
+                    state.columns[col] = None;
+                }
+                self.by_hash.remove(hash);
                 Ok(())
             }
         }
