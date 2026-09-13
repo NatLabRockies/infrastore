@@ -1091,6 +1091,15 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// The catalog connection, for a write that runs outside a savepoint of its
+    /// own. See [`Store::add_requests_staged`], the one caller: a single insert
+    /// issued inside an already-open transaction leaves nothing to unwind, because
+    /// [`Self::insert_batched`] writes the shared rows before the row naming them,
+    /// so the savepoint it would otherwise take is pure overhead.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Begin a scoped unit of work, rolled back if the guard is dropped without
     /// [`Savepoint::commit`].
     ///
@@ -1162,6 +1171,18 @@ impl MetadataStore {
         };
         let element_shape_json = serde_json::to_string(&meta.element_shape)?;
 
+        // The feature set goes in before the row that names it. An add inside an
+        // open transaction may run with no savepoint of its own (see
+        // `Store::add_requests_staged`), so nothing rewinds a statement that
+        // succeeded before a later one failed. In this order a failure leaves at
+        // worst an unreferenced set, which `compact` sweeps — never a row naming
+        // a set that is not there. `insert` on the cache returns true the first
+        // time this batch sees the set; every later row carrying it skips the
+        // `INSERT OR IGNORE` outright.
+        if cache.features.insert(f_hash) {
+            Self::insert_feature_set(tx, &f_hash, &meta.features)?;
+        }
+
         // `prepare_cached` so bulk adds parse each INSERT's SQL once per
         // connection instead of once per row.
         //
@@ -1179,8 +1200,8 @@ impl MetadataStore {
         // grows with every page the transaction has touched. A batched load
         // under one transaction goes quadratic on it: the tenth batch of 10k
         // rows runs fifty times slower than the first. `last_insert_rowid()` is
-        // per-connection and reports the most recent rowid insert, so it must
-        // be read before the feature-set insert below, which would clobber it;
+        // per-connection and reports the most recent rowid insert, so it is
+        // read straight off this statement, before anything else inserts;
         // `tests/bulk_add_in_transaction.rs` pins the cost.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
@@ -1254,12 +1275,6 @@ impl MetadataStore {
             }
             Err(e) => return Err(e.into()),
         };
-
-        // `insert` on the cache returns true the first time this batch sees the
-        // set; every later row carrying it is a no-op we can skip outright.
-        if cache.features.insert(f_hash) {
-            Self::insert_feature_set(tx, &f_hash, &meta.features)?;
-        }
 
         Ok(id)
     }
