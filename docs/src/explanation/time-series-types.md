@@ -90,6 +90,19 @@ values are stored.
 A `NonSequentialTimeSeries` pairs each value with an explicit UTC timestamp. Timestamps must be
 strictly increasing and their count must match the data length.
 
+```text
+stored timestamps  t0      t1   t2                 t3
+                   |       |    |                  |
+value              *       *    *                  *
+                   |       |    |                  |
+  read at t? ------+---?---+----+------?-----------+--> time
+                       error              error
+```
+
+Both halves are stored: an `i64` vector of Unix milliseconds under
+`time_series/timestamps/tsv_{hash}`, and the values beside it. Nothing is implied, and nothing is
+defined between the stored instants.
+
 The timestamp vector is stored in the HDF5 file, **content-addressed and shared**: series sampled at
 the same instants — an outage schedule, a set of event times, a market timeline — hold one copy
 between them rather than one each. That shared vector is also the series' _cohort_: the values of
@@ -203,12 +216,109 @@ association records `horizon` (the span each window covers), `interval` (the spa
 successive window start times), `count` (the number of windows), and — for `Probabilistic` — a
 `percentiles` vector.
 
-| Type                            | Conventional array shape                   | Extra metadata |
+#### Two grids, not one
+
+A forecast has **two independent time grids**, and both are needed to place a value. Windows are
+issued every `interval`; inside a window, steps run every `resolution` for `horizon`. They coincide
+only when windows abut exactly.
+
+```text
+initial_timestamp = 00:00   resolution = PT1H   horizon = PT3H   interval = PT1H   count = 4
+
+window 0   [ 00:00  01:00  02:00 ]
+window 1          [ 01:00  02:00  03:00 ]
+window 2                 [ 02:00  03:00  04:00 ]
+window 3                        [ 03:00  04:00  05:00 ]
+           +------+------+------+------+------+------+--> time
+          00:00  01:00  02:00  03:00  04:00  05:00
+           \____/
+          interval (when a window is issued)
+```
+
+Here the windows overlap: 02:00 appears in three of them, once as a 2-hour-ahead forecast, once as
+1-hour-ahead, once as the issue hour itself. That is the whole point of the type — the same instant
+forecast repeatedly, and the store keeps every version. `Deterministic::window_start(j)` and
+`window_timestamps(j)` compute these two grids.
+
+#### What the array looks like
+
+`Deterministic` stores one `[H, count]` matrix, where `H = horizon / resolution`. It is
+**step-major**: a _row_ is one lead time across every window, a _column_ is one whole window.
+
+```text
+data.shape = [3, 4]          # [H, count]
+
+              window 0    window 1    window 2    window 3
+            +-----------+-----------+-----------+-----------+
+step 0      |  v[0,0]   |  v[0,1]   |  v[0,2]   |  v[0,3]   |  lead +0h
+step 1      |  v[1,0]   |  v[1,1]   |  v[1,2]   |  v[1,3]   |  lead +1h
+step 2      |  v[2,0]   |  v[2,1]   |  v[2,2]   |  v[2,3]   |  lead +2h
+            +-----------+-----------+-----------+-----------+
+              issued      issued      issued      issued
+              00:00       01:00       02:00       03:00
+
+row-major flat order:  v[0,0] v[0,1] v[0,2] v[0,3] v[1,0] …
+                       entry `i * count + j` is window j's step i
+```
+
+That ordering is also the one `Deterministic::from_values` and `decoded_values` use, so a decoded
+list of per-timestep values is read the same way.
+
+`Probabilistic` and `Scenarios` stack that matrix: one plane per percentile or per scenario, giving
+`[P, H, count]` and `[S, H, count]`.
+
+```text
+Probabilistic, percentiles = [0.10, 0.50, 0.90]      data.shape = [3, 3, 4]
+
+        p = 0.10          p = 0.50          p = 0.90
+      +-----------+     +-----------+     +-----------+
+      | [H, count]|     | [H, count]|     | [H, count]|
+      |  matrix   |     |  matrix   |     |  matrix   |
+      |  as above |     |  as above |     |  as above |
+      +-----------+     +-----------+     +-----------+
+
+`percentiles` is metadata, in the same order as the planes.
+```
+
+A `DeterministicSingleTimeSeries` stores **no forecast array at all**. It is a sliding view over the
+`SingleTimeSeries` it was derived from, so the values exist once:
+
+```text
+SingleTimeSeries   v0  v1  v2  v3  v4  v5  v6  v7  …   (the only array on disk)
+window 0          [ v0  v1  v2 ]
+window 1              [ v1  v2  v3 ]
+window 2                  [ v2  v3  v4 ]
+```
+
+| Type                            | Stored array shape                         | Extra metadata |
 | ------------------------------- | ------------------------------------------ | -------------- |
 | `Deterministic`                 | `(horizon_count, count)`                   | —              |
 | `DeterministicSingleTimeSeries` | the backing `SingleTimeSeries` array       | —              |
 | `Probabilistic`                 | `(percentile_count, horizon_count, count)` | `percentiles`  |
 | `Scenarios`                     | `(scenario_count, horizon_count, count)`   | —              |
+
+#### A forecast of cost curves
+
+The element shape is appended to all of the above, so a forecast whose values are curves rather than
+numbers has the same window layout with the curve's row width trailing it. A day-ahead forecast of a
+generator's quadratic cost, re-issued hourly:
+
+```text
+element_type = quadratic_function      data.shape = [24, 7, 3]
+                                                     ^   ^  ^
+                                       H = 24h / PT1H   |  row layout of quadratic_function:
+                                              count = 7 |  (quadratic, proportional, constant)
+
+step 0, window 0   [ 0.002,  23.4,  150.0 ]     ← the curve forecast for hour 0 of window 0
+step 0, window 1   [ 0.002,  23.9,  150.0 ]
+…
+step 23, window 6  [ 0.003,  25.1,  150.0 ]
+```
+
+Each of the `24 × 7` cells is a whole cost curve, not a scalar. Fuel-price movement shows up as the
+coefficients changing from window to window; the constant term is unchanged here because no-load
+cost does not move with fuel. A `Probabilistic` over the same curves is `[P, 24, 7, 3]` — one such
+block per percentile.
 
 The store does not interpret the layout — the caller owns the array shape (the Rust core takes a
 native-shape `TypedArray` inside a `Deterministic` / `Probabilistic` / `Scenarios` object; the C ABI
@@ -293,6 +403,30 @@ So a cost curve that varies over time is not another type: it is one of the type
 the non-curve fields that are constant across the curve (a volume window, a curve-kind tag) in
 `application_data`. A read decodes the element type back into curves rather than handing back a
 packing.
+
+A ragged curve is packed into a fixed-width row, so the array stays rectangular. The width `w` is
+the widest curve in the series, every row leads with its own point count `n`, and the slack is
+zero-padded:
+
+```text
+SingleTimeSeries, hourly, element_type = piecewise_linear
+widest curve = 3 points  →  element shape [1 + 2*3] = [7],  data.shape = [n_hours, 7]
+
+               n   x1   y1    x2    y2    x3     y3
+             +---+----+-----+-----+-----+-----+------+
+00:00        | 2 |  0 |  10 |  50 | 600 |   0 |    0 |   2 points: tail is padding
+01:00        | 2 |  0 |  10 |  50 | 600 |   0 |    0 |
+02:00        | 3 |  0 |  10 |  50 | 600 |  80 | 1100 |   a segment opens up
+             +---+----+-----+-----+-----+-----+------+
+                  \_______/  \________/  \_________/
+                   point 1     point 2      point 3
+```
+
+`n` makes each row self-describing, so a decode needs nothing but the row. The same series stored as
+a `PersistentTimeSeries` — a curve that holds until the next breakpoint, which is what a monthly
+fuel-price-driven cost curve is — packs identically; only the read semantics differ. A
+`tuple(3,f64)` or a `quadratic_function` needs no count, being fixed-width: element shape `[3]`, one
+row per step.
 
 What does **not** belong in a value is a JSON blob: anything the store cannot describe cannot be
 deduplicated, hashed, or read columnar, and it puts the consumer back in the business of parsing its
