@@ -59,6 +59,7 @@ Read them in this order; each builds on the vocabulary of the one before.
 | [`single_fixed_tuples.py`](./single_fixed_tuples.py)                     | Active and reactive power stored together as one `tuple(2,f64)` value per timestep                                                  |
 | [`single_custom_elements.py`](./single_custom_elements.py)               | Cost curves as values: the four function element types                                                                              |
 | [`nonsequential_floats.py`](./nonsequential_floats.py)                   | Measurements at the instants they were taken, with no value in between                                                              |
+| [`persistent_monthly_steps.py`](./persistent_monthly_steps.py)           | Monthly step functions read hour by hour: a float series and a `tuple(2,f64)` one                                                   |
 | [`deterministic_floats.py`](./deterministic_floats.py)                   | Rolling forecasts: `resolution` / `horizon` / `interval` / `count`, and why windows overlap                                         |
 | [`deterministic_custom_elements.py`](./deterministic_custom_elements.py) | A market offer curve re-submitted every hour — a forecast whose values are curves                                                   |
 | [`probabilistic_floats.py`](./probabilistic_floats.py)                   | p10/p50/p90 forecast bands, and why the band is one-sided at solar noon                                                             |
