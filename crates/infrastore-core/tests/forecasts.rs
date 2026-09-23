@@ -887,6 +887,108 @@ fn dst_synthesis_multidim_element_shape() {
 }
 
 // ---------------------------------------------------------------------------
+// Case 12: every DST window selection matches a brute-force gather
+//
+// A windowed DST read fetches only the source rows its windows touch and
+// gathers from that slice, so each output value sits at an offset from the
+// slice's start rather than the column's. Checked against an oracle for every
+// contiguous selection, across overlapping and abutting windows, a source
+// tail no window reaches, and a multi-element row.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dst_every_window_selection_matches_oracle() {
+    // (source len, H, interval steps, element width; 0 = scalar)
+    let configs = [
+        (13, 4, 2, 0), // overlapping, 1-row tail
+        (12, 3, 3, 0), // abutting
+        (14, 5, 1, 0), // heavy overlap, one-step interval
+        (11, 3, 2, 2), // overlapping, multi-element row
+        (15, 4, 3, 3), // overlapping, multi-element row, 2-row tail
+    ];
+    for (len, h, step, width) in configs {
+        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let resolution = Duration::hours(1);
+        let interval = Duration::hours(step as i64);
+        let e = width.max(1);
+        // src[i][k] = 10 * i + k: every value names its own source row.
+        let src: Vec<f64> = (0..len)
+            .flat_map(|i| (0..e).map(move |k| (10 * i + k) as f64))
+            .collect();
+        let shape = if width == 0 {
+            vec![len]
+        } else {
+            vec![len, width]
+        };
+        let data = f64_arr(shape, &src);
+        let count = (len - h) / step + 1;
+        let ctx = format!("len={len} h={h} step={step} width={width}");
+
+        for_each_backend(
+            |store| {
+                add_forecast(
+                    store,
+                    1,
+                    "dst",
+                    TimeSeriesType::DeterministicSingleTimeSeries,
+                    initial,
+                    resolution,
+                    Duration::hours(h as i64),
+                    interval,
+                    0,
+                    data.clone(),
+                    None,
+                )
+            },
+            |store, id, backend| {
+                for a in 0..count {
+                    for b in a..=count {
+                        let n = b - a;
+                        // out[s][j][k] = src[(a + j) * step + s][k]
+                        let expected: Vec<f64> = (0..h)
+                            .flat_map(|s| (a..b).map(move |w| w * step + s))
+                            .flat_map(|row| src[row * e..(row + 1) * e].iter().copied())
+                            .collect();
+                        let mut want_shape = vec![h, n];
+                        if width > 0 {
+                            want_shape.push(width);
+                        }
+                        let start = initial + interval * a as i32;
+                        let what = format!("{ctx} {backend} windows {a}..{b}");
+
+                        let by_range = store
+                            .read_by_ids_range(
+                                &[*id],
+                                (start, initial + interval * b as i32).into(),
+                            )
+                            .map(|mut v| v.remove(0))
+                            .unwrap();
+                        let mut reads = vec![("range", by_range)];
+                        if n > 0 {
+                            let by_id = store
+                                .read_by_id(*id, ReadWindow::from(start).with_count(n))
+                                .unwrap();
+                            reads.push(("window", by_id));
+                        }
+                        for (how, got) in reads {
+                            let det = got.as_deterministic().unwrap();
+                            assert_eq!(det.count, n, "{what} {how}: count");
+                            assert_eq!(det.initial_timestamp, start, "{what} {how}: initial");
+                            assert_eq!(det.data.shape, want_shape, "{what} {how}: shape");
+                            assert_eq!(
+                                det.data.to_f64_vec().unwrap(),
+                                expected,
+                                "{what} {how}: values"
+                            );
+                        }
+                    }
+                }
+            },
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Deterministic resolution + matched type
 //
 // A `Deterministic` request resolves to one concrete key (whose
