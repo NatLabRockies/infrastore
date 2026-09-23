@@ -2149,11 +2149,13 @@ impl Store {
     /// the bulk of the read.
     ///
     /// A selection covering every window *is* the whole array, so it is read as
-    /// one rather than as a hyperslab over everything. An empty selection reads
-    /// nothing.
+    /// one rather than as a hyperslab over everything. An empty selection is
+    /// still a zero-length block read rather than no read at all: the block
+    /// read is what checks the catalog's dtype against the stored array, and a
+    /// drifted row must not read back as a successful empty forecast.
     ///
     /// `shape` is the array's full logical shape and `count_axis` indexes into
-    /// it; both callers have just checked that with `validate_forecast_shape`.
+    /// it; each caller has just checked that with `validate_forecast_shape`.
     fn read_forecast_windows(
         &self,
         hash: &[u8; 32],
@@ -2169,9 +2171,7 @@ impl Store {
         let mut out_shape = shape.to_vec();
         out_shape[count_axis] = w1 - w0;
         let mut bytes = Vec::new();
-        if w1 > w0 {
-            self.read_window_block_into(hash, dtype, count_axis, w0, w1 - w0, &mut bytes)?;
-        }
+        self.read_window_block_into(hash, dtype, count_axis, w0, w1 - w0, &mut bytes)?;
         TypedArray::new(dtype, out_shape, bytes).map_err(TimeSeriesError::IntegrityError)
     }
 

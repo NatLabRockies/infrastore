@@ -2371,3 +2371,62 @@ fn a_missing_time_axis_is_reported_and_refuses_the_read() {
         );
     }
 }
+
+#[test]
+fn forecast_read_of_a_drifted_dtype_is_refused_even_when_empty() {
+    // A windowed dense-forecast read skips the whole-array fetch, which is
+    // where the catalog's dtype used to be checked against the stored array. An
+    // empty selection reads no windows at all, so it must still reach a check:
+    // a row whose `element_type` lies must not read back as an empty forecast.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let interval = Duration::hours(4);
+    let id = {
+        let mut store = Store::create(Some(path.as_path()), false).unwrap();
+        let data = TypedArray::from_f64(vec![2, 3], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        let det = Deterministic::new(
+            initial,
+            Duration::hours(1),
+            Duration::hours(2),
+            interval,
+            3,
+            data,
+            "load",
+        )
+        .unwrap();
+        let id = store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(det),
+                Features::new(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+        id
+    };
+    {
+        let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
+        let n = conn
+            .execute(
+                "UPDATE time_series_associations SET element_type = 'i64'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(n, 1, "one association to corrupt");
+    }
+
+    let store = Store::open(path.as_path(), true).unwrap();
+    let at = initial + interval;
+    for (what, end) in [("empty", at), ("one window", at + interval)] {
+        let err = store
+            .read_by_ids_range(&[id], (at, end).into())
+            .unwrap_err();
+        assert!(
+            matches!(err, TimeSeriesError::IntegrityError(_)),
+            "{what}: {err:?}"
+        );
+    }
+}
