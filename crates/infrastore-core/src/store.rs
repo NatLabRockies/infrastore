@@ -3422,7 +3422,14 @@ impl Store {
                 // The stored array is the underlying STS 1-D-like array, shape
                 // [total_len, *E]. Synthesize a Deterministic of shape
                 // [H, count, *E] by gathering windows.
-                let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                //
+                // The windows are resolved *before* any data is fetched, and
+                // only the rows the gather touches are read. A packed STS
+                // dataset is chunked timestamp-major, so a whole-column read
+                // inflates one chunk per timestep; fetching the column to hand
+                // back one window made a single-window read cost a full read.
+                let dtype = meta.element_type.physical_dtype();
+                let full_shape = self.array_shape(&meta.data_hash)?;
                 let initial = required(
                     meta.initial_timestamp,
                     "DeterministicSingleTimeSeries",
@@ -3452,7 +3459,7 @@ impl Store {
                         ))
                     })?
                 };
-                let total_len = arr.length();
+                let total_len = full_shape.first().copied().unwrap_or(0);
                 // Validate that all windows fit in the underlying array.
                 let required = (count.saturating_sub(1)) * interval_steps + h;
                 if required > total_len {
@@ -3466,13 +3473,25 @@ impl Store {
                 // dimension makes this zero, and the gather below then copies
                 // nothing rather than indexing the empty buffer -- the write
                 // boundary refuses such a shape, but a read must not panic on it.
-                let elem_shape: Vec<usize> = arr.shape[1..].to_vec();
-                let elem_factor: usize = elem_shape.iter().product::<usize>() * arr.dtype.size();
+                let elem_shape: Vec<usize> = full_shape.get(1..).unwrap_or(&[]).to_vec();
+                let elem_factor: usize = elem_shape.iter().product::<usize>() * dtype.size();
 
                 let (w0, w1, window_initial) = resolve_windows(
                     initial, resolution, horizon, interval, count, time_range, &meta.name,
                 )?;
                 let selected = w1 - w0;
+
+                // The source rows the gather reads: from the first selected
+                // window's start to the last one's end. `required <= total_len`
+                // above and `w1 <= count` bound `hi`. An empty selection reads
+                // nothing.
+                let lo = w0 * interval_steps;
+                let hi = if selected == 0 {
+                    lo
+                } else {
+                    (w1 - 1) * interval_steps + h
+                };
+                let arr = self.get_slice(&meta.data_hash, dtype, lo..hi)?;
 
                 // Build output array [H, selected, *E].
                 let out_shape: Vec<usize> = std::iter::once(h)
@@ -3480,12 +3499,13 @@ impl Store {
                     .chain(elem_shape.iter().copied())
                     .collect();
                 let out_nelems: usize = out_shape.iter().product();
-                let mut out_bytes = vec![0u8; out_nelems * arr.dtype.size()];
+                let mut out_bytes = vec![0u8; out_nelems * dtype.size()];
 
                 for j in 0..selected {
                     let k = w0 + j; // source window index
                     for s in 0..h {
-                        let src_idx = k * interval_steps + s;
+                        // Source index within the fetched slice, which starts at `lo`.
+                        let src_idx = k * interval_steps + s - lo;
                         let src_off = src_idx * elem_factor;
                         // Row-major offset for [s, j] in [H, selected] with elem_factor.
                         let dst_off = (s * selected + j) * elem_factor;
@@ -3494,7 +3514,7 @@ impl Store {
                     }
                 }
 
-                let out_arr = TypedArray::new(arr.dtype, out_shape, out_bytes)
+                let out_arr = TypedArray::new(dtype, out_shape, out_bytes)
                     .map_err(TimeSeriesError::IntegrityError)?;
                 let det = Deterministic::new(
                     window_initial,
@@ -7616,5 +7636,220 @@ mod forced_rollback_tests {
         add(&mut store, 4, 300.0).unwrap();
         store.commit_transaction().unwrap();
         assert_eq!(count(&store), 2);
+    }
+}
+
+#[cfg(test)]
+mod dst_windowed_read_tests {
+    //! A `DeterministicSingleTimeSeries` window reads only its own rows.
+    //!
+    //! The stored array is the underlying `SingleTimeSeries` column, and the
+    //! packed datasets holding those are chunked timestamp-major: a whole-column
+    //! read inflates one chunk per timestep. Reading one 24-step window out of
+    //! an 8760-step column therefore has to fetch 24 rows, not 8760 -- a cost
+    //! that is invisible while the dataset fits the chunk cache and a cliff once
+    //! it does not.
+    //!
+    //! `StorageBackend` is crate-private, so the check lives here rather than in
+    //! `tests/forecasts.rs`: a delegating backend that tallies whole-array
+    //! fetches, and the assertion that a windowed read makes none.
+
+    use super::*;
+    use crate::types::time_series::SingleTimeSeries;
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Counts {
+        full_reads: AtomicUsize,
+        slice_reads: AtomicUsize,
+        slice_rows: AtomicUsize,
+    }
+
+    /// A `MemoryBackend` that tallies whole-array fetches and slice fetches.
+    struct CountingBackend {
+        inner: MemoryBackend,
+        counts: Arc<Counts>,
+    }
+
+    impl StorageBackend for CountingBackend {
+        fn put_array(
+            &mut self,
+            hash: &[u8; 32],
+            data: &TypedArray,
+            group: PackGroup,
+            layout: ArrayLayout,
+        ) -> Result<bool> {
+            self.inner.put_array(hash, data, group, layout)
+        }
+
+        fn get_array(&self, hash: &[u8; 32], dtype: Dtype) -> Result<TypedArray> {
+            self.counts.full_reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.get_array(hash, dtype)
+        }
+
+        fn get_slice(
+            &self,
+            hash: &[u8; 32],
+            dtype: Dtype,
+            range: Range<usize>,
+        ) -> Result<TypedArray> {
+            self.counts.slice_reads.fetch_add(1, Ordering::Relaxed);
+            self.counts
+                .slice_rows
+                .fetch_add(range.len(), Ordering::Relaxed);
+            self.inner.get_slice(hash, dtype, range)
+        }
+
+        fn array_shape(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
+            self.inner.array_shape(hash)
+        }
+
+        fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
+            self.inner.remove_array(hash)
+        }
+
+        fn contains(&self, hash: &[u8; 32]) -> Result<bool> {
+            self.inner.contains(hash)
+        }
+
+        fn put_timestamps(
+            &mut self,
+            hash: &[u8; 32],
+            timestamps: &[DateTime<Utc>],
+        ) -> Result<bool> {
+            self.inner.put_timestamps(hash, timestamps)
+        }
+
+        fn get_timestamps(&self, hash: &[u8; 32]) -> Result<Vec<DateTime<Utc>>> {
+            self.inner.get_timestamps(hash)
+        }
+
+        fn remove_timestamps(&mut self, hash: &[u8; 32]) -> Result<()> {
+            self.inner.remove_timestamps(hash)
+        }
+
+        fn timestamp_hashes(&self) -> Result<Vec<[u8; 32]>> {
+            self.inner.timestamp_hashes()
+        }
+
+        fn flush(&mut self) -> Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    const LEN: usize = 240;
+    const H: usize = 24;
+
+    /// A store over a counting backend, holding one hourly `SingleTimeSeries`
+    /// of `LEN` ramp values transformed into a DST of `H`-hour windows.
+    fn dst_store() -> (Store, Arc<Counts>, DateTime<Utc>, TimeSeriesId, Vec<f64>) {
+        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let vals: Vec<f64> = (0..LEN).map(|i| i as f64).collect();
+        let counts = Arc::new(Counts::default());
+        let mut store = Store::from_parts(
+            Box::new(CountingBackend {
+                inner: MemoryBackend::new(),
+                counts: Arc::clone(&counts),
+            }),
+            MetadataStore::open_in_memory().unwrap(),
+            false,
+            None,
+            CatalogMode::InMemory,
+            None,
+        );
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    initial,
+                    Duration::hours(1),
+                    TypedArray::from_f64(vec![LEN], &vals),
+                    "load",
+                )),
+                Features::new(),
+            )
+            .unwrap();
+        store
+            .transform_single_time_series(
+                Duration::hours(H as i64),
+                Duration::hours(H as i64),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        let id = store
+            .list_metadata(
+                ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+            )
+            .unwrap()[0]
+            .id
+            .unwrap();
+        (store, counts, initial, id, vals)
+    }
+
+    /// The tallies so far, reset to zero.
+    fn take(counts: &Counts) -> (usize, usize, usize) {
+        (
+            counts.full_reads.swap(0, Ordering::Relaxed),
+            counts.slice_reads.swap(0, Ordering::Relaxed),
+            counts.slice_rows.swap(0, Ordering::Relaxed),
+        )
+    }
+
+    #[test]
+    fn single_window_reads_only_its_own_rows() {
+        let (store, counts, initial, id, vals) = dst_store();
+        // Window 5 of an hourly 240-step source with a 24 h horizon and
+        // interval: source rows 120..144.
+        let start = initial + Duration::hours(24 * 5);
+        let _ = take(&counts);
+        let data = store
+            .read_by_id(id, ReadWindow::from(start).with_count(1))
+            .unwrap();
+        let (full_reads, slice_reads, slice_rows) = take(&counts);
+
+        assert_eq!(
+            full_reads, 0,
+            "a windowed DST read must not fetch the whole column"
+        );
+        assert_eq!(slice_reads, 1);
+        assert_eq!(slice_rows, H, "one 24-step window, not the 240-step column");
+
+        let TimeSeriesData::Deterministic(det) = data else {
+            panic!("a DST reads back as a Deterministic");
+        };
+        assert_eq!(det.count, 1);
+        assert_eq!(det.initial_timestamp, start);
+        assert_eq!(det.data.to_f64_vec().unwrap(), vals[120..144].to_vec());
+    }
+
+    /// The unwindowed read still returns every window, and still reads the
+    /// column exactly once.
+    #[test]
+    fn whole_series_read_is_unchanged() {
+        let (store, counts, _, id, vals) = dst_store();
+        let _ = take(&counts);
+        let data = store.read_by_id(id, ReadWindow::full()).unwrap();
+        let (full_reads, _, slice_rows) = take(&counts);
+        assert_eq!(full_reads, 0);
+        assert_eq!(slice_rows, LEN);
+
+        let TimeSeriesData::Deterministic(det) = data else {
+            panic!("a DST reads back as a Deterministic");
+        };
+        let windows = LEN / H;
+        assert_eq!(det.count, windows);
+        // `[H, count]` row-major: row s holds step s of every window.
+        let got = det.data.to_f64_vec().unwrap();
+        for w in 0..windows {
+            for s in 0..H {
+                assert_eq!(got[s * windows + w], vals[w * H + s]);
+            }
+        }
     }
 }
