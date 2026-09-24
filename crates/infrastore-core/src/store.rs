@@ -2137,6 +2137,44 @@ impl Store {
             .read_window_block_into(hash, dtype, count_axis, window_start, len, out)
     }
 
+    /// Windows `w0..w1` of a dense forecast's stored array, as an array of the
+    /// same rank with `count_axis` narrowed to the selection.
+    ///
+    /// A dense forecast is chunked in bounded blocks along its count axis
+    /// (`storage::common::standalone_chunks`), so a window selection is a
+    /// hyperslab the on-disk layout is already shaped for -- which is what
+    /// [`ForecastReader`] has always read it as. Fetching the whole array and
+    /// slicing it in memory instead made one window cost the entire forecast,
+    /// which for a `Probabilistic` or `Scenarios` (`P`/`S` x `H` x `count`) is
+    /// the bulk of the read.
+    ///
+    /// A selection covering every window *is* the whole array, so it is read as
+    /// one rather than as a hyperslab over everything. An empty selection is
+    /// still a zero-length block read rather than no read at all: the block
+    /// read is what checks the catalog's dtype against the stored array, and a
+    /// drifted row must not read back as a successful empty forecast.
+    ///
+    /// `shape` is the array's full logical shape and `count_axis` indexes into
+    /// it; each caller has just checked that with `validate_forecast_shape`.
+    fn read_forecast_windows(
+        &self,
+        hash: &[u8; 32],
+        dtype: Dtype,
+        shape: &[usize],
+        count_axis: usize,
+        w0: usize,
+        w1: usize,
+    ) -> Result<TypedArray> {
+        if w0 == 0 && w1 == shape[count_axis] {
+            return self.get_array(hash, dtype);
+        }
+        let mut out_shape = shape.to_vec();
+        out_shape[count_axis] = w1 - w0;
+        let mut bytes = Vec::new();
+        self.read_window_block_into(hash, dtype, count_axis, w0, w1 - w0, &mut bytes)?;
+        TypedArray::new(dtype, out_shape, bytes).map_err(TimeSeriesError::IntegrityError)
+    }
+
     fn read_range_into(
         &self,
         hash: &[u8; 32],
@@ -3312,7 +3350,8 @@ impl Store {
                 Ok(TimeSeriesData::PersistentTimeSeries(series))
             }
             TimeSeriesType::Deterministic => {
-                let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                let dtype = meta.element_type.physical_dtype();
+                let shape = self.array_shape(&meta.data_hash)?;
                 let initial =
                     required(meta.initial_timestamp, "Deterministic", "initial_timestamp")?;
                 let resolution = required(meta.resolution, "Deterministic", "resolution")?;
@@ -3321,15 +3360,12 @@ impl Store {
                 let count = required(meta.count, "Deterministic", "count")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // Validate stored shape: [H, count, *E].
-                validate_forecast_shape(&arr, &[h, count], "Deterministic")?;
+                validate_forecast_shape(&shape, &[h, count], "Deterministic")?;
                 let (w0, w1, window_initial) = resolve_windows(
                     initial, resolution, horizon, interval, count, time_range, &meta.name,
                 )?;
-                let windowed = if w0 == 0 && w1 == count {
-                    arr
-                } else {
-                    slice_axis(&arr, 1, w0..w1)?
-                };
+                let windowed =
+                    self.read_forecast_windows(&meta.data_hash, dtype, &shape, 1, w0, w1)?;
                 let det = Deterministic::new(
                     window_initial,
                     resolution,
@@ -3344,7 +3380,8 @@ impl Store {
             }
 
             TimeSeriesType::Probabilistic => {
-                let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                let dtype = meta.element_type.physical_dtype();
+                let shape = self.array_shape(&meta.data_hash)?;
                 let initial =
                     required(meta.initial_timestamp, "Probabilistic", "initial_timestamp")?;
                 let resolution = required(meta.resolution, "Probabilistic", "resolution")?;
@@ -3356,15 +3393,12 @@ impl Store {
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 let p = percentiles.len();
                 // Validate stored shape: [P, H, count, *E].
-                validate_forecast_shape(&arr, &[p, h, count], "Probabilistic")?;
+                validate_forecast_shape(&shape, &[p, h, count], "Probabilistic")?;
                 let (w0, w1, window_initial) = resolve_windows(
                     initial, resolution, horizon, interval, count, time_range, &meta.name,
                 )?;
-                let windowed = if w0 == 0 && w1 == count {
-                    arr
-                } else {
-                    slice_axis(&arr, 2, w0..w1)?
-                };
+                let windowed =
+                    self.read_forecast_windows(&meta.data_hash, dtype, &shape, 2, w0, w1)?;
                 let prob = Probabilistic::new(
                     window_initial,
                     resolution,
@@ -3380,30 +3414,27 @@ impl Store {
             }
 
             TimeSeriesType::Scenarios => {
-                let arr = self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
+                let dtype = meta.element_type.physical_dtype();
+                let shape = self.array_shape(&meta.data_hash)?;
                 let initial = required(meta.initial_timestamp, "Scenarios", "initial_timestamp")?;
                 let resolution = required(meta.resolution, "Scenarios", "resolution")?;
                 let horizon = required(meta.horizon, "Scenarios", "horizon")?;
                 let interval = required(meta.interval, "Scenarios", "interval")?;
                 let count = required(meta.count, "Scenarios", "count")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-                // scenario_count = arr.shape[0]; validate remaining dims.
-                if arr.shape.len() < 3 {
+                // scenario_count = shape[0]; validate remaining dims.
+                if shape.len() < 3 {
                     return Err(TimeSeriesError::IntegrityError(format!(
-                        "Scenarios: stored shape {:?} must have at least 3 dims",
-                        arr.shape
+                        "Scenarios: stored shape {shape:?} must have at least 3 dims"
                     )));
                 }
-                let scenario_count = arr.shape[0];
-                validate_forecast_shape(&arr, &[scenario_count, h, count], "Scenarios")?;
+                let scenario_count = shape[0];
+                validate_forecast_shape(&shape, &[scenario_count, h, count], "Scenarios")?;
                 let (w0, w1, window_initial) = resolve_windows(
                     initial, resolution, horizon, interval, count, time_range, &meta.name,
                 )?;
-                let windowed = if w0 == 0 && w1 == count {
-                    arr
-                } else {
-                    slice_axis(&arr, 2, w0..w1)?
-                };
+                let windowed =
+                    self.read_forecast_windows(&meta.data_hash, dtype, &shape, 2, w0, w1)?;
                 let scen = Scenarios::new(
                     window_initial,
                     resolution,
@@ -6748,7 +6779,7 @@ fn as_invalid_parameter(e: TimeSeriesError) -> TimeSeriesError {
 /// rather than trusting the constructor was the one that built it.
 fn validate_deterministic(det: &Deterministic) -> Result<()> {
     let h = compute_h(det.horizon, det.resolution).map_err(TimeSeriesError::InvalidParameter)?;
-    validate_forecast_shape(&det.data, &[h, det.count], "Deterministic")
+    validate_forecast_shape(&det.data.shape, &[h, det.count], "Deterministic")
         .map_err(as_invalid_parameter)
 }
 
@@ -6757,7 +6788,7 @@ fn validate_deterministic(det: &Deterministic) -> Result<()> {
 fn validate_probabilistic(prob: &Probabilistic) -> Result<()> {
     let h = compute_h(prob.horizon, prob.resolution).map_err(TimeSeriesError::InvalidParameter)?;
     let p = prob.percentiles.len();
-    validate_forecast_shape(&prob.data, &[p, h, prob.count], "Probabilistic")
+    validate_forecast_shape(&prob.data.shape, &[p, h, prob.count], "Probabilistic")
         .map_err(as_invalid_parameter)
 }
 
@@ -6766,7 +6797,7 @@ fn validate_probabilistic(prob: &Probabilistic) -> Result<()> {
 fn validate_scenarios(scen: &Scenarios) -> Result<()> {
     let h = compute_h(scen.horizon, scen.resolution).map_err(TimeSeriesError::InvalidParameter)?;
     validate_forecast_shape(
-        &scen.data,
+        &scen.data.shape,
         &[scen.scenario_count, h, scen.count],
         "Scenarios",
     )
@@ -7187,18 +7218,17 @@ fn required<T>(value: Option<T>, label: &str, field: &str) -> Result<T> {
 
 /// Validate that the leading shape dims of `arr` match `expected_prefix`,
 /// returning an `IntegrityError` if not. Trailing element dims are allowed.
-fn validate_forecast_shape(arr: &TypedArray, expected_prefix: &[usize], label: &str) -> Result<()> {
-    if arr.shape.len() < expected_prefix.len() {
+fn validate_forecast_shape(shape: &[usize], expected_prefix: &[usize], label: &str) -> Result<()> {
+    if shape.len() < expected_prefix.len() {
         return Err(TimeSeriesError::IntegrityError(format!(
-            "{label}: stored shape {:?} has fewer dims than expected prefix {expected_prefix:?}",
-            arr.shape
+            "{label}: stored shape {shape:?} has fewer dims than expected prefix \
+             {expected_prefix:?}"
         )));
     }
-    for (i, (&got, &exp)) in arr.shape.iter().zip(expected_prefix.iter()).enumerate() {
+    for (i, (&got, &exp)) in shape.iter().zip(expected_prefix.iter()).enumerate() {
         if got != exp {
             return Err(TimeSeriesError::IntegrityError(format!(
-                "{label}: stored shape {:?} mismatch at dim {i}: expected {exp}, got {got}",
-                arr.shape
+                "{label}: stored shape {shape:?} mismatch at dim {i}: expected {exp}, got {got}"
             )));
         }
     }
@@ -7640,8 +7670,8 @@ mod forced_rollback_tests {
 }
 
 #[cfg(test)]
-mod dst_windowed_read_tests {
-    //! A `DeterministicSingleTimeSeries` window reads only its own rows.
+mod windowed_read_tests {
+    //! A forecast read fetches only the windows it was asked for.
     //!
     //! The stored array is the underlying `SingleTimeSeries` column, and the
     //! packed datasets holding those are chunked timestamp-major: a whole-column
@@ -7650,9 +7680,23 @@ mod dst_windowed_read_tests {
     //! that is invisible while the dataset fits the chunk cache and a cliff once
     //! it does not.
     //!
-    //! `StorageBackend` is crate-private, so the check lives here rather than in
+    //! A dense forecast (`Deterministic`, `Probabilistic`, `Scenarios`) has the
+    //! same shape of waste without the cliff: its array is standalone rather
+    //! than a column in a shared pool, and already chunked in bounded blocks
+    //! along its count axis, so one window is a hyperslab the layout is built
+    //! for -- but reading the whole array to slice it in memory still costs the
+    //! entire forecast.
+    //!
+    //! `StorageBackend` is crate-private, so the checks live here rather than in
     //! `tests/forecasts.rs`: a delegating backend that tallies whole-array
-    //! fetches, and the assertion that a windowed read makes none.
+    //! fetches against windowed ones, and the assertion that a windowed read
+    //! makes none of the former.
+    //!
+    //! Note that `read_window_block_into` only *saves* anything on the HDF5
+    //! backend, which overrides it with a hyperslab read; the trait default
+    //! (what `MemoryBackend` uses) fetches the array and slices it. These tests
+    //! therefore pin the call the read path makes, not the bytes the file moves
+    //! -- the hyperslab itself is covered in `storage::hdf5`.
 
     use super::*;
     use crate::types::time_series::SingleTimeSeries;
@@ -7665,6 +7709,9 @@ mod dst_windowed_read_tests {
         full_reads: AtomicUsize,
         slice_reads: AtomicUsize,
         slice_rows: AtomicUsize,
+        block_reads: AtomicUsize,
+        block_windows: AtomicUsize,
+        block_axis: AtomicUsize,
     }
 
     /// A `MemoryBackend` that tallies whole-array fetches and slice fetches.
@@ -7700,6 +7747,24 @@ mod dst_windowed_read_tests {
                 .slice_rows
                 .fetch_add(range.len(), Ordering::Relaxed);
             self.inner.get_slice(hash, dtype, range)
+        }
+
+        fn read_window_block_into(
+            &self,
+            hash: &[u8; 32],
+            dtype: Dtype,
+            count_axis: usize,
+            window_start: usize,
+            len: usize,
+            out: &mut Vec<u8>,
+        ) -> Result<()> {
+            self.counts.block_reads.fetch_add(1, Ordering::Relaxed);
+            self.counts.block_windows.fetch_add(len, Ordering::Relaxed);
+            self.counts.block_axis.store(count_axis, Ordering::Relaxed);
+            // `MemoryBackend` takes the trait default, which fetches through
+            // *its own* `get_array` -- so the whole-array tally stays honest.
+            self.inner
+                .read_window_block_into(hash, dtype, count_axis, window_start, len, out)
         }
 
         fn array_shape(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
@@ -7739,16 +7804,10 @@ mod dst_windowed_read_tests {
         }
     }
 
-    const LEN: usize = 240;
-    const H: usize = 24;
-
-    /// A store over a counting backend, holding one hourly `SingleTimeSeries`
-    /// of `LEN` ramp values transformed into a DST of `H`-hour windows.
-    fn dst_store() -> (Store, Arc<Counts>, DateTime<Utc>, TimeSeriesId, Vec<f64>) {
-        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        let vals: Vec<f64> = (0..LEN).map(|i| i as f64).collect();
+    /// An in-memory store over a counting backend.
+    fn counting_store() -> (Store, Arc<Counts>) {
         let counts = Arc::new(Counts::default());
-        let mut store = Store::from_parts(
+        let store = Store::from_parts(
             Box::new(CountingBackend {
                 inner: MemoryBackend::new(),
                 counts: Arc::clone(&counts),
@@ -7759,6 +7818,18 @@ mod dst_windowed_read_tests {
             CatalogMode::InMemory,
             None,
         );
+        (store, counts)
+    }
+
+    const LEN: usize = 240;
+    const H: usize = 24;
+
+    /// A store over a counting backend, holding one hourly `SingleTimeSeries`
+    /// of `LEN` ramp values transformed into a DST of `H`-hour windows.
+    fn dst_store() -> (Store, Arc<Counts>, DateTime<Utc>, TimeSeriesId, Vec<f64>) {
+        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let vals: Vec<f64> = (0..LEN).map(|i| i as f64).collect();
+        let (mut store, counts) = counting_store();
         store
             .add_time_series(
                 1,
@@ -7798,6 +7869,16 @@ mod dst_windowed_read_tests {
             counts.full_reads.swap(0, Ordering::Relaxed),
             counts.slice_reads.swap(0, Ordering::Relaxed),
             counts.slice_rows.swap(0, Ordering::Relaxed),
+        )
+    }
+
+    /// The window-block tallies so far, reset to zero: reads, windows, and the
+    /// count axis the last one addressed.
+    fn take_blocks(counts: &Counts) -> (usize, usize, usize) {
+        (
+            counts.block_reads.swap(0, Ordering::Relaxed),
+            counts.block_windows.swap(0, Ordering::Relaxed),
+            counts.block_axis.swap(0, Ordering::Relaxed),
         )
     }
 
@@ -7851,5 +7932,156 @@ mod dst_windowed_read_tests {
                 assert_eq!(got[s * windows + w], vals[w * H + s]);
             }
         }
+    }
+
+    // ---- dense forecasts ---------------------------------------------------
+
+    const DENSE_H: usize = 2;
+    const DENSE_COUNT: usize = 10;
+
+    /// A store holding one dense forecast, built by `make` from the array its
+    /// shape names. Values are a ramp, so every element identifies its own
+    /// offset.
+    fn dense_store(
+        shape: Vec<usize>,
+        make: impl FnOnce(DateTime<Utc>, TypedArray) -> TimeSeriesData,
+    ) -> (Store, Arc<Counts>, DateTime<Utc>, TimeSeriesId, Vec<f64>) {
+        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let n: usize = shape.iter().product();
+        let vals: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let (mut store, counts) = counting_store();
+        let id = store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                make(initial, TypedArray::from_f64(shape, &vals)),
+                Features::new(),
+            )
+            .unwrap();
+        (store, counts, initial, id, vals)
+    }
+
+    /// `Deterministic` is `[H, count, *E]`: the count axis is 1.
+    #[test]
+    fn a_deterministic_window_reads_only_that_window() {
+        let (store, counts, initial, id, vals) =
+            dense_store(vec![DENSE_H, DENSE_COUNT], |initial, arr| {
+                TimeSeriesData::Deterministic(
+                    Deterministic::new(
+                        initial,
+                        Duration::hours(1),
+                        Duration::hours(DENSE_H as i64),
+                        Duration::hours(1),
+                        DENSE_COUNT,
+                        arr,
+                        "load",
+                    )
+                    .unwrap(),
+                )
+            });
+
+        let start = initial + Duration::hours(5);
+        let _ = (take(&counts), take_blocks(&counts));
+        let data = store
+            .read_by_id(id, ReadWindow::from(start).with_count(1))
+            .unwrap();
+        let (full_reads, ..) = take(&counts);
+        let (block_reads, block_windows, block_axis) = take_blocks(&counts);
+
+        assert_eq!(
+            full_reads, 0,
+            "a windowed Deterministic read must not fetch the whole forecast"
+        );
+        assert_eq!((block_reads, block_windows, block_axis), (1, 1, 1));
+
+        let TimeSeriesData::Deterministic(det) = data else {
+            panic!("expected a Deterministic");
+        };
+        assert_eq!(det.count, 1);
+        assert_eq!(det.initial_timestamp, start);
+        // Column 5 of the `[H, count]` array: elements `h * count + 5`.
+        assert_eq!(
+            det.data.to_f64_vec().unwrap(),
+            (0..DENSE_H)
+                .map(|h| vals[h * DENSE_COUNT + 5])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `Scenarios` is `[S, H, count, *E]`: the count axis is 2, and
+    /// `scenario_count` is read off the stored shape rather than the array.
+    #[test]
+    fn a_scenarios_window_reads_only_that_window() {
+        const S: usize = 3;
+        let (store, counts, initial, id, vals) =
+            dense_store(vec![S, DENSE_H, DENSE_COUNT], |initial, arr| {
+                TimeSeriesData::Scenarios(
+                    Scenarios::new(
+                        initial,
+                        Duration::hours(1),
+                        Duration::hours(DENSE_H as i64),
+                        Duration::hours(1),
+                        DENSE_COUNT,
+                        S,
+                        arr,
+                        "load",
+                    )
+                    .unwrap(),
+                )
+            });
+
+        let start = initial + Duration::hours(5);
+        let _ = (take(&counts), take_blocks(&counts));
+        let data = store
+            .read_by_id(id, ReadWindow::from(start).with_count(1))
+            .unwrap();
+        let (full_reads, ..) = take(&counts);
+        let (block_reads, block_windows, block_axis) = take_blocks(&counts);
+
+        assert_eq!(full_reads, 0);
+        assert_eq!((block_reads, block_windows, block_axis), (1, 1, 2));
+
+        let TimeSeriesData::Scenarios(scen) = data else {
+            panic!("expected Scenarios");
+        };
+        assert_eq!((scen.count, scen.scenario_count), (1, S));
+        let want: Vec<f64> = (0..S)
+            .flat_map(|sc| (0..DENSE_H).map(move |h| (sc * DENSE_H + h) * DENSE_COUNT + 5))
+            .map(|i| vals[i])
+            .collect();
+        assert_eq!(scen.data.to_f64_vec().unwrap(), want);
+    }
+
+    /// A selection covering every window is the whole array, and is read as one
+    /// rather than as a hyperslab over everything.
+    #[test]
+    fn a_full_dense_read_still_takes_the_whole_array_in_one_go() {
+        let (store, counts, _, id, vals) =
+            dense_store(vec![DENSE_H, DENSE_COUNT], |initial, arr| {
+                TimeSeriesData::Deterministic(
+                    Deterministic::new(
+                        initial,
+                        Duration::hours(1),
+                        Duration::hours(DENSE_H as i64),
+                        Duration::hours(1),
+                        DENSE_COUNT,
+                        arr,
+                        "load",
+                    )
+                    .unwrap(),
+                )
+            });
+        let _ = (take(&counts), take_blocks(&counts));
+        let data = store.read_by_id(id, ReadWindow::full()).unwrap();
+        let (full_reads, ..) = take(&counts);
+        let (block_reads, ..) = take_blocks(&counts);
+
+        assert_eq!((full_reads, block_reads), (1, 0));
+        let TimeSeriesData::Deterministic(det) = data else {
+            panic!("expected a Deterministic");
+        };
+        assert_eq!(det.count, DENSE_COUNT);
+        assert_eq!(det.data.to_f64_vec().unwrap(), vals);
     }
 }
