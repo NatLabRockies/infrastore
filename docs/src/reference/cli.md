@@ -168,13 +168,13 @@ example can never name a flag the command does not have.
 
 ### Read data
 
-| Command  | Purpose                                                                           |
-| -------- | --------------------------------------------------------------------------------- |
-| `list`   | List stored series matching the selector filters.                                 |
-| `get`    | Read and display a single series' values.                                         |
-| `grid`   | Render N series as N columns against one shared time axis.                        |
-| `info`   | Metadata, content hash, HDF5 location, and stats for one series.                  |
-| `export` | Write series values to CSV/JSON/Parquet files (`--dir`), or stdout for one match. |
+| Command  | Purpose                                                                                                   |
+| -------- | --------------------------------------------------------------------------------------------------------- |
+| `list`   | List stored series matching the selector filters.                                                         |
+| `get`    | Read and display a single series' values.                                                                 |
+| `grid`   | Render N series as N columns against one shared time axis.                                                |
+| `info`   | Metadata, content hash, HDF5 location, and stats for one series.                                          |
+| `export` | Write series values to CSV/JSON/Parquet files (`--dir`), SQLite tables (`--db`), or stdout for one match. |
 
 ```sh
 infrastore --store demo.h5 list                                   # everything in the store
@@ -237,6 +237,39 @@ The Arrow tree deliberately stays out of the **library** crates: `infrastore-cor
 and `infrastore-ffi` never link it. A binding that wants Parquet has `to_arrow()` and its host
 language's own writer, which is a much smaller ask than linking Arrow into a wheel or a cdylib.
 
+#### SQLite
+
+```bash
+infrastore --store demo.h5 -f sqlite export --db out.db
+infrastore --store demo.h5 -f sqlite export --db out.db --table-prefix run2_
+infrastore --store copy.h5 add --sqlite out.db --table-prefix run2_
+```
+
+`-f sqlite export --db <FILE>` writes the Parquet layout as tables: per partition,
+`<prefix><base>_values` and `<prefix><base>_series` with the same columns, plus an index
+`<prefix><base>_values_key` on the array key. `<base>` is the Parquet stem with everything outside
+`[A-Za-z0-9_]` mapped to `_` (`SingleTimeSeries_f64_utc`), and `--table-prefix` is held to the same
+alphabet, so the tables need no quoting. The file is created if absent; an existing database keeps
+its own tables and gains these. If any name the export would create is already in the database, the
+export fails and writes nothing — it runs in one transaction either way. A prefix is how several
+exports share one database. Differences from the Parquet files:
+
+- Instants (`timestamp`, `issue_time`, `initial_timestamp`) are `INTEGER` unix milliseconds; the
+  spelling is the series table's `time_reference` column.
+- `value` is a plain `REAL`/`INTEGER` for a scalar element and a JSON array (nested over the element
+  shape) otherwise. `NaN` is `NULL`, so `value` is the one nullable column. A `u64` above `i64::MAX`
+  is refused.
+
+`add --sqlite <FILE>` reads it back: every partition whose tables are named `<prefix>`, then a
+time-series type, then `_…` — so without `--table-prefix` it takes only the unprefixed export, and
+it never mistakes a database's own `foo_values` for one. Each partition is one transaction and a
+merge join, exactly as with `--parquet`, and `--no-checksum`, `--dry-run`, `--replace` and the
+inline overrides behave the same. A partition table missing a required column is refused naming it;
+extra columns are ignored.
+
+Unlike Parquet, SQLite is not a cargo feature: the layout code lives in the Arrow-free
+`infrastore-tabular` crate, and SQLite is already linked by the store's own catalog.
+
 #### Bounding the rows
 
 `get` and `grid` separate the flags that _select data_ from the flags that _bound a display_, and
@@ -284,16 +317,16 @@ usually a different component, not a shorter view of the same sweep.
 
 ### Write data
 
-| Command         | Purpose                                                                           |
-| --------------- | --------------------------------------------------------------------------------- |
-| `init`          | Create an empty store with an explicit compression and catalog policy.            |
-| `add`           | Add one or more series from a descriptor JSON + CSV, from Parquet, or from flags. |
-| `merge`         | Copy matching series from another store into this one.                            |
-| `transform`     | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.            |
-| `remove`        | Delete a single series, or every match with `--all` (prompts unless `--force`).   |
-| `copy`          | Copy the single series a selector resolves to onto another owner.                 |
-| `replace-owner` | Reassign every series from one owner to another.                                  |
-| `clear`         | Remove all series, or all for one owner (prompts unless `--force`).               |
+| Command         | Purpose                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------- |
+| `init`          | Create an empty store with an explicit compression and catalog policy.                      |
+| `add`           | Add one or more series from a descriptor JSON + CSV, from Parquet or SQLite, or from flags. |
+| `merge`         | Copy matching series from another store into this one.                                      |
+| `transform`     | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.                      |
+| `remove`        | Delete a single series, or every match with `--all` (prompts unless `--force`).             |
+| `copy`          | Copy the single series a selector resolves to onto another owner.                           |
+| `replace-owner` | Reassign every series from one owner to another.                                            |
+| `clear`         | Remove all series, or all for one owner (prompts unless `--force`).                         |
 
 ```sh
 infrastore --store demo.h5 init --compression deflate:6
@@ -304,6 +337,7 @@ infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generat
     --name load --type SingleTimeSeries --element-type f64 \
     --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
 infrastore --store demo.h5 add --parquet out/
+infrastore --store demo.h5 add --sqlite out.db --table-prefix run2_
 infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
 infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
 infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
@@ -492,6 +526,7 @@ infrastore --store <PATH> init [--compression <none|deflate[:LEVEL]>] [--no-shuf
 infrastore --store <PATH> add --descriptor <FILE.json|-> [--csv <FILE.csv>] [--dry-run] [--replace] [--batch-size N] [-q|--quiet] [--compression <SPEC>] [--no-shuffle] [--catalog <MODE>]
 infrastore --store <PATH> add --csv <FILE.csv> --owner-id <I> --owner-type <T> --name <N> --type <T> --element-type <E> [DESCRIPTOR FIELDS...]
 infrastore --store <PATH> add --parquet <PATH> [--parquet <PATH>...] [--no-checksum] [DESCRIPTOR FIELDS...]
+infrastore --store <PATH> add --sqlite <FILE> [--table-prefix <PREFIX>] [--no-checksum] [DESCRIPTOR FIELDS...]
 infrastore --store <PATH> merge --from <PATH.h5> [SELECTOR...] [--replace] [--dry-run]
 infrastore --store <PATH> list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time <TS>]

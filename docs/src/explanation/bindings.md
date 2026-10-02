@@ -167,6 +167,7 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
 | Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |
 | Parquet files                 | crate     | ❌    | ❌              | ❌    | `-f parquet` | ❌          |
+| SQLite tables                 | crate     | ❌    | ❌              | ❌    | `-f sqlite`  | ❌          |
 | Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
 | Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 
@@ -197,6 +198,12 @@ DuckDB or polars. The relationship between the two is one sentence: a series fil
 the array. Nothing else has it: the C ABI and Julia would need the whole Arrow tree in the cdylib
 for a format their host languages already have readers for, and the gRPC server serves values, not
 files.
+
+**SQLite tables** carry the same layout (`export -f sqlite --db`, `add --sqlite`), one
+`_values`/`_series` table pair per partition, optionally under a `--table-prefix`. The
+container-independent half of the layout lives in `infrastore-tabular`, which is Arrow-free and
+which `infrastore-parquet` builds on, so SQLite is not behind the `parquet` feature: the catalog
+already links SQLite. It is likewise CLI-only.
 
 **Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
 two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That

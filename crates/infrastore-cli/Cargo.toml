@@ -21,7 +21,11 @@ path = "src/main.rs"
 # only ever one `hdf5-metno-sys` in the graph.
 [features]
 default = ["vendored", "parquet"]
-vendored = ["infrastore-core/vendored", "infrastore-parquet?/vendored"]
+vendored = [
+    "infrastore-core/vendored",
+    "infrastore-parquet?/vendored",
+    "infrastore-tabular/vendored",
+]
 # `export -f parquet` and `add --parquet`.
 #
 # **On by default**, so the `infrastore` binary anyone installs can read and
@@ -62,6 +66,9 @@ serde_json = { workspace = true }
 tabled = { workspace = true }
 infrastore-core = { workspace = true }
 infrastore-parquet = { workspace = true, optional = true }
+# `export -f sqlite` and `add --sqlite`. Not behind a feature: it is Arrow-free,
+# and SQLite is already linked by the core's catalog.
+infrastore-tabular = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

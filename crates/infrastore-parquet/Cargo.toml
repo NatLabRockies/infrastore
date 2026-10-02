@@ -19,7 +19,7 @@ categories = ["encoding", "science"]
 # `infrastore-py`, `infrastore-ffi`) never reach it.
 [features]
 default = ["vendored"]
-vendored = ["infrastore-core/vendored"]
+vendored = ["infrastore-core/vendored", "infrastore-tabular/vendored"]
 
 [dependencies]
 # `default-features = false` on both: the defaults pull in the CSV, JSON, IPC
@@ -30,6 +30,9 @@ vendored = ["infrastore-core/vendored"]
 arrow = { version = "59", default-features = false }
 chrono = { workspace = true }
 infrastore-core = { workspace = true }
+# The container-independent half of the layout: partitioning, the array key,
+# row walking, and series assembly on import.
+infrastore-tabular = { workspace = true }
 parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
 serde_json = { workspace = true }
 

@@ -42,6 +42,13 @@ SQLite. It exposes multiple bindings over a shared core:
   **fails** the export, naming every one and writing nothing. Python's `to_arrow()`/`from_arrow()`
   are per-series in-memory conveniences, **not** this format — "one schema, two producers" was
   withdrawn. See `docs/src/reference/parquet-format.md`.
+- **SQLite tables** — the same normalized layout as tables in a SQLite database
+  (`export -f sqlite --db FILE`, `add --sqlite FILE`), one `<prefix><base>_values` /
+  `<prefix><base>_series` pair per partition. `infrastore-tabular` holds the Arrow-free half of the
+  layout both containers share — partitioning, array key, column sets, row walking, series assembly
+  and the merge join — plus the SQLite container; `infrastore-parquet` builds on it. Not a cargo
+  feature: SQLite is already linked by the catalog. An export only adds tables and fails, writing
+  nothing, on any name collision; `--table-prefix` scopes both directions.
 
 **Current feature coverage:** `SingleTimeSeries`, `NonSequentialTimeSeries`, and
 `PersistentTimeSeries` are implemented end-to-end (read+write in the Rust core, C ABI, Python,
@@ -335,6 +342,8 @@ crates/
   infrastore-server/  # gRPC server binary (src/bin/server.rs) + Rust client
   infrastore-py/      # PyO3 bindings
   infrastore-ffi/     # C ABI cdylib (used by the Julia binding)
+  infrastore-tabular/ # Arrow-free normalized export layout + its SQLite container
+  infrastore-parquet/ # Parquet container for that layout (the Arrow tree stays here)
   infrastore-cli/     # `infrastore` CLI: CSV add/read against an on-disk store (clap, csv, tabled)
     src/chart/               #   hand-written sparkline + SVG renderer (no charting dependency)
     src/commands/            #   one module per command group

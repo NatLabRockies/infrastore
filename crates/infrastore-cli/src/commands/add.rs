@@ -256,10 +256,17 @@ pub struct AddArgs {
     /// at least --owner-id and --owner-type.
     #[arg(long, value_name = "PATH")]
     pub parquet: Vec<PathBuf>,
-    /// Waive the data_hash check on a --parquet load, for values edited in a
+    /// SQLite database written by `export -f sqlite` to load every partition
+    /// of. Self-describing, like a --parquet pair.
+    #[arg(long, value_name = "DB")]
+    pub sqlite: Option<PathBuf>,
+    /// With --sqlite, load only the tables an export wrote under this prefix
+    /// (`export --table-prefix`). Without it, only unprefixed tables.
+    #[arg(long, value_name = "PREFIX")]
+    pub table_prefix: Option<String>,
+    /// Waive the data_hash check on a --parquet or --sqlite load, for values edited in a
     /// query engine without the hash being recomputed.
     #[arg(long)]
-    #[cfg_attr(not(feature = "parquet"), allow(dead_code))]
     pub no_checksum: bool,
     #[command(flatten)]
     pub inline: InlineArgs,
@@ -298,16 +305,17 @@ pub fn run(
     // Resolved up front, because a Parquet file *is* the descriptor: there is
     // nothing to load from a JSON file and nothing for a relative `csv` path to
     // sit beside.
-    let (parquet, descriptors, base_dir, csv_override) = if opts.parquet.is_empty() {
-        let (descriptors, base_dir, csv_override) = load_descriptors(opts)?;
-        (None, descriptors, base_dir, csv_override)
-    } else {
-        (Some(parquet_import(opts)?), Vec::new(), None, None)
-    };
+    let (parquet, descriptors, base_dir, csv_override) =
+        if opts.parquet.is_empty() && opts.sqlite.is_none() && opts.table_prefix.is_none() {
+            let (descriptors, base_dir, csv_override) = load_descriptors(opts)?;
+            (None, descriptors, base_dir, csv_override)
+        } else {
+            (Some(table_import(opts)?), Vec::new(), None, None)
+        };
 
     if opts.dry_run {
         return match &parquet {
-            Some((setup, files)) => report_parquet_dry_run(&parquet_dry_run(setup, files)?, format),
+            Some((setup, files)) => report_import_dry_run(&import_dry_run(setup, files)?, format),
             None => dry_run(&descriptors, base_dir.as_deref(), csv_override, format),
         };
     }
@@ -346,7 +354,7 @@ pub fn run(
         // larger than memory, and holding it would defeat the format.
         if let Some((setup, files)) = &parquet {
             for (i, file) in files.iter().enumerate() {
-                total += import_parquet_partition(
+                total += import_partition(
                     file,
                     setup,
                     &mut store,
@@ -699,17 +707,15 @@ impl Progress {
 /// **assertion**. It is how `tuple(3,f64)` gets named for a file whose bytes
 /// cannot say whether a `FixedSizeList<double>[3]` is a tuple or a dense row,
 /// and a contradiction is an error rather than a silent replacement.
-#[cfg(feature = "parquet")]
-struct ParquetImport {
-    options: infrastore_parquet::read::ImportOptions,
+struct TableImport {
+    options: infrastore_tabular::ImportOptions,
     features: Option<infrastore_core::Features>,
     owner_category: Option<infrastore_core::OwnerCategory>,
 }
 
-#[cfg(feature = "parquet")]
-impl ParquetImport {
+impl TableImport {
     /// One read series as the request that files it.
-    fn request(&self, one: infrastore_parquet::ImportedSeries) -> AddRequest {
+    fn request(&self, one: infrastore_tabular::ImportedSeries) -> AddRequest {
         AddRequest {
             owner_id: one.owner_id,
             owner_type: one.owner_type,
@@ -723,6 +729,62 @@ impl ParquetImport {
     }
 }
 
+/// One partition to load, whichever container holds it.
+enum Partition {
+    #[cfg(feature = "parquet")]
+    Parquet(infrastore_parquet::PartitionFiles),
+    Sqlite(infrastore_tabular::sqlite::SqlitePartition),
+}
+
+impl Partition {
+    fn label(&self) -> String {
+        match self {
+            #[cfg(feature = "parquet")]
+            Partition::Parquet(files) => files.label(),
+            Partition::Sqlite(tables) => tables.label(),
+        }
+    }
+
+    fn read(
+        &self,
+        options: &infrastore_tabular::ImportOptions,
+        sink: infrastore_tabular::SeriesSink<'_>,
+    ) -> infrastore_core::Result<usize> {
+        match self {
+            #[cfg(feature = "parquet")]
+            Partition::Parquet(files) => {
+                infrastore_parquet::read_partition_with(files, options, sink)
+            }
+            Partition::Sqlite(tables) => {
+                infrastore_tabular::sqlite::read_sqlite_partition_with(tables, options, sink)
+            }
+        }
+    }
+}
+
+/// Every partition under each `--parquet` path.
+#[cfg(feature = "parquet")]
+fn parquet_partitions(paths: &[PathBuf]) -> Result<Vec<Partition>, String> {
+    let mut files = Vec::new();
+    for path in paths {
+        files.extend(
+            infrastore_parquet::partitions(path)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(Partition::Parquet),
+        );
+    }
+    Ok(files)
+}
+
+#[cfg(not(feature = "parquet"))]
+fn parquet_partitions(paths: &[PathBuf]) -> Result<Vec<Partition>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    Err(crate::commands::without_parquet())
+}
+
 /// Resolve the flags and discover every file, before anything is read.
 ///
 /// A path may be a **file, a directory, or a partition stem**; a directory takes
@@ -730,21 +792,19 @@ impl ParquetImport {
 /// `.series.parquet` beside it. Discovery is separate from reading so that a
 /// malformed later partition is found while its predecessors are being
 /// committed, not before any of them is: each partition is its own transaction
-/// (see [`import_parquet_partition`]), and a directory import is all-or-nothing
+/// (see [`import_partition`]), and a directory import is all-or-nothing
 /// per partition rather than across the whole directory. Re-running after a fix
 /// does not redo the committed ones.
-#[cfg(feature = "parquet")]
-fn parquet_import(
-    opts: &AddArgs,
-) -> Result<(ParquetImport, Vec<infrastore_parquet::PartitionFiles>), String> {
+fn table_import(opts: &AddArgs) -> Result<(TableImport, Vec<Partition>), String> {
     if opts.descriptor.is_some() || opts.csv.is_some() {
         return Err(
-            "--parquet carries its own descriptors; drop --descriptor and --csv".to_string(),
+            "a --parquet or --sqlite load carries its own descriptors; drop --descriptor and --csv"
+                .to_string(),
         );
     }
     refuse_grid_flags(&opts.inline)?;
-    let setup = ParquetImport {
-        options: parquet_options(opts)?,
+    let setup = TableImport {
+        options: import_options(opts)?,
         features: inline_features(opts)?,
         owner_category: opts
             .inline
@@ -753,9 +813,19 @@ fn parquet_import(
             .map(parse::parse_owner_category)
             .transpose()?,
     };
-    let mut files = Vec::new();
-    for path in &opts.parquet {
-        files.extend(infrastore_parquet::partitions(path).map_err(|e| e.to_string())?);
+    let mut files = parquet_partitions(&opts.parquet)?;
+    if let Some(db) = &opts.sqlite {
+        let prefix = opts.table_prefix.as_deref().unwrap_or("");
+        files.extend(
+            infrastore_tabular::sqlite::sqlite_partitions(db, prefix)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(Partition::Sqlite),
+        );
+    } else if opts.table_prefix.is_some() {
+        return Err(
+            "--table-prefix names the tables of a --sqlite load; pass --sqlite".to_string(),
+        );
     }
     Ok((setup, files))
 }
@@ -771,10 +841,9 @@ fn parquet_import(
 /// The store is still opened lazily, on the first series: `add` creates a
 /// missing store, and a partition that turns out to hold nothing readable
 /// should not leave an empty artifact behind.
-#[cfg(feature = "parquet")]
-fn import_parquet_partition(
-    file: &infrastore_parquet::PartitionFiles,
-    setup: &ParquetImport,
+fn import_partition(
+    file: &Partition,
+    setup: &TableImport,
     store: &mut Option<Store>,
     open: &dyn Fn() -> Result<Store, String>,
     replace: bool,
@@ -787,7 +856,7 @@ fn import_parquet_partition(
     let mut in_transaction = false;
     let mut count = 0usize;
 
-    let streamed = infrastore_parquet::read_partition_with(file, &setup.options, &mut |one| {
+    let streamed = file.read(&setup.options, &mut |one| {
         let request = setup.request(one);
         if store.is_none() {
             match open() {
@@ -856,28 +925,24 @@ fn import_parquet_partition(
 /// a dry run over a large directory costs no more memory than the load. The
 /// distinct-array count is the one number this layout exists for: a thousand
 /// components sharing one profile is a thousand series over **one** array.
-#[cfg(feature = "parquet")]
-fn parquet_dry_run(
-    setup: &ParquetImport,
-    files: &[infrastore_parquet::PartitionFiles],
-) -> Result<Vec<ParquetBatch>, String> {
+fn import_dry_run(setup: &TableImport, files: &[Partition]) -> Result<Vec<ImportBatch>, String> {
     let mut batches = Vec::with_capacity(files.len());
     for file in files {
         let mut series = Vec::new();
         let mut ignored_ids = Vec::new();
         let mut arrays = std::collections::HashSet::new();
-        infrastore_parquet::read_partition_with(file, &setup.options, &mut |one| {
+        file.read(&setup.options, &mut |one| {
             if let Some(id) = one.recorded_id {
                 ignored_ids.push(id);
             }
             if let Some(key) = one.array.clone() {
                 arrays.insert(key);
             }
-            series.push(ParquetSummary::of(&setup.request(one)));
+            series.push(ImportSummary::of(&setup.request(one)));
             Ok(())
         })
         .map_err(|e| format!("reading {}: {e}", file.label()))?;
-        batches.push(ParquetBatch {
+        batches.push(ImportBatch {
             label: file.label(),
             arrays: arrays.len(),
             series,
@@ -888,12 +953,12 @@ fn parquet_dry_run(
 }
 
 /// One partition's worth of a dry run: what it holds and what was thrown away.
-pub struct ParquetBatch {
+pub struct ImportBatch {
     /// The partition's stem, or a foreign file's path.
     pub label: String,
     /// How many **distinct** arrays its series read between them.
     pub arrays: usize,
-    pub series: Vec<ParquetSummary>,
+    pub series: Vec<ImportSummary>,
     /// The ids the file recorded, reported at `--dry-run` and then dropped.
     ///
     /// `add` never accepts an id: "never reissued" is a guarantee of the
@@ -904,7 +969,7 @@ pub struct ParquetBatch {
 
 /// One series of a dry run, reduced to what the report prints so the values
 /// can be dropped as soon as they are read.
-pub struct ParquetSummary {
+pub struct ImportSummary {
     pub owner_id: i64,
     pub owner_type: String,
     pub owner_category: &'static str,
@@ -915,8 +980,7 @@ pub struct ParquetSummary {
     pub empty_descriptors: Vec<&'static str>,
 }
 
-#[cfg(feature = "parquet")]
-impl ParquetSummary {
+impl ImportSummary {
     fn of(request: &AddRequest) -> Self {
         Self {
             owner_id: request.owner_id,
@@ -944,7 +1008,6 @@ impl ParquetSummary {
 /// See Finding 7.27: a foreign *forecast* — a values file with an `issue_time`
 /// column and no series file — is not supported, and these flags are what would
 /// have to describe one.
-#[cfg(feature = "parquet")]
 fn refuse_grid_flags(inline: &InlineArgs) -> Result<(), String> {
     let mut named: Vec<&str> = Vec::new();
     if inline.initial_timestamp.is_some() {
@@ -978,7 +1041,7 @@ fn refuse_grid_flags(inline: &InlineArgs) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "{} {} not apply to --parquet: the rows carry the grid ({} is in the values file, and \
+        "{} {} not apply to --parquet or --sqlite: the rows carry the grid ({} is in the values file, and \
          a forecast's windows are its issue_time column), and --layout describes a CSV's \
          columns. Drop {}.",
         named.join(", "),
@@ -988,9 +1051,8 @@ fn refuse_grid_flags(inline: &InlineArgs) -> Result<(), String> {
     ))
 }
 
-#[cfg(feature = "parquet")]
-fn parquet_options(opts: &AddArgs) -> Result<infrastore_parquet::read::ImportOptions, String> {
-    Ok(infrastore_parquet::read::ImportOptions {
+fn import_options(opts: &AddArgs) -> Result<infrastore_tabular::ImportOptions, String> {
+    Ok(infrastore_tabular::ImportOptions {
         time_series_type: opts
             .inline
             .ts_type
@@ -1051,7 +1113,6 @@ fn parquet_options(opts: &AddArgs) -> Result<infrastore_parquet::read::ImportOpt
     })
 }
 
-#[cfg(feature = "parquet")]
 fn inline_features(opts: &AddArgs) -> Result<Option<infrastore_core::Features>, String> {
     if opts.inline.feature.is_empty() {
         return Ok(None);
@@ -1064,34 +1125,6 @@ fn inline_features(opts: &AddArgs) -> Result<Option<infrastore_core::Features>, 
     Ok(Some(features))
 }
 
-#[cfg(not(feature = "parquet"))]
-struct ParquetImport;
-
-#[cfg(not(feature = "parquet"))]
-fn parquet_import(_opts: &AddArgs) -> Result<(ParquetImport, Vec<PathBuf>), String> {
-    Err(crate::commands::without_parquet())
-}
-
-#[cfg(not(feature = "parquet"))]
-fn import_parquet_partition(
-    _file: &Path,
-    _setup: &ParquetImport,
-    _store: &mut Option<Store>,
-    _open: &dyn Fn() -> Result<Store, String>,
-    _replace: bool,
-    _added: &mut Vec<AddedRow>,
-) -> Result<usize, String> {
-    Err(crate::commands::without_parquet())
-}
-
-#[cfg(not(feature = "parquet"))]
-fn parquet_dry_run(
-    _setup: &ParquetImport,
-    _files: &[PathBuf],
-) -> Result<Vec<ParquetBatch>, String> {
-    Err(crate::commands::without_parquet())
-}
-
 /// Report what a Parquet load would write, per partition.
 ///
 /// Per partition rather than flattened, because a directory import is one
@@ -1099,7 +1132,7 @@ fn parquet_dry_run(
 /// see that shape.
 /// The ignored ids are reported here and nowhere else: this is the only moment
 /// where saying "the file names id 7 and the store will not use it" is useful.
-fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<(), String> {
+fn report_import_dry_run(batches: &[ImportBatch], format: Format) -> Result<(), String> {
     let total: usize = batches.iter().map(|b| b.series.len()).sum();
     match format {
         f if f.is_json() => {
@@ -1174,7 +1207,6 @@ fn report_parquet_dry_run(batches: &[ParquetBatch], format: Format) -> Result<()
 /// An empty string is how the format writes "absent", so a file that genuinely
 /// stored an empty string is indistinguishable from one that stored nothing.
 /// Naming them at `--dry-run` is what makes that visible before it is committed.
-#[cfg(feature = "parquet")]
 fn empty_descriptors(request: &AddRequest) -> Vec<&'static str> {
     let mut out = Vec::new();
     if request.data.units().is_none() {

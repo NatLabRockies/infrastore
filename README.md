@@ -243,7 +243,8 @@ inspection (`stats`, `store-info`, `store-attr` for the artifact's own key/value
 and the `data_hash` + HDF5 location on `list`/`info`), both association catalogs read _and_ write
 (`attributes`, `links`, `attach`, `detach`, `link`, `unlink`, `reassign`), bulk export (`export`,
 one timestamped CSV or JSON file per series, or a partitioned Parquet values/series file pair per
-`(type, value type, time reference)` triple holding many series each, all re-readable by `add`),
+`(type, value type, time reference)` triple holding many series each — or the same layout as
+`_values`/`_series` tables added to a new or existing SQLite database — all re-readable by `add`),
 cross-store work (`diff`, which exits nonzero when two catalogs differ, and `merge`), and
 maintenance (`init`, `copy`, `replace-owner`, `clear`, `persist`, `compact`, `remove --all`).
 Destructive commands take `--dry-run`, and `persist` refuses an existing destination without

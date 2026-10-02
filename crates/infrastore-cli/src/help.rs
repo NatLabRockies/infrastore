@@ -37,6 +37,8 @@ Examples:
       --name load --type SingleTimeSeries --element-type f64 \\
       --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
   infrastore --store demo.h5 --assume-timezone UTC add --descriptor load.json
+  infrastore --store demo.h5 add --parquet out/
+  infrastore --store demo.h5 add --sqlite out.db --table-prefix run2_
 
 A descriptor may hold one object or an array of them (one transaction).
 `infrastore template <TYPE>` prints a starting point; the inline flags above are
@@ -44,7 +46,10 @@ the same fields for a one-off. Set \"layout\": \"wide\" plus an owner_map to loa
 one `timestamp,gen_001,gen_002,...` file as one series per column.
 
 A timestamp with no offset (`2024-01-01 00:00:00`) names no instant, so it needs
---assume-timezone UTC, or the fixed offset the data was written in (-07:00).";
+--assume-timezone UTC, or the fixed offset the data was written in (-07:00).
+
+--parquet and --sqlite read what `export -f parquet` / `-f sqlite` wrote; the
+files and tables carry their own descriptors, one transaction per partition.";
 
 pub const INIT: &str = "\
 Examples:
@@ -116,10 +121,17 @@ Examples:
   infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
   infrastore --store demo.h5 -f json export --dir out/
   infrastore --store demo.h5 -f parquet export --dir out/
+  infrastore --store demo.h5 -f sqlite export --db out.db
 
 -f parquet writes one <stem>.values.parquet / <stem>.series.parquet pair per
 (type, value type, time reference) partition into --dir, which must hold no
-.parquet files yet; `add --parquet <DIR>` reads them back.";
+.parquet files yet; `add --parquet <DIR>` reads them back.
+
+-f sqlite writes the same layout as <prefix><base>_values / _series tables
+into --db, creating the file if absent. A table name already in the database
+fails the export before anything is written; --table-prefix lets several
+exports share one database. `add --sqlite <DB> [--table-prefix P]` reads them
+back.";
 
 pub const TRANSFORM: &str = "\
 Examples:

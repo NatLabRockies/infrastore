@@ -256,7 +256,8 @@ the grids a store holds (`list --length 24`) and retire a stray cohort without n
 `export` is the bulk read-direction inverse of `add`: every series the selector matches is written
 to its own CSV or JSON file under `--dir` (or to stdout when exactly one matches), optionally sliced
 with `--time-range`; `-f parquet` instead writes
-[one file pair per partition](#hand-it-to-something-else-parquet). Setting `INFRASTORE_STORE` in the
+[one file pair per partition](#hand-it-to-something-else-parquet), and `-f sqlite` the same layout
+as [tables in a SQLite database](#or-into-a-sqlite-database). Setting `INFRASTORE_STORE` in the
 environment stands in for `--store`, every destructive command except `compact` accepts `--dry-run`
 to preview its effect, and the global `-y`/`--yes` answers every confirmation prompt so a script
 does not have to know which commands ask:
@@ -465,6 +466,34 @@ hashes and decodes the integer type codes, so the rows read as text (see
 [Reading the SQLite catalog by hand](../reference/cli.md#reading-the-sqlite-catalog-by-hand)). The
 `id` column on the **series** half is what reaches it; it is provenance only, and `add` assigns
 fresh ids rather than reusing it.
+
+### Or Into a SQLite Database
+
+The same layout, as tables, when the consumer would rather hold one database file than a directory —
+or already has a database the time series should sit beside:
+
+```sh
+infrastore --store demo.h5 -f sqlite export --db results.db
+infrastore --store scenario2.h5 -f sqlite export --db results.db --table-prefix s2_
+infrastore --store other.h5 add --sqlite results.db --table-prefix s2_
+```
+
+Each partition becomes `<prefix><base>_values` and `<prefix><base>_series`, named like the Parquet
+stems with the dots turned to underscores. The database is created if it is missing; if it exists,
+the export only adds tables, and a name already taken fails the whole export before anything is
+written — which is what `--table-prefix` is for when several exports share one file. `add --sqlite`
+loads exactly the tables under the prefix it is given (none, by default). Timestamps are `INTEGER`
+unix milliseconds and non-scalar values are JSON arrays; the
+[layout reference](../reference/parquet-format.md#sqlite-tables) has the full list of differences.
+
+```sql
+SELECT s.owner_id, datetime(v.timestamp / 1000, 'unixepoch') AS at, v.value
+FROM s2_SingleTimeSeries_f64_utc_values v
+JOIN s2_SingleTimeSeries_f64_utc_series s USING (data_hash, time_axis)
+WHERE s.name = 'load';
+```
+
+SQLite needs no cargo feature: it stays in a binary built without Parquet.
 
 ## Stamp Provenance on the Artifact
 

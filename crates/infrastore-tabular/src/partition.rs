@@ -290,3 +290,13 @@ pub fn disambiguate(keys: &[PartitionKey]) -> BTreeMap<PartitionKey, String> {
     }
     out
 }
+
+impl ValueKind {
+    /// The dtype of the leaf the `value` column is built from.
+    pub fn leaf_dtype(&self) -> Dtype {
+        match self {
+            ValueKind::Dense { dtype, .. } | ValueKind::Tuple { dtype, .. } => *dtype,
+            ValueKind::Composite(_) => Dtype::F64,
+        }
+    }
+}

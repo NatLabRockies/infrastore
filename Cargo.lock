@@ -1299,6 +1299,7 @@ dependencies = [
  "hdf5-metno",
  "infrastore-core",
  "infrastore-parquet",
+ "infrastore-tabular",
  "parquet",
  "rusqlite",
  "serde",
@@ -1348,6 +1349,7 @@ dependencies = [
  "arrow",
  "chrono",
  "infrastore-core",
+ "infrastore-tabular",
  "parquet",
  "serde_json",
  "tempfile",
@@ -1393,6 +1395,17 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "infrastore-tabular"
+version = "0.14.1"
+dependencies = [
+ "chrono",
+ "infrastore-core",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -408,21 +408,29 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Write series values to CSV, JSON, or Parquet files.
+    /// Write series values to CSV, JSON, Parquet, or SQLite.
     ///
     /// The read-direction inverse of `add`. CSV and JSON write one file per
     /// matched series into --dir, or to stdout when the selector matches
     /// exactly one series; Parquet writes one values/series file pair per
     /// partition into --dir, which is then required. Both come back through
     /// `add`: CSV by detecting the layout from the header, Parquet via
-    /// --parquet.
+    /// --parquet. SQLite writes the Parquet layout as tables into --db.
     #[command(after_help = help::EXPORT)]
     Export {
         #[command(flatten)]
         selector: SelectorArgs,
         /// Directory to write one file per matched series.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "db")]
         dir: Option<PathBuf>,
+        /// SQLite database to add the -f sqlite tables to, created if absent.
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Prefix every -f sqlite table name with this ([A-Za-z0-9_]), so
+        /// several exports can share one database. `add --sqlite` takes the
+        /// same prefix back.
+        #[arg(long, value_name = "PREFIX")]
+        table_prefix: Option<String>,
         /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
         /// regular series' START inside a step selects that step, an irregular series
         /// keeps only timestamps at or after START, and a forecast's START must be a
@@ -703,8 +711,11 @@ fn run(cli: &Cli) -> Result<(), String> {
     // `-f` is global, but Parquet is not a rendering of a result -- it is a
     // binary container. Refusing it here, once, beats each command's `match`
     // falling through to its `_` arm and quietly printing a table.
-    if cli.format.is_parquet() && !matches!(cli.command, Commands::Export { .. }) {
-        return Err("the parquet format is only available on `export`".to_string());
+    if cli.format.is_export_only() && !matches!(cli.command, Commands::Export { .. }) {
+        return Err(format!(
+            "the {} format is only available on `export`",
+            cli.format
+        ));
     }
     match &cli.command {
         Commands::Add(args) => {
@@ -821,11 +832,15 @@ fn run(cli: &Cli) -> Result<(), String> {
         Commands::Export {
             selector,
             dir,
+            db,
+            table_prefix,
             time_range,
         } => commands::export::run(
             &require_store(cli)?,
             selector,
             dir.as_deref(),
+            db.as_deref(),
+            table_prefix.as_deref(),
             time_range.as_deref(),
             cli.format,
         ),

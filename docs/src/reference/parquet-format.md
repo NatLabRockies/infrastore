@@ -326,6 +326,40 @@ SELECT timestamp, value FROM load WHERE owner_id = 42 AND name = 'load' ORDER BY
 That view is the denormalized table this format deliberately does not write: materializing it costs
 exactly what the layout saves, and a query engine that keeps it as a view pays nothing.
 
+## SQLite tables
+
+`export -f sqlite --db <FILE>` writes this layout into a SQLite database instead of files, and
+`add --sqlite <FILE>` reads it back. Same partitions, same columns, same array key and merge join;
+the container differs:
+
+| Parquet                                   | SQLite                                                                        |
+| ----------------------------------------- | ----------------------------------------------------------------------------- |
+| `<stem>.values.parquet`                   | table `<prefix><base>_values`, plus index `…_key` on `(data_hash, time_axis)` |
+| `<stem>.series.parquet`                   | table `<prefix><base>_series`, `id` as its primary key                        |
+| footer carries the partition key          | no footer; the series table's own columns carry it                            |
+| `timestamp[ms, tz]`                       | `INTEGER` unix milliseconds; `time_reference` column                          |
+| `value` as nested `FixedSizeList`         | `REAL`/`INTEGER` for a scalar, else a nested JSON array                       |
+| composite rows re-padded to the partition | composite rows at their own stored width                                      |
+
+`<base>` is the stem with everything outside `[A-Za-z0-9_]` mapped to `_`
+(`SingleTimeSeries_f64_utc`), and `--table-prefix` is held to the same alphabet, so no table needs
+quoting. The import takes a pair only when its name is the prefix followed by a time-series type
+name and `_`, which keeps each prefix's export separate and never picks up a database's own tables.
+
+An export **only adds**: it may target a new file or an existing database, and fails, writing
+nothing, if any table or index name it would create is already there. `NaN` is written as `NULL`
+(SQLite stores it as one regardless), making `value` the one nullable column; a `u64` above
+`i64::MAX` is refused. Row order in the tables does not matter: the import orders both by the array
+key itself, so values edited in place with plain SQL read back, subject to the `data_hash` check (or
+`--no-checksum`).
+
+```sql
+SELECT s.owner_id, datetime(v.timestamp / 1000, 'unixepoch') AS at, v.value
+FROM SingleTimeSeries_f64_utc_values v
+JOIN SingleTimeSeries_f64_utc_series s USING (data_hash, time_axis)
+WHERE s.name = 'load';
+```
+
 ## What a round trip does not preserve
 
 - **The catalog id.** `add` never accepts one — "never reissued" is a guarantee of the catalog's
@@ -337,6 +371,8 @@ exactly what the layout saves, and a query engine that keeps it as a view pays n
 - **A composite series' padding.** Values round-trip exactly — an improvement over CSV, where floats
   pass through decimal text — but a composite is re-padded on the way out and shrunk to its own
   width on the way back, so its stored `data_hash` may differ from the original's.
+- **A NaN's bit pattern, in SQLite.** `NULL` reads back as the canonical `NaN`, so a series holding
+  any other NaN payload fails its `data_hash` check; `--no-checksum` accepts it.
 
 An **empty series** is not a round-trip caveat but a refusal: the export **fails**, naming every
 empty series it was asked for and writing nothing. A values file has one row per value, so an empty
