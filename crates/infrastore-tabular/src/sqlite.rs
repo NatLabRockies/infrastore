@@ -110,6 +110,12 @@ pub fn check_prefix(prefix: &str) -> Result<()> {
     if prefix.is_empty() {
         return Ok(());
     }
+    if prefix.starts_with(|c: char| c.is_ascii_digit()) {
+        return Err(unsupported(format!(
+            "table prefix {prefix:?} must not start with a digit, which would make its \
+             table names need quoting"
+        )));
+    }
     let Some(body) = prefix.strip_suffix('_') else {
         return Err(unsupported(format!(
             "table prefix {prefix:?} must end in '_' (e.g. {:?})",
@@ -131,7 +137,8 @@ pub fn check_prefix(prefix: &str) -> Result<()> {
 /// Fails without writing anything if any table or index it would create is
 /// already in the database (compared case-insensitively, as SQLite does), or if
 /// any selected series is empty. A file this call created is removed again on
-/// failure. An empty selection touches nothing, not even to create the file.
+/// failure while it still holds no tables. An empty selection touches nothing,
+/// not even to create the file.
 pub fn write_sqlite(
     path: &Path,
     series: &[(TimeSeriesMetadata, TimeSeriesData)],
@@ -143,12 +150,40 @@ pub fn write_sqlite(
     if series.is_empty() {
         return Ok(Vec::new());
     }
-    let existed = path.exists();
-    let result = Connection::open(path)
-        .map_err(sqlite_err)
-        .and_then(|mut conn| write_all(&mut conn, series, prefix));
-    if result.is_err() && !existed {
-        // Best effort: the connection is closed, so the file is ours to remove.
+    // Claim an absent destination atomically: an empty file is an empty
+    // database, and only a file this call created is ever removed.
+    let created = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => return Err(e.into()),
+    };
+    let mut conn = match Connection::open(path) {
+        Ok(conn) => conn,
+        Err(e) => {
+            if created {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(e.into());
+        }
+    };
+    let result = write_all(&mut conn, series, prefix);
+    // Another exporter may have opened the file this call created and committed
+    // into it, so remove it only while it still holds no schema at all.
+    // ponytail: a commit landing between this check and the removal is lost;
+    // staging and renaming into place would close that window.
+    let untouched = created
+        && result.is_err()
+        && conn
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .is_ok_and(|n| n == 0);
+    drop(conn);
+    if untouched {
         let _ = std::fs::remove_file(path);
     }
     result
@@ -163,9 +198,7 @@ fn write_all(
     let bases = table_bases(groups.keys(), prefix);
 
     // IMMEDIATE so the name check and the writes see the same database.
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(sqlite_err)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     refuse_collisions(&tx, bases.values())?;
 
     let mut written = Vec::with_capacity(groups.len());
@@ -186,13 +219,10 @@ fn write_all(
             layout::DATA_HASH,
             layout::TIME_AXIS,
             column_defs(&series_columns, &key.value_kind),
-        ))
-        .map_err(sqlite_err)?;
+        ))?;
 
         let mut rows = 0usize;
-        let mut insert = tx
-            .prepare(&insert_sql(&values_table, &values_columns))
-            .map_err(sqlite_err)?;
+        let mut insert = tx.prepare(&insert_sql(&values_table, &values_columns))?;
         for (array, members) in arrays {
             // Every series sharing a key has the same values at the same instants.
             let (row, data) = &series[members[0]];
@@ -200,9 +230,7 @@ fn write_all(
         }
         drop(insert);
 
-        let mut insert = tx
-            .prepare(&insert_sql(&series_table, &series_columns))
-            .map_err(sqlite_err)?;
+        let mut insert = tx.prepare(&insert_sql(&series_table, &series_columns))?;
         let mut count = 0usize;
         for (array, members) in arrays {
             for index in members {
@@ -211,9 +239,7 @@ fn write_all(
                 let params = series_columns
                     .iter()
                     .map(|c| cells.remove(c).expect("every required column has a cell"));
-                insert
-                    .execute(params_from_iter(params))
-                    .map_err(sqlite_err)?;
+                insert.execute(params_from_iter(params))?;
                 count += 1;
             }
         }
@@ -230,7 +256,7 @@ fn write_all(
             rows,
         });
     }
-    tx.commit().map_err(sqlite_err)?;
+    tx.commit()?;
     Ok(written)
 }
 
@@ -264,13 +290,10 @@ fn table_bases<'a>(
 
 /// Every name in the database, lower-cased.
 fn existing_names(conn: &Connection) -> Result<BTreeSet<String>> {
-    let mut stmt = conn
-        .prepare("SELECT lower(name) FROM sqlite_master")
-        .map_err(sqlite_err)?;
-    stmt.query_map([], |r| r.get(0))
-        .map_err(sqlite_err)?
+    let mut stmt = conn.prepare("SELECT lower(name) FROM sqlite_master")?;
+    stmt.query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()
-        .map_err(sqlite_err)
+        .map_err(infrastore_core::TimeSeriesError::from)
 }
 
 /// Fail, naming them, if any name the export would create already exists.
@@ -381,9 +404,7 @@ fn insert_values(
             params.push(Value::Integer(rows.scenario[k]));
         }
         params.push(value);
-        insert
-            .execute(params_from_iter(params))
-            .map_err(sqlite_err)?;
+        insert.execute(params_from_iter(params))?;
     }
     Ok(rows.offsets.len())
 }
@@ -509,14 +530,10 @@ fn json_of(value: &Value) -> Json {
 pub fn sqlite_partitions(path: &Path, prefix: &str) -> Result<Vec<SqlitePartition>> {
     check_prefix(prefix)?;
     let conn = open_readonly(path)?;
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-        .map_err(sqlite_err)?;
+    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
     let tables: Vec<String> = stmt
-        .query_map([], |r| r.get(0))
-        .map_err(sqlite_err)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(sqlite_err)?;
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     let lower: BTreeSet<String> = tables.iter().map(|t| t.to_lowercase()).collect();
 
     let mut out = Vec::new();
@@ -576,25 +593,20 @@ pub fn read_sqlite_partition_with(
 
     // The partition's type and element type are constant across its series
     // table; they decide which columns to expect and how to decode `value`.
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT DISTINCT {}, {} FROM {q_series}",
-            schema::TIME_SERIES_TYPE,
-            schema::ELEMENT_TYPE
-        ))
-        .map_err(sqlite_err)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT {}, {} FROM {q_series}",
+        schema::TIME_SERIES_TYPE,
+        schema::ELEMENT_TYPE
+    ))?;
     let kinds: Vec<(String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .map_err(sqlite_err)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(sqlite_err)?;
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     let (ts_type, element_type) = match kinds.as_slice() {
         [] => {
-            let values: i64 = conn
-                .query_row(&format!("SELECT count(*) FROM {q_values}"), [], |r| {
+            let values: i64 =
+                conn.query_row(&format!("SELECT count(*) FROM {q_values}"), [], |r| {
                     r.get(0)
-                })
-                .map_err(sqlite_err)?;
+                })?;
             if values == 0 {
                 return Ok(0);
             }
@@ -628,21 +640,19 @@ pub fn read_sqlite_partition_with(
     }
     select.extend(lane);
     select.push(layout::VALUE);
-    let mut values_stmt = conn
-        .prepare(&format!(
-            "SELECT {} FROM {q_values} ORDER BY {}, {}, {}",
-            select.join(", "),
-            layout::DATA_HASH,
-            layout::TIME_AXIS,
-            layout::TIMESTAMP,
-        ))
-        .map_err(sqlite_err)?;
-    let mut values_rows = values_stmt.query([]).map_err(sqlite_err)?;
+    let mut values_stmt = conn.prepare(&format!(
+        "SELECT {} FROM {q_values} ORDER BY {}, {}, {}",
+        select.join(", "),
+        layout::DATA_HASH,
+        layout::TIME_AXIS,
+        layout::TIMESTAMP,
+    ))?;
+    let mut values_rows = values_stmt.query([])?;
     let mut held: Option<(ArrayKey, ValueRow)> = None;
     let next_values = || -> Result<Option<ValuesGroup>> {
         let first = match held.take() {
             Some(first) => first,
-            None => match values_rows.next().map_err(sqlite_err)? {
+            None => match values_rows.next()? {
                 Some(row) => value_row(row, has_issue, lane, dtype)?,
                 None => return Ok(None),
             },
@@ -659,7 +669,7 @@ pub fn read_sqlite_partition_with(
             zone: None,
         };
         push_value(&mut group, row)?;
-        while let Some(next) = values_rows.next().map_err(sqlite_err)? {
+        while let Some(next) = values_rows.next()? {
             let (key, row) = value_row(next, has_issue, lane, dtype)?;
             if key != group.key {
                 held = Some((key, row));
@@ -706,27 +716,25 @@ pub fn read_sqlite_partition_with(
             "''".to_string()
         }
     }));
-    let mut series_stmt = conn
-        .prepare(&format!(
-            "SELECT {} FROM {q_series} ORDER BY {}, {}, {}",
-            select.join(", "),
-            layout::DATA_HASH,
-            layout::TIME_AXIS,
-            schema::ID,
-        ))
-        .map_err(sqlite_err)?;
-    let mut series_rows = series_stmt.query([]).map_err(sqlite_err)?;
+    let mut series_stmt = conn.prepare(&format!(
+        "SELECT {} FROM {q_series} ORDER BY {}, {}, {}",
+        select.join(", "),
+        layout::DATA_HASH,
+        layout::TIME_AXIS,
+        schema::ID,
+    ))?;
+    let mut series_rows = series_stmt.query([])?;
     let mut held_row: Option<SeriesRow> = None;
     let next_rows = || -> Result<Option<Vec<SeriesRow>>> {
         let first = match held_row.take() {
             Some(first) => first,
-            None => match series_rows.next().map_err(sqlite_err)? {
+            None => match series_rows.next()? {
                 Some(row) => series_row(row)?,
                 None => return Ok(None),
             },
         };
         let mut group = vec![first];
-        while let Some(next) = series_rows.next().map_err(sqlite_err)? {
+        while let Some(next) = series_rows.next()? {
             let row = series_row(next)?;
             if row.key != group[0].key {
                 held_row = Some(row);
@@ -744,7 +752,8 @@ fn open_readonly(path: &Path) -> Result<Connection> {
     if !path.is_file() {
         return Err(unsupported(format!("{} is not a file", path.display())));
     }
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sqlite_err)
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(infrastore_core::TimeSeriesError::from)
 }
 
 /// `name` as a quoted SQL identifier.
@@ -760,14 +769,10 @@ fn check_columns(
     ts_type: TimeSeriesType,
     role: &str,
 ) -> Result<BTreeSet<String>> {
-    let mut stmt = conn
-        .prepare("SELECT name FROM pragma_table_info(?1)")
-        .map_err(sqlite_err)?;
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
     let columns: BTreeSet<String> = stmt
-        .query_map([table], |r| r.get(0))
-        .map_err(sqlite_err)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(sqlite_err)?;
+        .query_map([table], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     let missing: Vec<&str> = layout::required_columns(ts_type, role)
         .into_iter()
         .filter(|c| !columns.contains(*c))
@@ -798,26 +803,28 @@ fn value_row(
     dtype: Dtype,
 ) -> Result<(ArrayKey, ValueRow)> {
     let key = ArrayKey {
-        data_hash: row.get(0).map_err(sqlite_err)?,
-        time_axis: row.get(1).map_err(sqlite_err)?,
+        data_hash: row.get(0)?,
+        time_axis: row.get(1)?,
     };
     let mut i = 2;
     let mut next = || {
         i += 1;
         i - 1
     };
-    let timestamp = instant(row.get(next()).map_err(sqlite_err)?)?;
+    let timestamp = instant(row.get(next())?)?;
     let issue = has_issue
-        .then(|| row.get(next()).map_err(sqlite_err).and_then(instant))
+        .then(|| {
+            row.get(next())
+                .map_err(infrastore_core::TimeSeriesError::from)
+                .and_then(instant)
+        })
         .transpose()?;
     let lane = match lane {
-        Some(layout::PERCENTILE) => {
-            Some(LaneValue::Percentile(row.get(next()).map_err(sqlite_err)?))
-        }
-        Some(_) => Some(LaneValue::Scenario(row.get(next()).map_err(sqlite_err)?)),
+        Some(layout::PERCENTILE) => Some(LaneValue::Percentile(row.get(next())?)),
+        Some(_) => Some(LaneValue::Scenario(row.get(next())?)),
         None => None,
     };
-    let cell: Value = row.get(next()).map_err(sqlite_err)?;
+    let cell: Value = row.get(next())?;
     let mut dims = Vec::new();
     let mut numbers = Vec::new();
     match cell {
@@ -869,14 +876,15 @@ fn push_value(group: &mut ValuesGroup, row: ValueRow) -> Result<()> {
 }
 
 fn series_row(row: &rusqlite::Row<'_>) -> Result<SeriesRow> {
-    let text = |i: usize| -> Result<String> { row.get(i).map_err(sqlite_err) };
+    let text =
+        |i: usize| -> Result<String> { row.get(i).map_err(infrastore_core::TimeSeriesError::from) };
     Ok(SeriesRow {
         key: ArrayKey {
             data_hash: text(0)?,
             time_axis: text(1)?,
         },
-        id: row.get(2).map_err(sqlite_err)?,
-        owner_id: Some(row.get(3).map_err(sqlite_err)?),
+        id: row.get(2)?,
+        owner_id: Some(row.get(3)?),
         owner_type: text(4)?,
         owner_category: text(5)?,
         time_series_type: text(6)?,
@@ -997,9 +1005,4 @@ fn push_number(dtype: Dtype, n: Num, out: &mut Vec<u8>) -> Result<()> {
         },
     }
     Ok(())
-}
-
-/// SQLite errors describe the database, not the data handed in.
-fn sqlite_err(e: rusqlite::Error) -> infrastore_core::TimeSeriesError {
-    infrastore_core::TimeSeriesError::Io(std::io::Error::other(format!("sqlite: {e}")))
 }

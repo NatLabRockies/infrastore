@@ -24,7 +24,9 @@ vendored = ["infrastore-core/vendored"]
 chrono = { workspace = true }
 infrastore-core = { workspace = true }
 rusqlite = { workspace = true }
-serde_json = { workspace = true }
+# `float_roundtrip`: nested f64 values travel as JSON text and `data_hash` is
+# bitwise, so parsing them back must be exact rather than within one ULP.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 
 [dev-dependencies]
 tempfile = "3"

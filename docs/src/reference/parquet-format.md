@@ -343,11 +343,12 @@ the container differs:
 
 `<base>` is the stem with everything outside `[A-Za-z0-9_]` mapped to `_`
 (`SingleTimeSeries_f64_utc`), and `--table-prefix` is held to the same alphabet, so no table needs
-quoting. A non-empty prefix must also end in `_` and contain no `_`-separated segment that is a
-time-series type name. The import takes a pair only when its name is the prefix followed by a
-time-series type name and `_`, and the prefix rule keeps each prefix's export separate. Other tables
-are ignored unless they follow that naming: a `<prefix><type>_…_values` table with no `_series`
-beside it fails the import, since an export always writes the two together.
+quoting. A non-empty prefix must also not start with a digit, end in `_`, and contain no
+`_`-separated segment that is a time-series type name. The import takes a pair only when its name is
+the prefix followed by a time-series type name and `_`, and the prefix rule keeps each prefix's
+export separate. Other tables are ignored unless they follow that naming: a
+`<prefix><type>_…_values` table with no `_series` beside it fails the import, since an export always
+writes the two together.
 
 An export **only adds**: it may target a new file or an existing database, and fails, writing
 nothing, if any table or index name it would create is already there. `NaN` is written as `NULL`

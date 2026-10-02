@@ -276,7 +276,13 @@ fn a_shared_profile_is_one_array_and_a_prefix_scopes_the_import() {
     // without the rules, `""` would pick up `SingleTimeSeries_`'s export, and
     // `""` would read `Deterministic` + a `SingleTimeSeries_…` stem as a
     // `DeterministicSingleTimeSeries` partition.
-    for bad in ["run3", "SingleTimeSeries_", "Deterministic", "x_Scenarios_"] {
+    for bad in [
+        "run3",
+        "2_",
+        "SingleTimeSeries_",
+        "Deterministic",
+        "x_Scenarios_",
+    ] {
         let err = write_sqlite(&db, &series, bad).unwrap_err();
         assert!(err.to_string().contains("table prefix"), "{bad}: {err}");
         let err = sqlite_partitions(&db, bad).unwrap_err();
@@ -333,6 +339,11 @@ fn a_failed_export_into_a_new_file_leaves_no_file() {
     let err = write_sqlite(&db, &series, "").unwrap_err();
     assert!(err.to_string().contains("does not fit"), "{err}");
     assert!(!db.exists());
+
+    // A file that was already there is never removed, even holding no tables.
+    std::fs::write(&db, b"").expect("create an empty database");
+    write_sqlite(&db, &series, "").unwrap_err();
+    assert!(db.exists(), "a file this call did not create must survive");
 }
 
 #[test]
