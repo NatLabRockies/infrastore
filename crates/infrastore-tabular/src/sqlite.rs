@@ -38,9 +38,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
-use infrastore_core::{
-    Dtype, ElementType, TimeSeriesData, TimeSeriesMetadata, TimeSeriesType, TypedArray,
-};
+use infrastore_core::{Dtype, TimeSeriesData, TimeSeriesMetadata, TimeSeriesType, TypedArray};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params_from_iter};
 use serde_json::Value as Json;
@@ -93,17 +91,38 @@ impl SqlitePartition {
 }
 
 /// Refuse a prefix that would need quoting, so every table the layout names
-/// stays usable as a bare SQL identifier.
+/// stays usable as a bare SQL identifier, or that could read as part of
+/// another prefix's tables.
+///
+/// Discovery takes `<prefix><type>_…`, so a prefix must end in `_` and hold no
+/// `_`-separated segment that is a type name: otherwise the tables of export
+/// `SingleTimeSeries_` (or `Deterministic`, before a `SingleTimeSeries` stem)
+/// would also be picked up by an import with a shorter prefix.
 pub fn check_prefix(prefix: &str) -> Result<()> {
-    if prefix
+    if !prefix
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
+        return Err(unsupported(format!(
+            "table prefix {prefix:?} may only contain ASCII letters, digits and '_'"
+        )));
+    }
+    if prefix.is_empty() {
         return Ok(());
     }
-    Err(unsupported(format!(
-        "table prefix {prefix:?} may only contain ASCII letters, digits and '_'"
-    )))
+    let Some(body) = prefix.strip_suffix('_') else {
+        return Err(unsupported(format!(
+            "table prefix {prefix:?} must end in '_' (e.g. {:?})",
+            format!("{prefix}_")
+        )));
+    };
+    if let Some(segment) = body.split('_').find(|s| TimeSeriesType::parse(s).is_some()) {
+        return Err(unsupported(format!(
+            "table prefix {prefix:?} contains the time-series type name {segment:?}, which \
+             would make its tables readable as another prefix's"
+        )));
+    }
+    Ok(())
 }
 
 /// Write `series` into the SQLite database at `path`, creating it if absent,
@@ -155,13 +174,14 @@ fn write_all(
         let ts_type = key.time_series_type;
         let values_table = format!("{base}{VALUES_SUFFIX}");
         let series_table = format!("{base}{SERIES_SUFFIX}");
+        let (q_values, q_series) = (quote_ident(&values_table), quote_ident(&series_table));
 
         let values_columns = layout::required_columns(ts_type, layout::ROLE_VALUES);
         let series_columns = layout::required_columns(ts_type, layout::ROLE_SERIES);
         tx.execute_batch(&format!(
-            "CREATE TABLE \"{values_table}\" ({});
-             CREATE INDEX \"{base}{INDEX_SUFFIX}\" ON \"{values_table}\" ({}, {});
-             CREATE TABLE \"{series_table}\" ({});",
+            "CREATE TABLE {q_values} ({});
+             CREATE INDEX \"{base}{INDEX_SUFFIX}\" ON {q_values} ({}, {});
+             CREATE TABLE {q_series} ({});",
             column_defs(&values_columns, &key.value_kind),
             layout::DATA_HASH,
             layout::TIME_AXIS,
@@ -535,12 +555,14 @@ pub fn read_sqlite_partition_with(
     let conn = open_readonly(&partition.db)?;
     let values_table = partition.values_table();
     let series_table = partition.series_table();
+    // Discovery admits any name after `<prefix><type>_`, so quote what it found.
+    let (q_values, q_series) = (quote_ident(&values_table), quote_ident(&series_table));
 
     // The partition's type and element type are constant across its series
     // table; they decide which columns to expect and how to decode `value`.
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT DISTINCT {}, {} FROM \"{series_table}\"",
+            "SELECT DISTINCT {}, {} FROM {q_series}",
             schema::TIME_SERIES_TYPE,
             schema::ELEMENT_TYPE
         ))
@@ -553,11 +575,9 @@ pub fn read_sqlite_partition_with(
     let (ts_type, element_type) = match kinds.as_slice() {
         [] => {
             let values: i64 = conn
-                .query_row(
-                    &format!("SELECT count(*) FROM \"{values_table}\""),
-                    [],
-                    |r| r.get(0),
-                )
+                .query_row(&format!("SELECT count(*) FROM {q_values}"), [], |r| {
+                    r.get(0)
+                })
                 .map_err(sqlite_err)?;
             if values == 0 {
                 return Ok(0);
@@ -579,7 +599,7 @@ pub fn read_sqlite_partition_with(
     };
     let values_columns = check_columns(&conn, &values_table, ts_type, layout::ROLE_VALUES)?;
     let series_columns = check_columns(&conn, &series_table, ts_type, layout::ROLE_SERIES)?;
-    let dtype = leaf_dtype(element_type);
+    let dtype = ValueKind::of(element_type, &[]).leaf_dtype();
 
     // ---- values ----
     let mut select = vec![layout::DATA_HASH, layout::TIME_AXIS, layout::TIMESTAMP];
@@ -594,7 +614,7 @@ pub fn read_sqlite_partition_with(
     select.push(layout::VALUE);
     let mut values_stmt = conn
         .prepare(&format!(
-            "SELECT {} FROM \"{values_table}\" ORDER BY {}, {}, {}",
+            "SELECT {} FROM {q_values} ORDER BY {}, {}, {}",
             select.join(", "),
             layout::DATA_HASH,
             layout::TIME_AXIS,
@@ -672,7 +692,7 @@ pub fn read_sqlite_partition_with(
     }));
     let mut series_stmt = conn
         .prepare(&format!(
-            "SELECT {} FROM \"{series_table}\" ORDER BY {}, {}, {}",
+            "SELECT {} FROM {q_series} ORDER BY {}, {}, {}",
             select.join(", "),
             layout::DATA_HASH,
             layout::TIME_AXIS,
@@ -711,6 +731,11 @@ fn open_readonly(path: &Path) -> Result<Connection> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sqlite_err)
 }
 
+/// `name` as a quoted SQL identifier.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// The table's columns, after checking it carries every one the layout
 /// requires of it. Extra columns are allowed — a user may have added some.
 fn check_columns(
@@ -720,10 +745,10 @@ fn check_columns(
     role: &str,
 ) -> Result<BTreeSet<String>> {
     let mut stmt = conn
-        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .prepare("SELECT name FROM pragma_table_info(?1)")
         .map_err(sqlite_err)?;
     let columns: BTreeSet<String> = stmt
-        .query_map([], |r| r.get(0))
+        .query_map([table], |r| r.get(0))
         .map_err(sqlite_err)?
         .collect::<rusqlite::Result<_>>()
         .map_err(sqlite_err)?;
@@ -739,14 +764,6 @@ fn check_columns(
         ts_type.as_str(),
         missing.join(", ")
     )))
-}
-
-/// The dtype a partition's `value` leaves decode to.
-fn leaf_dtype(element_type: ElementType) -> Dtype {
-    match element_type {
-        ElementType::Scalar(dtype) | ElementType::Tuple { dtype, .. } => dtype,
-        _ => Dtype::F64,
-    }
 }
 
 /// One values-table row, decoded.

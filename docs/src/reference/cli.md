@@ -249,10 +249,12 @@ infrastore --store copy.h5 add --sqlite out.db --table-prefix run2_
 `<prefix><base>_values` and `<prefix><base>_series` with the same columns, plus an index
 `<prefix><base>_values_key` on the array key. `<base>` is the Parquet stem with everything outside
 `[A-Za-z0-9_]` mapped to `_` (`SingleTimeSeries_f64_utc`), and `--table-prefix` is held to the same
-alphabet, so the tables need no quoting. The file is created if absent; an existing database keeps
-its own tables and gains these. If any name the export would create is already in the database, the
-export fails and writes nothing — it runs in one transaction either way. A prefix is how several
-exports share one database. Differences from the Parquet files:
+alphabet, so the tables need no quoting. A prefix must also end in `_` and contain no time-series
+type name as a `_`-separated segment, so no prefix's tables can be read as another's. The file is
+created if absent; an existing database keeps its own tables and gains these. If any name the export
+would create is already in the database, the export fails and writes nothing — it runs in one
+transaction either way. A prefix is how several exports share one database. Differences from the
+Parquet files:
 
 - Instants (`timestamp`, `issue_time`, `initial_timestamp`) are `INTEGER` unix milliseconds; the
   spelling is the series table's `time_reference` column.
@@ -262,10 +264,10 @@ exports share one database. Differences from the Parquet files:
 
 `add --sqlite <FILE>` reads it back: every partition whose tables are named `<prefix>`, then a
 time-series type, then `_…` — so without `--table-prefix` it takes only the unprefixed export, and
-it never mistakes a database's own `foo_values` for one. Each partition is one transaction and a
-merge join, exactly as with `--parquet`, and `--no-checksum`, `--dry-run`, `--replace` and the
-inline overrides behave the same. A partition table missing a required column is refused naming it;
-extra columns are ignored.
+it ignores a database's own `foo_values`. A `<prefix><type>_…_values` table with no `_series` beside
+it fails the import. Each partition is one transaction and a merge join, exactly as with
+`--parquet`, and `--no-checksum`, `--dry-run`, `--replace` and the inline overrides behave the same.
+A partition table missing a required column is refused naming it; extra columns are ignored.
 
 Unlike Parquet, SQLite is not a cargo feature: the layout code lives in the Arrow-free
 `infrastore-tabular` crate, and SQLite is already linked by the store's own catalog.

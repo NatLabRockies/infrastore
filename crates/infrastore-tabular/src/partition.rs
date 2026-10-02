@@ -26,7 +26,7 @@ use infrastore_core::{Dtype, ElementType, TimeReference, TimeSeriesType};
 /// would scatter one kind across a file per width. Instead every composite row
 /// in a file is re-padded to the widest series in it, which the layout allows:
 /// the leading count `n` keeps each row self-describing whatever the padding.
-/// The cost is a `data_hash` caveat, in [`crate::canonical`].
+/// The cost is a `data_hash` caveat, in [`crate::layout::canonical_hash`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ValueKind {
     /// A dtype plus the per-step element shape, empty for a plain scalar.

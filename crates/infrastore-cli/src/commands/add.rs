@@ -302,10 +302,10 @@ pub fn run(
     compression: Option<Compression>,
     format: Format,
 ) -> Result<(), String> {
-    // Resolved up front, because a Parquet file *is* the descriptor: there is
-    // nothing to load from a JSON file and nothing for a relative `csv` path to
+    // Resolved up front, because a Parquet file or SQLite table pair *is* the
+    // descriptor: there is nothing to load from a JSON file and nothing for a relative `csv` path to
     // sit beside.
-    let (parquet, descriptors, base_dir, csv_override) =
+    let (tables, descriptors, base_dir, csv_override) =
         if opts.parquet.is_empty() && opts.sqlite.is_none() && opts.table_prefix.is_none() {
             let (descriptors, base_dir, csv_override) = load_descriptors(opts)?;
             (None, descriptors, base_dir, csv_override)
@@ -314,7 +314,7 @@ pub fn run(
         };
 
     if opts.dry_run {
-        return match &parquet {
+        return match &tables {
             Some((setup, files)) => report_import_dry_run(&import_dry_run(setup, files)?, format),
             None => dry_run(&descriptors, base_dir.as_deref(), csv_override, format),
         };
@@ -335,7 +335,7 @@ pub fn run(
         store_access::open_writable_with(store_path, compression, catalog)
     };
     let mut progress = Progress::new(
-        parquet
+        tables
             .as_ref()
             .map_or(descriptors.len(), |(_, files)| files.len()),
         opts.quiet,
@@ -352,7 +352,7 @@ pub fn run(
         // fails leaves the ones already committed alone. Each file is streamed
         // into its transaction one series at a time -- a partition can be
         // larger than memory, and holding it would defeat the format.
-        if let Some((setup, files)) = &parquet {
+        if let Some((setup, files)) = &tables {
             for (i, file) in files.iter().enumerate() {
                 total += import_partition(
                     file,
@@ -1125,7 +1125,7 @@ fn inline_features(opts: &AddArgs) -> Result<Option<infrastore_core::Features>, 
     Ok(Some(features))
 }
 
-/// Report what a Parquet load would write, per partition.
+/// Report what a Parquet or SQLite load would write, per partition.
 ///
 /// Per partition rather than flattened, because a directory import is one
 /// transaction per partition and a caller deciding whether to run it wants to

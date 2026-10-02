@@ -271,6 +271,38 @@ fn a_shared_profile_is_one_array_and_a_prefix_scopes_the_import() {
     assert!(err.to_string().contains("\"nope_\""), "{err}");
     let err = write_sqlite(&db, &series, "bad-prefix").unwrap_err();
     assert!(err.to_string().contains("table prefix"), "{err}");
+
+    // A prefix that could read as part of another prefix's tables is refused:
+    // without the rules, `""` would pick up `SingleTimeSeries_`'s export, and
+    // `""` would read `Deterministic` + a `SingleTimeSeries_…` stem as a
+    // `DeterministicSingleTimeSeries` partition.
+    for bad in ["run3", "SingleTimeSeries_", "Deterministic", "x_Scenarios_"] {
+        let err = write_sqlite(&db, &series, bad).unwrap_err();
+        assert!(err.to_string().contains("table prefix"), "{bad}: {err}");
+        let err = sqlite_partitions(&db, bad).unwrap_err();
+        assert!(err.to_string().contains("table prefix"), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn a_discovered_table_name_needing_quotes_is_queried_safely() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("out.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE \"SingleTimeSeries_a'b\"\"c_values\" (x);
+             CREATE TABLE \"SingleTimeSeries_a'b\"\"c_series\" (time_series_type, element_type);
+             INSERT INTO \"SingleTimeSeries_a'b\"\"c_series\" VALUES ('SingleTimeSeries', 'f64');",
+        )
+        .unwrap();
+    let partitions = sqlite_partitions(&db, "").expect("partitions");
+    assert_eq!(partitions.len(), 1);
+    // Reaches the column check (it would be a SQL syntax error unquoted).
+    let err =
+        read_sqlite_partition_with(&partitions[0], &ImportOptions::default(), &mut |_| Ok(()))
+            .unwrap_err();
+    assert!(err.to_string().contains("missing column"), "{err}");
 }
 
 #[test]
