@@ -259,8 +259,9 @@ Parquet files:
 - Instants (`timestamp`, `issue_time`, `initial_timestamp`) are `INTEGER` unix milliseconds; the
   spelling is the series table's `time_reference` column.
 - `value` is a plain `REAL`/`INTEGER` for a scalar element and a JSON array (nested over the element
-  shape) otherwise. `NaN` is `NULL`, so `value` is the one nullable column. A `u64` above `i64::MAX`
-  is refused.
+  shape) otherwise. `NaN` is `NULL`, so `value` is the one nullable column; inside a JSON array the
+  infinities are the strings `"Infinity"` and `"-Infinity"`. A `u64` above `i64::MAX` and a scalar
+  `-0.0` (which a `REAL` cannot keep) are refused.
 
 `add --sqlite <FILE>` reads it back: every partition whose tables are named `<prefix>`, then a
 time-series type, then `_…` — so without `--table-prefix` it takes only the unprefixed export, and

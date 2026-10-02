@@ -351,10 +351,12 @@ beside it fails the import, since an export always writes the two together.
 
 An export **only adds**: it may target a new file or an existing database, and fails, writing
 nothing, if any table or index name it would create is already there. `NaN` is written as `NULL`
-(SQLite stores it as one regardless), making `value` the one nullable column; a `u64` above
-`i64::MAX` is refused. Row order in the tables does not matter: the import orders both by the array
-key itself, so values edited in place with plain SQL read back, subject to the `data_hash` check (or
-`--no-checksum`).
+(SQLite stores it as one regardless), making `value` the one nullable column. Inside a JSON `value`,
+the infinities are the strings `"Infinity"` and `"-Infinity"`, since JSON numbers cannot hold them.
+Two values are refused because SQLite cannot hold them: a `u64` above `i64::MAX`, and a scalar
+`-0.0` (a `REAL` reads back as `+0.0`; inside a JSON array it survives). Row order in the tables
+does not matter: the import orders both by the array key itself, so values edited in place with
+plain SQL read back, subject to the `data_hash` check (or `--no-checksum`).
 
 ```sql
 SELECT s.owner_id, datetime(v.timestamp / 1000, 'unixepoch') AS at, v.value

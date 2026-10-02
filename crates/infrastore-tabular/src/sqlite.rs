@@ -354,6 +354,14 @@ fn insert_values(
             unsupported(format!("series '{}' is shorter than its shape", row.name))
         })?;
         let value = if scalar {
+            // A REAL `-0.0` reads back as `+0.0`; refuse it rather than flip
+            // the sign the checksum is taken over.
+            if matches!(cells[0], Value::Real(f) if f == 0.0 && f.is_sign_negative()) {
+                return Err(unsupported(format!(
+                    "series '{}' holds a scalar -0.0, which a SQLite REAL cannot store",
+                    row.name
+                )));
+            }
             cells[0].clone()
         } else {
             Value::Text(nest(cells, &shape).to_string())
@@ -473,10 +481,18 @@ fn nest(cells: &[Value], shape: &[usize]) -> Json {
     }
 }
 
+/// How a JSON `value` cell spells the infinities, which JSON numbers cannot.
+const INFINITY: &str = "Infinity";
+const NEG_INFINITY: &str = "-Infinity";
+
 fn json_of(value: &Value) -> Json {
     match value {
         Value::Integer(i) => Json::from(*i),
-        // `from(f64)` is `null` for a non-finite value, which JSON cannot hold.
+        // JSON has no infinity, so it is spelled as a string; `NaN` arrives
+        // here already `NULL`.
+        Value::Real(f) if f.is_infinite() => {
+            Json::from(if *f > 0.0 { INFINITY } else { NEG_INFINITY })
+        }
         Value::Real(f) => Json::from(*f),
         _ => Json::Null,
     }
@@ -928,6 +944,8 @@ fn flatten(
                 Json::Number(n) => n
                     .as_i64()
                     .map_or_else(|| Num::Real(n.as_f64().unwrap_or(f64::NAN)), Num::Int),
+                Json::String(s) if s == INFINITY => Num::Real(f64::INFINITY),
+                Json::String(s) if s == NEG_INFINITY => Num::Real(f64::NEG_INFINITY),
                 _ => {
                     return Err(unsupported(format!(
                         "a `{}` cell holds {leaf}, not a number",

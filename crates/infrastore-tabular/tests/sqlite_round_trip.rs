@@ -516,6 +516,35 @@ fn hand_edited_tables_are_refused_naming_the_problem() {
 }
 
 #[test]
+fn nested_infinities_round_trip_and_a_scalar_negative_zero_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("out.db");
+    let series = stored(vec![tuple3(&[
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -0.0,
+        1.5,
+        f64::NAN,
+        2.0,
+    ])]);
+    write_sqlite(&db, &series, "").expect("export");
+    let back = import(&db, "", &ImportOptions::default());
+    assert_eq!(back.len(), 1);
+    assert_eq!(
+        back[0].data, series[0].1,
+        "bitwise, so the checksum agreed too"
+    );
+
+    let err = write_sqlite(
+        &dir.path().join("zero.db"),
+        &stored(vec![hourly("z", &[1.0, -0.0])]),
+        "",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("-0.0"), "{err}");
+}
+
+#[test]
 fn whole_numbers_in_a_float_array_read_back_as_floats() {
     // JSON `[1, 2, 3]` is integers to a parser; an f64 array takes them as the
     // same values, so even the checksum agrees.
