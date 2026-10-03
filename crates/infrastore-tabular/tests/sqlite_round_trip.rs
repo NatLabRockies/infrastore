@@ -279,6 +279,8 @@ fn a_shared_profile_is_one_array_and_a_prefix_scopes_the_import() {
     for bad in [
         "run3",
         "2_",
+        "sqlite_",
+        "SQLITE_run_",
         "SingleTimeSeries_",
         "Deterministic",
         "x_Scenarios_",

@@ -116,6 +116,12 @@ pub fn check_prefix(prefix: &str) -> Result<()> {
              table names need quoting"
         )));
     }
+    if prefix.to_ascii_lowercase().starts_with("sqlite_") {
+        return Err(unsupported(format!(
+            "table prefix {prefix:?} starts with \"sqlite_\", which SQLite reserves for its own \
+             tables"
+        )));
+    }
     let Some(body) = prefix.strip_suffix('_') else {
         return Err(unsupported(format!(
             "table prefix {prefix:?} must end in '_' (e.g. {:?})",
