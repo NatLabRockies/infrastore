@@ -1198,6 +1198,11 @@ fn read_in_chunks(
 ///
 /// Within a partition the arrays are therefore written in the order they are
 /// stored rather than in key order; the tables' index is what orders them.
+///
+/// A `DeterministicSingleTimeSeries` is **omitted**: the import refuses the
+/// type, and a database's only selector is its prefix, so one such partition
+/// would make the whole export unreadable back. A filter naming the type
+/// itself is refused.
 pub fn export_store(
     store: &Store,
     filter: ListFilter,
@@ -1207,7 +1212,18 @@ pub fn export_store(
 ) -> Result<Vec<WrittenTables>> {
     // Before any read, so a bad prefix does not cost the selection.
     check_prefix(prefix)?;
-    let metas = store.list_metadata(filter)?;
+    // Refused rather than answered with no tables, which would read as "the
+    // store holds none".
+    if filter.time_series_type == Some(TimeSeriesType::DeterministicSingleTimeSeries) {
+        return Err(unsupported(
+            "a DeterministicSingleTimeSeries is derived from a stored SingleTimeSeries and no \
+             import takes one back; export the SingleTimeSeries and run \
+             `transform_single_time_series` on the other side. An unfiltered export omits \
+             these rows and writes the rest",
+        ));
+    }
+    let mut metas = store.list_metadata(filter)?;
+    metas.retain(|m| m.time_series_type != TimeSeriesType::DeterministicSingleTimeSeries);
     let ids: Vec<TimeSeriesId> = metas
         .iter()
         .map(|m| {
@@ -1298,13 +1314,15 @@ pub fn import_store(
         .map(|_| ())
     });
     match read {
-        Ok(()) => store.commit_transaction().map(|()| ids),
-        Err(e) => {
-            // The read's error is the one worth reporting.
-            let _ = store.rollback_transaction();
-            Err(e)
-        }
+        Ok(()) => store.commit_transaction(),
+        Err(e) => Err(e),
     }
+    .map(|()| ids)
+    .inspect_err(|_| {
+        // A failed commit leaves the transaction open as much as a failed read
+        // does, and the first error is the one worth reporting.
+        let _ = store.rollback_transaction();
+    })
 }
 
 #[cfg(test)]

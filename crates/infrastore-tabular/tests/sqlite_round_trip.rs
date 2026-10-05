@@ -762,3 +762,34 @@ fn a_store_exports_a_selection_and_imports_all_or_nothing() {
     assert_eq!(load.initial_timestamp, t0() + Duration::hours(1));
     assert_eq!(load.data, TypedArray::from_f64(vec![2], &[2.0, 3.0]));
 }
+
+#[test]
+fn a_derived_forecast_is_left_out_so_the_export_reads_back() {
+    let mut source = Store::create(None, true).unwrap();
+    add(&mut source, 1, hourly("load", &[1.0, 2.0, 3.0, 4.0]));
+    source
+        .transform_single_time_series(
+            Duration::hours(2),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .expect("transform");
+    assert_eq!(source.list_metadata(ListFilter::new()).unwrap().len(), 2);
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("out.db");
+
+    // Asking for the derived type by name is refused, not answered with nothing.
+    let derived = ListFilter::new()
+        .time_series_type(infrastore_core::TimeSeriesType::DeterministicSingleTimeSeries);
+    let err = export_store(&source, derived, None, &db, "").unwrap_err();
+    assert!(err.to_string().contains("derived"), "{err}");
+    assert!(!db.exists());
+
+    let written = export_store(&source, ListFilter::new(), None, &db, "").expect("export");
+    assert_eq!(written.iter().map(|t| t.series).sum::<usize>(), 1);
+    let mut target = Store::create(None, true).unwrap();
+    let ids = import_store(&mut target, &db, "", &ImportOptions::default()).expect("import");
+    assert_eq!(ids.len(), 1);
+}

@@ -240,7 +240,9 @@ Refused rather than coerced:
   since `P1M` clamps to month end.
 - **`Struct` and `List` value columns.** Those are the decoded form this version does not write.
 - **A `DeterministicSingleTimeSeries` partition.** The type is derived from a stored
-  `SingleTimeSeries` rather than added; import that and run `transform`.
+  `SingleTimeSeries` rather than added; import that and run `transform`. The SQLite export therefore
+  omits these rows (and refuses a filter naming the type), since a database cannot have one
+  partition set aside the way a file pair can.
 
 A dense forecast is placed by its **coordinates**, not its row order, so a file a query engine
 sorted or partitioned still reads correctly. Every slot must be filled exactly once: a cube has no
@@ -385,8 +387,9 @@ WHERE s.name = 'load';
 - **A composite series' padding.** Values round-trip exactly — an improvement over CSV, where floats
   pass through decimal text — but a composite is re-padded on the way out and shrunk to its own
   width on the way back, so its stored `data_hash` may differ from the original's.
-- **A NaN's bit pattern, in SQLite.** `NULL` reads back as the canonical `NaN`, so a series holding
-  any other NaN payload fails its `data_hash` check; `--no-checksum` accepts it.
+- **A NaN's bit pattern, in SQLite.** `NULL` reads back as the canonical `NaN`. The `data_hash`
+  check still passes, because the content hash canonicalizes NaNs before hashing; the payload is
+  simply normalized.
 
 An **empty series** is not a round-trip caveat but a refusal: the export **fails**, naming every
 empty series it was asked for and writing nothing. A values file has one row per value, so an empty
