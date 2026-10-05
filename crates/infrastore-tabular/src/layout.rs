@@ -75,12 +75,9 @@ pub struct ArrayKey {
 /// be absurd — while the values always carry all of it.
 pub fn time_axis_of(data: &TimeSeriesData) -> Result<String> {
     Ok(match data {
-        TimeSeriesData::SingleTimeSeries(s) => format!(
-            "R{}/{}/{}",
-            s.length,
-            instant(s.initial_timestamp),
-            s.resolution.to_iso8601()
-        ),
+        TimeSeriesData::SingleTimeSeries(s) => {
+            grid_axis(s.length, s.initial_timestamp, s.resolution)
+        }
         TimeSeriesData::NonSequentialTimeSeries(s) => hash_hex(&timestamps_hash(&s.timestamps)),
         TimeSeriesData::PersistentTimeSeries(s) => hash_hex(&timestamps_hash(&s.timestamps)),
         TimeSeriesData::Deterministic(f) => forecast_axis(
@@ -105,6 +102,12 @@ pub fn time_axis_of(data: &TimeSeriesData) -> Result<String> {
             f.resolution,
         ),
     })
+}
+
+/// A `SingleTimeSeries`' `time_axis` from its parts, so a whole-series export
+/// can spell it off the catalog row without reading the values.
+pub fn grid_axis(length: usize, initial: DateTime<Utc>, resolution: Period) -> String {
+    format!("R{length}/{}/{}", instant(initial), resolution.to_iso8601())
 }
 
 fn forecast_axis(

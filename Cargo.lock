@@ -1336,6 +1336,7 @@ dependencies = [
  "cbindgen",
  "chrono",
  "infrastore-core",
+ "infrastore-tabular",
  "serde",
  "serde_json",
  "tempfile",
@@ -1374,6 +1375,7 @@ version = "0.14.1"
 dependencies = [
  "chrono",
  "infrastore-core",
+ "infrastore-tabular",
  "pyo3",
  "tracing-subscriber",
 ]

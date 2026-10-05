@@ -167,7 +167,7 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
 | Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |
 | Parquet files                 | crate     | ❌    | ❌              | ❌    | `-f parquet` | ❌          |
-| SQLite tables                 | crate     | ❌    | ❌              | ❌    | `-f sqlite`  | ❌          |
+| SQLite tables                 | crate     | ✅    | ✅              | ✅    | `-f sqlite`  | ❌          |
 | Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
 | Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 
@@ -203,7 +203,12 @@ files.
 `_values`/`_series` table pair per partition, optionally under a `--table-prefix`. The
 container-independent half of the layout lives in `infrastore-tabular`, which is Arrow-free and
 which `infrastore-parquet` builds on, so SQLite is not behind the `parquet` feature: the catalog
-already links SQLite. It is likewise CLI-only.
+already links SQLite. For the same reason it costs the libraries almost nothing, so the C ABI,
+Julia, and Python carry it too (`export_sqlite` / `import_sqlite`, over
+`infrastore_tabular::sqlite::export_store` / `import_store`) — the way a binding hands an analyst a
+file for DuckDB or polars without Arrow in the wheel or the cdylib. A binding's import is one
+all-or-nothing transaction across the database and takes only a table prefix and the checksum
+waiver; the CLI's per-partition commits and its override flags for foreign tables stay CLI-only.
 
 **Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
 two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That

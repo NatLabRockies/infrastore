@@ -2180,6 +2180,73 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(stru
                                                                             uint64_t *out_added);
 
 /**
+ * Export the series `filter` selects as tables in the SQLite database at
+ * `path` -- the normalized layout `infrastore export -f sqlite` writes, one
+ * `<prefix><base>_values` / `<prefix><base>_series` pair per
+ * `(time_series_type, value type, time_reference)` partition.
+ *
+ * A null `filter` exports the whole store. With `has_time_range`, each series
+ * is clipped to `start_ms` / `end_ms` (Unix milliseconds, spelled by
+ * `time_range_zoneless`) as `infrastore_store_read_by_ids_range` clips.
+ * `table_prefix` may be null for none. The database is created if absent, and
+ * tables are only ever added: a name already taken, or an empty series in the
+ * selection, fails before anything is written. The values are streamed, a
+ * bounded batch at a time and each distinct array once, so a store far larger
+ * than memory exports in a few hundred megabytes.
+ *
+ * `*out_json` receives a JSON array with one object per partition written:
+ * `values_table`, `series_table`, `time_series_type`, `value_type`,
+ * `time_reference`, `arrays`, `series` and `rows`.
+ *
+ * # Safety
+ *
+ * `handle` must reference a live store. `filter` must be null or point to a
+ * valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+ * duration of the call. `path` must be a valid, null-terminated UTF-8 string
+ * and `table_prefix` null or one.
+ * `out_json` must be valid for writing one pointer and `out_len` for writing
+ * one `u64`; on success `*out_json` must be released exactly once with
+ * `infrastore_string_free`.
+ */
+int32_t infrastore_store_export_sqlite(const struct InfraStore *handle,
+                                       const struct InfraStoreFilter *filter,
+                                       bool has_time_range,
+                                       bool time_range_zoneless,
+                                       int64_t start_ms,
+                                       int64_t end_ms,
+                                       const char *path,
+                                       const char *table_prefix,
+                                       char **out_json,
+                                       uint64_t *out_len);
+
+/**
+ * Add every series in the tables `infrastore_store_export_sqlite` (or
+ * `infrastore export -f sqlite`) wrote to the database at `path` under
+ * `table_prefix` (null for none), in one all-or-nothing transaction across the
+ * whole database.
+ *
+ * Ids are always assigned fresh; the ones the tables recorded are not reused.
+ * Each array is checked against the `data_hash` its rows carry unless
+ * `skip_checksum`, which is for values edited in place. When non-null,
+ * `out_added` receives the number of series added and `out_ids` their catalog
+ * ids in the order read.
+ *
+ * # Safety
+ *
+ * `handle` must be a live read-write store handle, `path` a valid,
+ * null-terminated UTF-8 string and `table_prefix` null or one. `out_added` and
+ * `out_ids` must each be null or valid for writing one value; on success a
+ * non-null `*out_ids` must be released exactly once with
+ * `infrastore_buffer_free_i64(*out_ids, *out_added)`.
+ */
+int32_t infrastore_store_import_sqlite(struct InfraStore *handle,
+                                       const char *path,
+                                       const char *table_prefix,
+                                       bool skip_checksum,
+                                       uint64_t *out_added,
+                                       int64_t **out_ids);
+
+/**
  * Release an `f64` buffer returned by this library.
  *
  * # Safety

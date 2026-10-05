@@ -8,11 +8,14 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    Dtype, ElementType, Features, NonSequentialTimeSeries, OwnerCategory, PersistentTimeSeries,
-    SingleTimeSeries, Store, TimeReference, TimeSeriesData, TimeSeriesMetadata, TypedArray,
+    Dtype, ElementType, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
+    PersistentTimeSeries, ReadWindow, SingleTimeSeries, Store, TimeRange, TimeReference,
+    TimeSeriesData, TimeSeriesMetadata, TypedArray,
 };
 use infrastore_tabular::ImportOptions;
-use infrastore_tabular::sqlite::{read_sqlite_partition_with, sqlite_partitions, write_sqlite};
+use infrastore_tabular::sqlite::{
+    export_store, import_store, read_sqlite_partition_with, sqlite_partitions, write_sqlite,
+};
 
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
@@ -48,10 +51,58 @@ fn hourly(name: &str, values: &[f64]) -> TimeSeriesData {
     )))
 }
 
+/// Every table's name, SQL and rows. Sorted, because the streamed export
+/// writes a partition's arrays in storage order rather than key order.
+fn dump(db: &Path) -> Vec<(String, String, Vec<Vec<rusqlite::types::Value>>)> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut tables = conn
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap();
+    let tables: Vec<(String, String)> = tables
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    tables
+        .into_iter()
+        .map(|(name, sql)| {
+            let mut stmt = conn
+                .prepare(&format!("SELECT * FROM \"{name}\" ORDER BY rowid"))
+                .unwrap();
+            let width = stmt.column_count();
+            let mut rows: Vec<Vec<rusqlite::types::Value>> = stmt
+                .query_map([], |r| (0..width).map(|i| r.get(i)).collect())
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            rows.sort_by_cached_key(|row| format!("{row:?}"));
+            (name, sql, rows)
+        })
+        .collect()
+}
+
+/// The streamed export must write what the in-memory one does, table for table
+/// and row for row, and refuse what it refuses.
+fn assert_streams_alike(store: &Store, pairs: &[(TimeSeriesMetadata, TimeSeriesData)]) {
+    let dir = tempfile::tempdir().unwrap();
+    let (whole, streamed) = (dir.path().join("whole.db"), dir.path().join("streamed.db"));
+    let whole_result = write_sqlite(&whole, pairs, "p_");
+    let streamed_result = export_store(store, ListFilter::new(), None, &streamed, "p_");
+    match (whole_result, streamed_result) {
+        (Ok(_), Ok(_)) => assert_eq!(dump(&streamed), dump(&whole)),
+        (Err(a), Err(b)) => assert_eq!(b.to_string(), a.to_string()),
+        (a, b) => panic!("the two exports disagree: {a:?} vs {b:?}"),
+    }
+}
+
 /// Store every item under its own owner, and hand back what the store reads.
+///
+/// Every selection a test builds this way is also run through
+/// [`export_store`], so the streamed path meets each type, element kind and
+/// refusal the in-memory one is tested on.
 fn stored(items: Vec<TimeSeriesData>) -> Vec<(TimeSeriesMetadata, TimeSeriesData)> {
     let mut store = Store::create(None, true).expect("in-memory store");
-    items
+    let pairs: Vec<_> = items
         .into_iter()
         .enumerate()
         .map(|(owner, data)| {
@@ -70,7 +121,9 @@ fn stored(items: Vec<TimeSeriesData>) -> Vec<(TimeSeriesMetadata, TimeSeriesData
                 .unwrap();
             (row, values)
         })
-        .collect()
+        .collect();
+    assert_streams_alike(&store, &pairs);
+    pairs
 }
 
 fn import(
@@ -658,4 +711,54 @@ fn an_empty_selection_creates_no_file() {
             .is_empty()
     );
     assert!(!db.exists());
+}
+
+fn add(store: &mut Store, owner: i64, data: TimeSeriesData) {
+    store
+        .add_time_series(
+            owner,
+            "Generator",
+            OwnerCategory::Component,
+            data,
+            Features::new(),
+        )
+        .expect("add");
+}
+
+#[test]
+fn a_store_exports_a_selection_and_imports_all_or_nothing() {
+    let mut source = Store::create(None, true).unwrap();
+    add(&mut source, 1, hourly("load", &[1.0, 2.0, 3.0]));
+    add(&mut source, 2, of::<i64>("status", &[1, 0, 1]));
+    add(&mut source, 3, hourly("other", &[9.0]));
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("out.db");
+
+    // A bad prefix is refused before anything is read or created.
+    assert!(export_store(&source, ListFilter::new(), None, &db, "no-dash").is_err());
+    assert!(!db.exists());
+
+    let filter = ListFilter::new().name_glob("[ls]*");
+    let range = TimeRange::spelled(t0() + Duration::hours(1), t0() + Duration::hours(3), false);
+    let written = export_store(&source, filter, Some(range), &db, "").expect("export");
+    assert_eq!(written.iter().map(|t| t.series).sum::<usize>(), 2);
+    assert_eq!(written.iter().map(|t| t.rows).sum::<usize>(), 4);
+
+    // The i64 partition sorts after the f64 one, so a clash there fails the
+    // import with the f64 series already added -- and it must not stay.
+    let mut clash = Store::create(None, true).unwrap();
+    add(&mut clash, 2, of::<i64>("status", &[7]));
+    assert!(import_store(&mut clash, &db, "", &ImportOptions::default()).is_err());
+    assert_eq!(clash.list_metadata(ListFilter::new()).unwrap().len(), 1);
+
+    let mut target = Store::create(None, true).unwrap();
+    let ids = import_store(&mut target, &db, "", &ImportOptions::default()).expect("import");
+    assert_eq!(ids.len(), 2);
+    let read = target.read_by_ids(&ids, ReadWindow::full()).unwrap();
+    let TimeSeriesData::SingleTimeSeries(load) = &read[0] else {
+        panic!("the f64 partition reads first");
+    };
+    assert_eq!(load.name, "load");
+    assert_eq!(load.initial_timestamp, t0() + Duration::hours(1));
+    assert_eq!(load.data, TypedArray::from_f64(vec![2], &[2.0, 3.0]));
 }

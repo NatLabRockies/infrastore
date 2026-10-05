@@ -5244,6 +5244,135 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
     INFRASTORE_OK
 }
 
+// ---- SQLite table export / import ------------------------------------------
+
+/// Export the series `filter` selects as tables in the SQLite database at
+/// `path` -- the normalized layout `infrastore export -f sqlite` writes, one
+/// `<prefix><base>_values` / `<prefix><base>_series` pair per
+/// `(time_series_type, value type, time_reference)` partition.
+///
+/// A null `filter` exports the whole store. With `has_time_range`, each series
+/// is clipped to `start_ms` / `end_ms` (Unix milliseconds, spelled by
+/// `time_range_zoneless`) as `infrastore_store_read_by_ids_range` clips.
+/// `table_prefix` may be null for none. The database is created if absent, and
+/// tables are only ever added: a name already taken, or an empty series in the
+/// selection, fails before anything is written. The values are streamed, a
+/// bounded batch at a time and each distinct array once, so a store far larger
+/// than memory exports in a few hundred megabytes.
+///
+/// `*out_json` receives a JSON array with one object per partition written:
+/// `values_table`, `series_table`, `time_series_type`, `value_type`,
+/// `time_reference`, `arrays`, `series` and `rows`.
+///
+/// # Safety
+///
+/// `handle` must reference a live store. `filter` must be null or point to a
+/// valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+/// duration of the call. `path` must be a valid, null-terminated UTF-8 string
+/// and `table_prefix` null or one.
+/// `out_json` must be valid for writing one pointer and `out_len` for writing
+/// one `u64`; on success `*out_json` must be released exactly once with
+/// `infrastore_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_export_sqlite(
+    handle: *const InfraStoreHandle,
+    filter: *const InfraStoreFilter,
+    has_time_range: bool,
+    time_range_zoneless: bool,
+    start_ms: i64,
+    end_ms: i64,
+    path: *const c_char,
+    table_prefix: *const c_char,
+    out_json: *mut *mut c_char,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    require_nonnull!(out_json, out_len);
+    let filter = ffi_try!(code unsafe { build_filter(filter) });
+    let range =
+        ffi_try!(code build_time_range(has_time_range, time_range_zoneless, start_ms, end_ms));
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "path is null or not UTF-8") });
+    let prefix =
+        ffi_try!(code unsafe { cstr_to_optional_string(table_prefix) }).unwrap_or_default();
+    let written = ffi_try!(infrastore_tabular::sqlite::export_store(
+        &store.inner,
+        filter,
+        range,
+        &path,
+        &prefix
+    ));
+    let rows: Vec<serde_json::Value> = written
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "values_table": t.values_table,
+                "series_table": t.series_table,
+                "time_series_type": t.time_series_type.as_str(),
+                "value_type": t.value_slug,
+                "time_reference": t.reference,
+                "arrays": t.arrays,
+                "series": t.series,
+                "rows": t.rows,
+            })
+        })
+        .collect();
+    unsafe {
+        write_owned_str_out(
+            serde_json::Value::Array(rows).to_string(),
+            out_json,
+            out_len,
+        )
+    }
+}
+
+/// Add every series in the tables `infrastore_store_export_sqlite` (or
+/// `infrastore export -f sqlite`) wrote to the database at `path` under
+/// `table_prefix` (null for none), in one all-or-nothing transaction across the
+/// whole database.
+///
+/// Ids are always assigned fresh; the ones the tables recorded are not reused.
+/// Each array is checked against the `data_hash` its rows carry unless
+/// `skip_checksum`, which is for values edited in place. When non-null,
+/// `out_added` receives the number of series added and `out_ids` their catalog
+/// ids in the order read.
+///
+/// # Safety
+///
+/// `handle` must be a live read-write store handle, `path` a valid,
+/// null-terminated UTF-8 string and `table_prefix` null or one. `out_added` and
+/// `out_ids` must each be null or valid for writing one value; on success a
+/// non-null `*out_ids` must be released exactly once with
+/// `infrastore_buffer_free_i64(*out_ids, *out_added)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_import_sqlite(
+    handle: *mut InfraStoreHandle,
+    path: *const c_char,
+    table_prefix: *const c_char,
+    skip_checksum: bool,
+    out_added: *mut u64,
+    out_ids: *mut *mut i64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "path is null or not UTF-8") });
+    let prefix =
+        ffi_try!(code unsafe { cstr_to_optional_string(table_prefix) }).unwrap_or_default();
+    let options = infrastore_tabular::ImportOptions {
+        skip_checksum,
+        ..Default::default()
+    };
+    let ids = ffi_try!(infrastore_tabular::sqlite::import_store(
+        &mut store.inner,
+        &path,
+        &prefix,
+        &options
+    ));
+    let ids = ids.into_iter().map(|id| id.get()).collect();
+    unsafe { write_assigned_ids(ids, out_added, out_ids) };
+    INFRASTORE_OK
+}
+
 // ---- Free helpers ---------------------------------------------------------
 
 /// Release an `f64` buffer returned by this library.
@@ -9451,6 +9580,85 @@ mod abi_tests {
             infrastore_store_free(source);
             infrastore_store_free(target);
             infrastore_store_free(empty);
+        }
+    }
+
+    #[test]
+    fn sqlite_tables_round_trip_across_the_abi() {
+        let source = abi_create_in_memory();
+        abi_add_f64(source, 7, "load", &[1.0, 2.0, 3.0]);
+        let dir = tempfile::tempdir().unwrap();
+        let db = CString::new(dir.path().join("out.db").to_str().unwrap()).unwrap();
+        let prefix = CString::new("run1_").unwrap();
+
+        let (mut json, mut json_len) = (ptr::null_mut(), 0u64);
+        assert_eq!(
+            unsafe {
+                infrastore_store_export_sqlite(
+                    source,
+                    ptr::null(),
+                    false,
+                    false,
+                    0,
+                    0,
+                    db.as_ptr(),
+                    prefix.as_ptr(),
+                    &mut json,
+                    &mut json_len,
+                )
+            },
+            INFRASTORE_OK,
+            "export failed: {}",
+            last_error()
+        );
+        let report = unsafe { CStr::from_ptr(json) }.to_str().unwrap();
+        assert!(report.contains("\"series\":1"), "{report}");
+        assert!(report.contains("run1_SingleTimeSeries_"), "{report}");
+
+        // The prefix scopes the import: nothing was exported without one.
+        let target = abi_create_in_memory();
+        assert_ne!(
+            unsafe {
+                infrastore_store_import_sqlite(
+                    target,
+                    db.as_ptr(),
+                    ptr::null(),
+                    false,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            INFRASTORE_OK
+        );
+        let (mut added, mut ids) = (0u64, ptr::null_mut());
+        assert_eq!(
+            unsafe {
+                infrastore_store_import_sqlite(
+                    target,
+                    db.as_ptr(),
+                    prefix.as_ptr(),
+                    false,
+                    &mut added,
+                    &mut ids,
+                )
+            },
+            INFRASTORE_OK,
+            "import failed: {}",
+            last_error()
+        );
+        assert_eq!(added, 1);
+        let mut present = false;
+        assert_eq!(
+            unsafe { infrastore_store_association_exists(target, *ids, &mut present) },
+            INFRASTORE_OK
+        );
+        assert!(present);
+
+        unsafe {
+            infrastore_buffer_free_i64(ids, added);
+            infrastore_string_free(json);
+            infrastore_store_free(source);
+            infrastore_store_free(target);
         }
     }
 }

@@ -48,7 +48,18 @@ SQLite. It exposes multiple bindings over a shared core:
   layout both containers share — partitioning, array key, column sets, row walking, series assembly
   and the merge join — plus the SQLite container; `infrastore-parquet` builds on it. Not a cargo
   feature: SQLite is already linked by the catalog. An export only adds tables and fails, writing
-  nothing, on any name collision; `--table-prefix` scopes both directions.
+  nothing, on any name collision; `--table-prefix` scopes both directions. Unlike Parquet it **is**
+  in the bindings — `export_sqlite` / `import_sqlite` in Python, `import_sqlite!` in Julia,
+  `infrastore_store_export_sqlite` / `infrastore_store_import_sqlite` across the C ABI, all over
+  `infrastore_tabular::sqlite::{export_store, import_store}` — since `infrastore-tabular` adds no
+  dependency the libraries lack. `export_store` **streams**: it plans the tables from the catalog
+  (reading values only where the row cannot say the key — irregular, forecast, composite, clipped),
+  then reads one series per distinct array in catalog-id order, a bounded batch at a time, calling
+  `Store::release_read_caches` as it goes because the HDF5 backend otherwise keeps every dataset it
+  touched resident; the values index is created after the rows. The Parquet export still reads its
+  whole selection first. A binding's import is **one transaction across the database** (the CLI
+  commits per partition) and exposes only the prefix and `skip_checksum`, not the foreign-table
+  overrides.
 
 **Current feature coverage:** `SingleTimeSeries`, `NonSequentialTimeSeries`, and
 `PersistentTimeSeries` are implemented end-to-end (read+write in the Rust core, C ABI, Python,

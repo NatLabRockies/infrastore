@@ -20,20 +20,32 @@ pub type Plan = BTreeMap<PartitionKey, BTreeMap<ArrayKey, Vec<usize>>>;
 /// Group `series` by partition and array key. `BTreeMap` is the sort both
 /// halves of a partition promise; within a key, series are ordered by id.
 pub fn plan(series: &[(TimeSeriesMetadata, TimeSeriesData)]) -> Result<Plan> {
+    let keys = series
+        .iter()
+        .map(|(row, data)| array_key(row, data))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(plan_keys(series.iter().map(|(row, _)| row).zip(keys)))
+}
+
+/// [`plan`] over keys already in hand, for a writer that does not hold every
+/// series' values at once. Indexes are positions in `series`.
+pub fn plan_keys<'a>(series: impl Iterator<Item = (&'a TimeSeriesMetadata, ArrayKey)>) -> Plan {
     let mut out = Plan::new();
-    for (index, (row, data)) in series.iter().enumerate() {
+    let mut ids = Vec::new();
+    for (index, (row, key)) in series.enumerate() {
+        ids.push(row.id.map_or(0, |id| id.get()));
         out.entry(partition_of(row))
             .or_default()
-            .entry(array_key(row, data)?)
+            .entry(key)
             .or_default()
             .push(index);
     }
     for arrays in out.values_mut() {
         for members in arrays.values_mut() {
-            members.sort_by_key(|i| series[*i].0.id.map_or(0, |id| id.get()));
+            members.sort_by_key(|i| ids[*i]);
         }
     }
-    Ok(out)
+    out
 }
 
 /// Refuse a selection holding an empty series, naming every one.
@@ -43,11 +55,18 @@ pub fn plan(series: &[(TimeSeriesMetadata, TimeSeriesData)]) -> Result<Plan> {
 /// would make "a series row with no values group" legal on import too, and that
 /// is the shape a truncated or half-written file takes.
 pub fn refuse_empty(series: &[(TimeSeriesMetadata, TimeSeriesData)]) -> Result<()> {
-    let empty: Vec<String> = series
+    let counts = series
         .iter()
         .map(|(row, data)| Ok((row, row_count(row, data)?)))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    refuse_empty_counts(counts.into_iter())
+}
+
+/// [`refuse_empty`] over row counts already in hand.
+pub fn refuse_empty_counts<'a>(
+    counts: impl Iterator<Item = (&'a TimeSeriesMetadata, usize)>,
+) -> Result<()> {
+    let empty: Vec<String> = counts
         .filter(|(_, n)| *n == 0)
         .map(|(row, _)| format!("'{}' (owner {})", row.name, row.owner_id))
         .collect();

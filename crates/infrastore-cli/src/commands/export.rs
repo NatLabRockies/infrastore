@@ -71,21 +71,21 @@ pub fn run(
 
     let range = crate::parse::parse_time_range(time_range)?;
     let store = store_access::open_readonly(store_path)?;
+    // SQLite streams out of the store rather than out of a selection read here:
+    // the values are far larger than memory long before the catalog is.
+    if let Some(db) = db {
+        return write_sqlite(
+            &store,
+            selector.to_filter()?,
+            range,
+            db,
+            table_prefix.unwrap_or(""),
+            format,
+        );
+    }
     let metas = store
         .list_metadata(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
-    if let Some(db) = db {
-        let ids: Vec<infrastore_core::TimeSeriesId> =
-            metas.iter().map(select::id_of).collect::<Result<_, _>>()?;
-        let datas = match range {
-            Some(r) => store.read_by_ids_range(&ids, r),
-            None => store.read_by_ids(&ids, infrastore_core::ReadWindow::full()),
-        }
-        .map_err(|e| e.to_string())?;
-        let pairs: Vec<(TimeSeriesMetadata, TimeSeriesData)> =
-            metas.into_iter().zip(datas).collect();
-        return write_sqlite(db, &pairs, table_prefix.unwrap_or(""), format);
-    }
     if metas.is_empty() {
         return match dir {
             // Without --dir, stdout *is* the exported series, so a notice
@@ -510,12 +510,14 @@ fn write_parquet(
 ///
 /// An empty selection writes nothing and does not create the database.
 fn write_sqlite(
+    store: &infrastore_core::Store,
+    filter: infrastore_core::ListFilter,
+    range: Option<infrastore_core::TimeRange>,
     db: &Path,
-    pairs: &[(TimeSeriesMetadata, TimeSeriesData)],
     prefix: &str,
     format: Format,
 ) -> Result<(), String> {
-    let written = infrastore_tabular::sqlite::write_sqlite(db, pairs, prefix)
+    let written = infrastore_tabular::sqlite::export_store(store, filter, range, db, prefix)
         .map_err(|e| format!("writing to {}: {e}", db.display()))?;
     let series: usize = written.iter().map(|t| t.series).sum();
     output::report(

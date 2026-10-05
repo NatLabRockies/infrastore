@@ -38,12 +38,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeZone, Utc};
-use infrastore_core::{Dtype, TimeSeriesData, TimeSeriesMetadata, TimeSeriesType, TypedArray};
+use infrastore_core::{
+    AddRequest, Dtype, ListFilter, ReadWindow, Store, TimeRange, TimeSeriesData, TimeSeriesError,
+    TimeSeriesId, TimeSeriesMetadata, TimeSeriesType, TypedArray,
+};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params_from_iter};
 use serde_json::Value as Json;
 
-use crate::export::{descriptor_row, per_step_shape, plan, refuse_empty, series_rows};
+use crate::export::{
+    array_key, descriptor_row, per_step_shape, plan_keys, refuse_empty_counts, row_count,
+    series_rows,
+};
 use crate::import::{ImportOptions, LaneValue, SeriesRow, SeriesSink, ValuesGroup, merge_join};
 use crate::layout::{self, ArrayKey};
 use crate::partition::{PartitionKey, ValueKind};
@@ -137,6 +143,61 @@ pub fn check_prefix(prefix: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the writer needs of one series before its values are in hand: enough to
+/// plan every table and to write the series row, so the values themselves are
+/// only needed once, for the array's own rows.
+struct Planned<'a> {
+    row: &'a TimeSeriesMetadata,
+    key: ArrayKey,
+    grid: layout::Grid,
+    /// How many value rows the series contributes.
+    rows: usize,
+}
+
+impl<'a> Planned<'a> {
+    fn of(row: &'a TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Self> {
+        Ok(Self {
+            row,
+            key: array_key(row, data)?,
+            grid: layout::grid_of(data),
+            rows: row_count(row, data)?,
+        })
+    }
+
+    /// The same, off the catalog row alone -- possible exactly when the row
+    /// says everything the values would: a whole `SingleTimeSeries` whose
+    /// stored bytes are what gets hashed (a composite kind is re-encoded first,
+    /// see [`layout::canonical_hash`]). [`export_store`] holds the values to
+    /// this when it does read them.
+    fn from_catalog(row: &'a TimeSeriesMetadata) -> Option<Self> {
+        if row.time_series_type != TimeSeriesType::SingleTimeSeries
+            || layout::is_composite(row.element_type)
+        {
+            return None;
+        }
+        let (initial, resolution, length) = (row.initial_timestamp?, row.resolution?, row.length?);
+        Some(Self {
+            row,
+            key: ArrayKey {
+                data_hash: infrastore_core::hash_hex(&row.data_hash),
+                time_axis: layout::grid_axis(length, initial, resolution),
+            },
+            grid: layout::Grid {
+                initial_timestamp: Some(initial),
+                count: Some(length),
+            },
+            rows: length,
+        })
+    }
+}
+
+/// Hands the writer the values of the series at the given positions, in that
+/// one call per series, in whatever order suits the source. The writer asks for
+/// one series per distinct array, a partition at a time, so a source need never
+/// hold more than it chooses to read at once.
+type Values<'a> =
+    &'a mut dyn FnMut(&[usize], &mut dyn FnMut(usize, &TimeSeriesData) -> Result<()>) -> Result<()>;
+
 /// Write `series` into the SQLite database at `path`, creating it if absent,
 /// naming every table with `prefix`.
 ///
@@ -145,13 +206,31 @@ pub fn check_prefix(prefix: &str) -> Result<()> {
 /// any selected series is empty. A file this call created is removed again on
 /// failure while it still holds no tables. An empty selection touches nothing,
 /// not even to create the file.
+///
+/// For values already in memory; [`export_store`] is the same export streamed
+/// out of a store.
 pub fn write_sqlite(
     path: &Path,
     series: &[(TimeSeriesMetadata, TimeSeriesData)],
     prefix: &str,
 ) -> Result<Vec<WrittenTables>> {
     check_prefix(prefix)?;
-    refuse_empty(series)?;
+    let planned = series
+        .iter()
+        .map(|(row, data)| Planned::of(row, data))
+        .collect::<Result<Vec<_>>>()?;
+    write_planned(path, &planned, prefix, &mut |positions, each| {
+        positions.iter().try_for_each(|&i| each(i, &series[i].1))
+    })
+}
+
+fn write_planned(
+    path: &Path,
+    series: &[Planned<'_>],
+    prefix: &str,
+    values: Values<'_>,
+) -> Result<Vec<WrittenTables>> {
+    refuse_empty_counts(series.iter().map(|p| (p.row, p.rows)))?;
     // Nothing to write is nothing written: opening would create the file.
     if series.is_empty() {
         return Ok(Vec::new());
@@ -176,7 +255,7 @@ pub fn write_sqlite(
             return Err(e.into());
         }
     };
-    let result = write_all(&mut conn, series, prefix);
+    let result = write_all(&mut conn, series, prefix, values);
     // Another exporter may have opened the file this call created and committed
     // into it, so remove it only while it still holds no schema at all.
     // ponytail: a commit landing between this check and the removal is lost;
@@ -197,10 +276,11 @@ pub fn write_sqlite(
 
 fn write_all(
     conn: &mut Connection,
-    series: &[(TimeSeriesMetadata, TimeSeriesData)],
+    series: &[Planned<'_>],
     prefix: &str,
+    values: Values<'_>,
 ) -> Result<Vec<WrittenTables>> {
-    let groups = plan(series)?;
+    let groups = plan_keys(series.iter().map(|p| (p.row, p.key.clone())));
     let bases = table_bases(groups.keys(), prefix);
 
     // IMMEDIATE so the name check and the writes see the same database.
@@ -219,35 +299,40 @@ fn write_all(
         let series_columns = layout::required_columns(ts_type, layout::ROLE_SERIES);
         tx.execute_batch(&format!(
             "CREATE TABLE {q_values} ({});
-             CREATE INDEX \"{base}{INDEX_SUFFIX}\" ON {q_values} ({}, {});
              CREATE TABLE {q_series} ({});",
             column_defs(&values_columns, &key.value_kind),
-            layout::DATA_HASH,
-            layout::TIME_AXIS,
             column_defs(&series_columns, &key.value_kind),
         ))?;
 
         let mut rows = 0usize;
         let mut insert = tx.prepare(&insert_sql(&values_table, &values_columns))?;
-        for (array, members) in arrays {
-            // Every series sharing a key has the same values at the same instants.
-            let (row, data) = &series[members[0]];
-            rows += insert_values(&mut insert, array, row, data, &key.value_kind)?;
-        }
+        // Every series sharing a key has the same values at the same instants,
+        // so the first stands for the array.
+        let firsts: Vec<usize> = arrays.values().map(|members| members[0]).collect();
+        values(&firsts, &mut |position, data| {
+            let one = &series[position];
+            rows += insert_values(&mut insert, &one.key, one.row, data, &key.value_kind)?;
+            Ok(())
+        })?;
         drop(insert);
+        // After the rows rather than before: a streamed export hands the arrays
+        // over in storage order, and keying an index one random hash at a time
+        // is far slower than sorting it once. The name was checked above.
+        tx.execute_batch(&format!(
+            "CREATE INDEX \"{base}{INDEX_SUFFIX}\" ON {q_values} ({}, {});",
+            layout::DATA_HASH,
+            layout::TIME_AXIS,
+        ))?;
 
         let mut insert = tx.prepare(&insert_sql(&series_table, &series_columns))?;
         let mut count = 0usize;
-        for (array, members) in arrays {
-            for index in members {
-                let (row, data) = &series[*index];
-                let mut cells = series_cells(array, row, data);
-                let params = series_columns
-                    .iter()
-                    .map(|c| cells.remove(c).expect("every required column has a cell"));
-                insert.execute(params_from_iter(params))?;
-                count += 1;
-            }
+        for position in arrays.values().flatten() {
+            let mut cells = series_cells(&series[*position]);
+            let params = series_columns
+                .iter()
+                .map(|c| cells.remove(c).expect("every required column has a cell"));
+            insert.execute(params_from_iter(params))?;
+            count += 1;
         }
         drop(insert);
 
@@ -417,12 +502,8 @@ fn insert_values(
 
 /// One series row, keyed by column name. Holds a cell for every column any
 /// type's series table has; the caller picks the ones its table carries.
-fn series_cells(
-    key: &ArrayKey,
-    row: &TimeSeriesMetadata,
-    data: &TimeSeriesData,
-) -> HashMap<&'static str, Value> {
-    let grid = layout::grid_of(data);
+fn series_cells(series: &Planned<'_>) -> HashMap<&'static str, Value> {
+    let Planned { row, key, grid, .. } = series;
     let count = grid.count.unwrap_or(0) as i64;
     let mut cells: HashMap<&'static str, Value> = HashMap::from([
         (layout::DATA_HASH, Value::Text(key.data_hash.clone())),
@@ -1011,4 +1092,278 @@ fn push_number(dtype: Dtype, n: Num, out: &mut Vec<u8>) -> Result<()> {
         },
     }
     Ok(())
+}
+
+/// How much one read of [`export_store`] asks the store for, by the catalog's
+/// own account of each series.
+///
+/// A read is transiently several times this: the backend fetches a span of
+/// columns, splits it, and hands each series its own copy.
+// ponytail: fixed rather than a parameter; make it one if a host with less
+// memory than a few of these needs to export.
+const READ_BUDGET_BYTES: usize = 16 << 20;
+
+/// How many reads go by before the store is asked to give back what they
+/// cached (see [`Store::release_read_caches`]). Not every read, because a
+/// packed dataset straddling two reads is then inflated twice.
+const READS_PER_RELEASE: usize = 4;
+
+/// An upper bound on a series' stored bytes from its catalog row: no dtype is
+/// wider than eight bytes.
+fn stored_bytes(row: &TimeSeriesMetadata) -> usize {
+    let per_step: usize = row.element_shape.iter().product();
+    row.length
+        .unwrap_or(1)
+        .max(1)
+        .saturating_mul(per_step.max(1))
+        .saturating_mul(8)
+}
+
+/// Read the series at `positions` of `metas` a budget's worth at a time,
+/// handing each to `each` and dropping it before the next read.
+///
+/// **In catalog-id order, not the order given.** Ids are issued in the order
+/// series were added, which is the order their arrays were packed into the
+/// file, so consecutive ids sit in the same few datasets -- and a dataset is
+/// inflated whole to read any column of it. Reading in any other order (the
+/// writer asks in array-key order, which is a hash's) would inflate every
+/// dataset for every read.
+fn read_in_chunks(
+    store: &Store,
+    metas: &[TimeSeriesMetadata],
+    ids: &[TimeSeriesId],
+    time_range: Option<TimeRange>,
+    positions: &[usize],
+    budget: usize,
+    each: &mut dyn FnMut(usize, &TimeSeriesData) -> Result<()>,
+) -> Result<()> {
+    let mut positions = positions.to_vec();
+    positions.sort_by_key(|&i| ids[i]);
+    let mut rest = positions.as_slice();
+    let mut reads = 0usize;
+    while !rest.is_empty() {
+        // Always at least one, however large it is.
+        let mut bytes = 0usize;
+        let take = rest
+            .iter()
+            .take_while(|&&i| {
+                bytes = bytes.saturating_add(stored_bytes(&metas[i]));
+                bytes <= budget
+            })
+            .count()
+            .max(1);
+        let (chunk, tail) = rest.split_at(take);
+        rest = tail;
+        let chunk_ids: Vec<TimeSeriesId> = chunk.iter().map(|&i| ids[i]).collect();
+        let datas = match time_range {
+            Some(range) => store.read_by_ids_range(&chunk_ids, range)?,
+            None => store.read_by_ids(&chunk_ids, ReadWindow::full())?,
+        };
+        if datas.len() != chunk.len() {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "a read of {} series returned {}",
+                chunk.len(),
+                datas.len()
+            )));
+        }
+        for (&position, data) in chunk.iter().zip(&datas) {
+            each(position, data)?;
+        }
+        reads += 1;
+        if reads.is_multiple_of(READS_PER_RELEASE) {
+            store.release_read_caches();
+        }
+    }
+    // What this pass cached is no use to whatever the caller does next.
+    store.release_read_caches();
+    Ok(())
+}
+
+/// Export the series `filter` selects from `store` into the SQLite database at
+/// `path` -- [`write_sqlite`] streamed out of a store, the call a binding and
+/// the CLI make.
+///
+/// `time_range` clips each series the way [`Store::read_by_ids_range`] does;
+/// `None` exports each whole.
+///
+/// **Memory is bounded by a read budget, not by the selection.** The tables are
+/// planned from what each series' key and grid are, which for a whole
+/// `SingleTimeSeries` of plain values the catalog row already says; anything
+/// else (an irregular axis, a forecast, a composite kind, a clipped series) is
+/// read a budget's worth at a time to learn them and dropped again. The values
+/// are then read once per **distinct array**, again a budget at a time, so a
+/// profile a thousand components share is read and written once. The store's
+/// read caches are released as it goes, since they would otherwise grow to
+/// most of the file.
+///
+/// Within a partition the arrays are therefore written in the order they are
+/// stored rather than in key order; the tables' index is what orders them.
+pub fn export_store(
+    store: &Store,
+    filter: ListFilter,
+    time_range: Option<TimeRange>,
+    path: &Path,
+    prefix: &str,
+) -> Result<Vec<WrittenTables>> {
+    // Before any read, so a bad prefix does not cost the selection.
+    check_prefix(prefix)?;
+    let metas = store.list_metadata(filter)?;
+    let ids: Vec<TimeSeriesId> = metas
+        .iter()
+        .map(|m| {
+            m.id.ok_or_else(|| unsupported(format!("row {:?} carries no catalog id", m.name)))
+        })
+        .collect::<Result<_>>()?;
+
+    let mut planned: Vec<Option<Planned<'_>>> = metas
+        .iter()
+        .map(|row| {
+            time_range
+                .is_none()
+                .then(|| Planned::from_catalog(row))
+                .flatten()
+        })
+        .collect();
+    // What the catalog planned is checked against the values when they are read.
+    let from_catalog: Vec<bool> = planned.iter().map(Option::is_some).collect();
+    let unread: Vec<usize> = (0..metas.len()).filter(|&i| !from_catalog[i]).collect();
+    let budget = READ_BUDGET_BYTES;
+    read_in_chunks(
+        store,
+        &metas,
+        &ids,
+        time_range,
+        &unread,
+        budget,
+        &mut |i, data| {
+            planned[i] = Some(Planned::of(&metas[i], data)?);
+            Ok(())
+        },
+    )?;
+    let planned: Vec<Planned<'_>> = planned
+        .into_iter()
+        .map(|p| p.expect("every position was planned from the catalog or read"))
+        .collect();
+
+    write_planned(path, &planned, prefix, &mut |positions, each| {
+        read_in_chunks(
+            store,
+            &metas,
+            &ids,
+            time_range,
+            positions,
+            budget,
+            &mut |i, data| {
+                if from_catalog[i] && array_key(&metas[i], data)? != planned[i].key {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "series '{}' (owner {}) reads back as a different array than its catalog \
+                     row describes",
+                        metas[i].name, metas[i].owner_id
+                    )));
+                }
+                each(i, data)
+            },
+        )
+    })
+}
+
+/// Add every series in the tables an export wrote to `path` under `prefix`,
+/// returning the ids `store` assigned, in the order read.
+///
+/// **One transaction across the whole database**, so a failure in any partition
+/// leaves the store as it was. (The CLI's `add --sqlite` commits per partition
+/// instead, because it can report the ones that landed; a returned id list
+/// cannot.) Ids are always assigned fresh -- the ones the tables recorded are
+/// not reused.
+pub fn import_store(
+    store: &mut Store,
+    path: &Path,
+    prefix: &str,
+    options: &ImportOptions,
+) -> Result<Vec<TimeSeriesId>> {
+    let partitions = sqlite_partitions(path, prefix)?;
+    store.begin_transaction()?;
+    let mut ids = Vec::new();
+    let read = partitions.iter().try_for_each(|partition| {
+        read_sqlite_partition_with(partition, options, &mut |one| {
+            ids.push(store.add(AddRequest {
+                owner_id: one.owner_id,
+                owner_type: one.owner_type,
+                owner_category: one.owner_category,
+                data: one.data,
+                features: one.features,
+            })?);
+            Ok(())
+        })
+        .map(|_| ())
+    });
+    match read {
+        Ok(()) => store.commit_transaction().map(|()| ids),
+        Err(e) => {
+            // The read's error is the one worth reporting.
+            let _ = store.rollback_transaction();
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use infrastore_core::{Features, OwnerCategory, SingleTimeSeries};
+
+    #[test]
+    fn a_chunked_read_visits_every_position_in_id_order_whatever_the_budget() {
+        let mut store = Store::create(None, true).unwrap();
+        let start = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        for owner in 0..5 {
+            // Distinct values, so a read handing back the wrong series shows.
+            let values = vec![f64::from(owner); 100];
+            let series = SingleTimeSeries::new(
+                start,
+                Duration::hours(1),
+                TypedArray::from_f64(vec![100], &values),
+                "load",
+            );
+            store
+                .add_time_series(
+                    i64::from(owner),
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(series),
+                    Features::new(),
+                )
+                .unwrap();
+        }
+        let metas = store.list_metadata(ListFilter::new()).unwrap();
+        let ids: Vec<TimeSeriesId> = metas.iter().map(|m| m.id.unwrap()).collect();
+        let positions = [4, 0, 3, 1, 2];
+        // Each series is 800 bytes by the catalog's account: budgets that fit
+        // none, one, two and all of them.
+        for budget in [0, 800, 1700, usize::MAX] {
+            let mut seen = Vec::new();
+            read_in_chunks(
+                &store,
+                &metas,
+                &ids,
+                None,
+                &positions,
+                budget,
+                &mut |i, data| {
+                    let TimeSeriesData::SingleTimeSeries(series) = data else {
+                        panic!("only SingleTimeSeries were stored");
+                    };
+                    assert_eq!(
+                        series.data.to_vec::<f64>().unwrap()[0],
+                        metas[i].owner_id as f64
+                    );
+                    seen.push(i);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(seen, [0, 1, 2, 3, 4], "budget {budget}");
+        }
+    }
 }

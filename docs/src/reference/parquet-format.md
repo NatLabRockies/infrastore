@@ -329,8 +329,16 @@ exactly what the layout saves, and a query engine that keeps it as a view pays n
 ## SQLite tables
 
 `export -f sqlite --db <FILE>` writes this layout into a SQLite database instead of files, and
-`add --sqlite <FILE>` reads it back. Same partitions, same columns, same array key and merge join;
-the container differs:
+`add --sqlite <FILE>` reads it back. The bindings write and read the same tables — `export_sqlite` /
+`import_sqlite` in Python, `export_sqlite` / `import_sqlite!` in Julia,
+`infrastore_store_export_sqlite` / `infrastore_store_import_sqlite` across the C ABI — with one
+difference on the way in: a binding's import is a single transaction across the whole database,
+where the CLI commits per partition. Every one of them streams the export: the tables are planned
+from the catalog, the values are read a bounded batch at a time and each distinct array once, and
+the store's read caches are released as it goes, so memory does not grow with the selection. The
+values table is therefore filled in storage order and its index built afterwards — the index, not
+insertion order, is what sorts it. (`export -f parquet` still reads its whole selection first.) Same
+partitions, same columns, same array key and merge join; the container differs:
 
 | Parquet                                   | SQLite                                                                        |
 | ----------------------------------------- | ----------------------------------------------------------------------------- |

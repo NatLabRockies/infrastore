@@ -27,13 +27,13 @@ Exported names (types first, then functions):
 `check_static_consistency`, `clear!`, `close!`, `commit_transaction!`, `compact!`,
 `copy_time_series!`, `count_array_references`, `count_components_with_attributes`,
 `count_parent_child_associations`, `count_supplemental_attribute_associations`,
-`count_supplemental_attributes`, `counts_by_type`,
+`count_supplemental_attributes`, `counts_by_type`, `export_sqlite`,
 `export_supplemental_attribute_associations_openapi`, `export_time_series_associations_openapi`,
 `flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
 `get_forecast_parameters`, `get_intervals`, `get_metadata_by_id`, `get_path`, `get_resolutions`,
 `has_any_time_series`, `has_for_owner`, `has_parent_child_association`,
-`has_supplemental_attribute_association`, `has_time_series`,
+`has_supplemental_attribute_association`, `has_time_series`, `import_sqlite!`,
 `import_supplemental_attribute_associations_openapi!`, `import_time_series_associations_openapi!`,
 `in_transaction`, `index_at`, `init_logging`, `is_empty`, `is_zoneless`, `list_children`,
 `list_components_with_attributes`, `list_metadata`, `list_metadata_by_ids`, `list_names`,
@@ -1378,6 +1378,31 @@ the array file's own stamp, so every later `open_store` behaves normally. It thr
 
 A bundle carrying `NonSequentialTimeSeries` still needs its `.sqlite`: those rows cannot be
 replayed, for the reason above.
+
+## SQLite tables
+
+The [normalized table layout](parquet-format.md#sqlite-tables) the CLI's `export -f sqlite` and
+`add --sqlite` exchange. (The Parquet container of the same layout is CLI-only, so the library does
+not link Arrow.)
+
+```julia
+export_sqlite(store, path; table_prefix="", time_range=nothing, filters...) -> Vector{NamedTuple}
+import_sqlite!(store, path; table_prefix="", skip_checksum=false) -> Vector{Int64}
+```
+
+`export_sqlite` takes the same filter keywords as `list_metadata` — none exports the whole store —
+and a `time_range` that clips each series as `read_by_ids`' does. The database is created if absent
+and tables are only ever added: a name already taken, or an empty series in the selection, throws
+before anything is written, and `table_prefix` lets several exports share one database. It returns
+one named tuple per partition written (`values_table`, `series_table`, `time_series_type`,
+`value_type`, `time_reference`, `arrays`, `series`, `rows`). The values are streamed — a bounded
+batch at a time, each distinct array once — so a store far larger than memory exports in a few
+hundred megabytes.
+
+`import_sqlite!` adds every series under `table_prefix` in one all-or-nothing transaction and
+returns the new ids in the order read. Ids are assigned fresh — the ones the tables recorded are not
+reused. Each array is checked against the `data_hash` its rows carry; `skip_checksum=true` waives
+that for values edited in place.
 
 ## Errors
 
