@@ -1732,13 +1732,15 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
  * `out_added` receives the number inserted and `out_ids` the catalog id of
  * each, in input order — the ids are the durable handles this write creates,
  * so returning only a count would leave a caller re-listing the table to find
- * what it just wrote. Either may be null to skip it.
+ * what it just wrote. Either may be null to skip it, except that `out_ids`
+ * needs `out_added`: the count is the only length the buffer has.
  *
  * # Safety
  *
  * `handle` must be a live read-write store handle and `associations_json` a valid, null-
  * terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
- * `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+ * `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer and
+ * requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER` otherwise); on
  * `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
  * release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
  * null there, which needs no release.
@@ -1919,7 +1921,8 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
  *
  * `handle` must be a live read-write store handle and `associations_json` a valid, null-
  * terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
- * `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+ * `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer and
+ * requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER` otherwise); on
  * `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
  * release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
  * null there, which needs no release.
@@ -2235,8 +2238,10 @@ int32_t infrastore_store_export_sqlite(const struct InfraStore *handle,
  *
  * `handle` must be a live read-write store handle, `path` a valid,
  * null-terminated UTF-8 string and `table_prefix` null or one. `out_added` and
- * `out_ids` must each be null or valid for writing one value; on success a
- * non-null `*out_ids` must be released exactly once with
+ * `out_ids` must each be null or valid for writing one value, and a non-null
+ * `out_ids` requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER`
+ * otherwise, with nothing imported), since the count is the only length the
+ * buffer has. On success a non-null `*out_ids` must be released exactly once with
  * `infrastore_buffer_free_i64(*out_ids, *out_added)`.
  */
 int32_t infrastore_store_import_sqlite(struct InfraStore *handle,

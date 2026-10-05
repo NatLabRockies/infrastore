@@ -4265,7 +4265,8 @@ unsafe fn assoc_rows_from_json<T: serde::de::DeserializeOwned>(
 /// # Safety
 ///
 /// Each of `out_added` and `out_ids` must be null or valid for writing one
-/// value of its type.
+/// value of its type. A caller must already have refused `out_ids` without
+/// `out_added`, which would hand back a buffer with no length to free it by.
 unsafe fn write_assigned_ids(ids: Vec<i64>, out_added: *mut u64, out_ids: *mut *mut i64) {
     let len = ids.len() as u64;
     if !out_added.is_null() {
@@ -4344,6 +4345,11 @@ unsafe fn assoc_add_many<T: serde::de::DeserializeOwned>(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
+    // The count is the only length the id buffer has, so ids without it
+    // could be neither read nor released. Refused before anything is written.
+    if !out_ids.is_null() {
+        require_nonnull!(out_added);
+    }
     let assocs: Vec<T> = ffi_try!(code unsafe { assoc_rows_from_json(associations_json) });
     let ids = ffi_try!(add(&mut store.inner, assocs));
     unsafe { write_assigned_ids(ids, out_added, out_ids) };
@@ -4460,13 +4466,15 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
 /// `out_added` receives the number inserted and `out_ids` the catalog id of
 /// each, in input order — the ids are the durable handles this write creates,
 /// so returning only a count would leave a caller re-listing the table to find
-/// what it just wrote. Either may be null to skip it.
+/// what it just wrote. Either may be null to skip it, except that `out_ids`
+/// needs `out_added`: the count is the only length the buffer has.
 ///
 /// # Safety
 ///
 /// `handle` must be a live read-write store handle and `associations_json` a valid, null-
 /// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
-/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer and
+/// requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER` otherwise); on
 /// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
 /// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
 /// null there, which needs no release.
@@ -4795,7 +4803,8 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
 ///
 /// `handle` must be a live read-write store handle and `associations_json` a valid, null-
 /// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
-/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
+/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer and
+/// requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER` otherwise); on
 /// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
 /// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
 /// null there, which needs no release.
@@ -5341,8 +5350,10 @@ pub unsafe extern "C" fn infrastore_store_export_sqlite(
 ///
 /// `handle` must be a live read-write store handle, `path` a valid,
 /// null-terminated UTF-8 string and `table_prefix` null or one. `out_added` and
-/// `out_ids` must each be null or valid for writing one value; on success a
-/// non-null `*out_ids` must be released exactly once with
+/// `out_ids` must each be null or valid for writing one value, and a non-null
+/// `out_ids` requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER`
+/// otherwise, with nothing imported), since the count is the only length the
+/// buffer has. On success a non-null `*out_ids` must be released exactly once with
 /// `infrastore_buffer_free_i64(*out_ids, *out_added)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_import_sqlite(
@@ -5355,6 +5366,11 @@ pub unsafe extern "C" fn infrastore_store_import_sqlite(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
+    // The count is the only length the id buffer has, so ids without it
+    // could be neither read nor released. Refused before anything is written.
+    if !out_ids.is_null() {
+        require_nonnull!(out_added);
+    }
     let path = ffi_try!(code unsafe { cstr_to_path(path, "path is null or not UTF-8") });
     let prefix =
         ffi_try!(code unsafe { cstr_to_optional_string(table_prefix) }).unwrap_or_default();
@@ -9631,6 +9647,22 @@ mod abi_tests {
             INFRASTORE_OK
         );
         let (mut added, mut ids) = (0u64, ptr::null_mut());
+        // Ids without a count could not be freed, so that is refused before
+        // anything is imported (the import below would otherwise be a duplicate).
+        assert_eq!(
+            unsafe {
+                infrastore_store_import_sqlite(
+                    target,
+                    db.as_ptr(),
+                    prefix.as_ptr(),
+                    false,
+                    ptr::null_mut(),
+                    &mut ids,
+                )
+            },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        assert!(ids.is_null());
         assert_eq!(
             unsafe {
                 infrastore_store_import_sqlite(
