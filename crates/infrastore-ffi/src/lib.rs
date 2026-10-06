@@ -4265,8 +4265,9 @@ unsafe fn assoc_rows_from_json<T: serde::de::DeserializeOwned>(
 /// # Safety
 ///
 /// Each of `out_added` and `out_ids` must be null or valid for writing one
-/// value of its type. A caller must already have refused `out_ids` without
-/// `out_added`, which would hand back a buffer with no length to free it by.
+/// value of its type. A caller whose count is not otherwise known to its own
+/// caller must already have refused `out_ids` without `out_added`, which would
+/// hand back a buffer with no length to free it by.
 unsafe fn write_assigned_ids(ids: Vec<i64>, out_added: *mut u64, out_ids: *mut *mut i64) {
     let len = ids.len() as u64;
     if !out_added.is_null() {
@@ -4345,11 +4346,9 @@ unsafe fn assoc_add_many<T: serde::de::DeserializeOwned>(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    // The count is the only length the id buffer has, so ids without it
-    // could be neither read nor released. Refused before anything is written.
-    if !out_ids.is_null() {
-        require_nonnull!(out_added);
-    }
+    // `out_ids` without `out_added` is allowed here: the write is
+    // all-or-nothing with one id per input row, so the caller already knows
+    // the buffer's length.
     let assocs: Vec<T> = ffi_try!(code unsafe { assoc_rows_from_json(associations_json) });
     let ids = ffi_try!(add(&mut store.inner, assocs));
     unsafe { write_assigned_ids(ids, out_added, out_ids) };
@@ -4466,18 +4465,19 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
 /// `out_added` receives the number inserted and `out_ids` the catalog id of
 /// each, in input order — the ids are the durable handles this write creates,
 /// so returning only a count would leave a caller re-listing the table to find
-/// what it just wrote. Either may be null to skip it, except that `out_ids`
-/// needs `out_added`: the count is the only length the buffer has.
+/// what it just wrote. Either may be null to skip it: the write is
+/// all-or-nothing with one id per input row, so the count is always the number
+/// of rows passed.
 ///
 /// # Safety
 ///
 /// `handle` must be a live read-write store handle and `associations_json` a valid, null-
 /// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
-/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer and
-/// requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER` otherwise); on
+/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
 /// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
-/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
-/// null there, which needs no release.
+/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. A caller that skipped
+/// `out_added` releases with the number of rows it passed, which is the same count. An
+/// empty batch writes null there, which needs no release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_associations(
     handle: *mut InfraStoreHandle,
@@ -4803,11 +4803,11 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
 ///
 /// `handle` must be a live read-write store handle and `associations_json` a valid, null-
 /// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
-/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer and
-/// requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER` otherwise); on
+/// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
 /// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
-/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
-/// null there, which needs no release.
+/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. A caller that skipped
+/// `out_added` releases with the number of rows it passed, which is the same count. An
+/// empty batch writes null there, which needs no release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
     handle: *mut InfraStoreHandle,
@@ -5354,7 +5354,8 @@ pub unsafe extern "C" fn infrastore_store_export_sqlite(
 /// `out_ids` must each be null or valid for writing one value, and a non-null
 /// `out_ids` requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER`
 /// otherwise, with nothing imported), since the count is the only length the
-/// buffer has. On success a non-null `*out_ids` must be released exactly once with
+/// buffer has -- unlike the bulk association adds, whose caller knows how many
+/// rows it passed. On success a non-null `*out_ids` must be released exactly once with
 /// `infrastore_buffer_free_i64(*out_ids, *out_added)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_import_sqlite(
@@ -7205,6 +7206,32 @@ mod abi_tests {
         let rows = rows.as_array().expect("a JSON array of rows");
         assert_eq!(rows.len(), 1, "expected one row named {name}: {json}");
         rows[0]["id"].as_i64().expect("a served row carries its id")
+    }
+
+    /// The bulk association adds hand back one id per input row, so a caller
+    /// may take the ids and skip the count: it frees with the count it passed.
+    #[test]
+    fn a_bulk_association_add_returns_ids_without_a_count() {
+        let store = abi_create_in_memory();
+        let attached = c"[{\"component_id\":1,\"component_type\":\"Generator\",\
+                          \"attribute_id\":7,\"attribute_type\":\"Outage\"}]";
+        let linked = c"[{\"parent_id\":1,\"parent_type\":\"Bus\",\
+                        \"child_id\":2,\"child_type\":\"Generator\"}]";
+        for (add, json) in [
+            (
+                infrastore_store_add_supplemental_attribute_associations
+                    as unsafe extern "C" fn(_, _, _, _) -> i32,
+                attached,
+            ),
+            (infrastore_store_add_parent_child_associations, linked),
+        ] {
+            let mut ids: *mut i64 = ptr::null_mut();
+            let rc = unsafe { add(store, json.as_ptr(), ptr::null_mut(), &mut ids) };
+            assert_eq!(rc, INFRASTORE_OK, "{}", last_error());
+            assert!(!ids.is_null());
+            unsafe { infrastore_buffer_free_i64(ids, 1) };
+        }
+        unsafe { infrastore_store_free(store) };
     }
 
     fn abi_create_in_memory() -> *mut InfraStoreHandle {

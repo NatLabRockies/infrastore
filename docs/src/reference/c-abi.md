@@ -939,8 +939,7 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
 int32_t infrastore_store_add_supplemental_attribute_associations(struct InfraStore *handle,
                                                          const char *associations_json,
                                                          uint64_t *out_added,   /* optional */
-                                                         int64_t **out_ids);    /* optional, needs
-                                                            out_added; owned,
+                                                         int64_t **out_ids);    /* optional; owned,
                                                             infrastore_buffer_free_i64 */
 
 /* Whether any attachment matches filter_json (NULL = any). */
@@ -1037,8 +1036,7 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
 int32_t infrastore_store_add_parent_child_associations(struct InfraStore *handle,
                                                const char *associations_json,
                                                uint64_t *out_added,   /* optional */
-                                               int64_t **out_ids);    /* optional, needs
-                                                  out_added; owned,
+                                               int64_t **out_ids);    /* optional; owned,
                                                   infrastore_buffer_free_i64 */
 
 /* Whether any edge matches filter_json (NULL = any). */
@@ -1210,7 +1208,8 @@ int32_t infrastore_store_export_sqlite(const struct InfraStore *handle,
    skip_checksum waives the data_hash check. *out_added and *out_ids (each when
    non-NULL) receive the count and the new ids; free the ids with
    infrastore_buffer_free_i64(*out_ids, *out_added). out_ids without out_added
-   is INFRASTORE_ERR_NULL_POINTER, since the count is the buffer's only length. */
+   is INFRASTORE_ERR_NULL_POINTER, since the count is the buffer's only length
+   (the bulk association adds allow it: their count is the rows passed in). */
 int32_t infrastore_store_import_sqlite(struct InfraStore *handle, const char *path,
                                        const char *table_prefix, bool skip_checksum,
                                        uint64_t *out_added, int64_t **out_ids);
