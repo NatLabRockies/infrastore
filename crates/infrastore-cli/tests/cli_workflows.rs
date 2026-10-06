@@ -4706,7 +4706,7 @@ fn sqlite_export_adds_tables_and_refuses_a_collision() {
     let conn = rusqlite::Connection::open(&db).unwrap();
     let names = |conn: &rusqlite::Connection| -> Vec<String> {
         let mut stmt = conn
-            .prepare("SELECT name FROM sqlite_master ORDER BY name")
+            .prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
             .unwrap();
         stmt.query_map([], |r| r.get(0))
             .unwrap()
@@ -4717,6 +4717,7 @@ fn sqlite_export_adds_tables_and_refuses_a_collision() {
     assert_eq!(
         before,
         [
+            "SingleTimeSeries_f64_utc_arrays",
             "SingleTimeSeries_f64_utc_series",
             "SingleTimeSeries_f64_utc_values",
             "SingleTimeSeries_f64_utc_values_key",
@@ -4737,7 +4738,7 @@ fn sqlite_export_adds_tables_and_refuses_a_collision() {
             .prepare(
                 "SELECT s.owner_id, v.timestamp, v.value
                  FROM SingleTimeSeries_f64_utc_series s
-                 JOIN SingleTimeSeries_f64_utc_values v USING (data_hash, time_axis)
+                 JOIN SingleTimeSeries_f64_utc_values v USING (array_id)
                  ORDER BY s.owner_id, v.timestamp",
             )
             .unwrap();
@@ -4922,10 +4923,11 @@ fn export_writes_one_file_pair_per_partition() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     files.sort();
-    // Two files sharing a stem, not one file per series.
+    // Three files sharing a stem, not one file per series.
     assert_eq!(
         files,
         vec![
+            "SingleTimeSeries.f64.utc.arrays.parquet".to_string(),
             "SingleTimeSeries.f64.utc.series.parquet".to_string(),
             "SingleTimeSeries.f64.utc.values.parquet".to_string(),
         ]
@@ -4941,16 +4943,20 @@ fn export_writes_one_file_pair_per_partition() {
             .map(|f| f.name().clone())
             .collect()
     };
-    // The values half is the array and the key that names it, and nothing about
+    // The values half is the array and the id that names it, and nothing about
     // who owns it -- which is what stops a shared profile being written once per
     // component.
     let values = columns("SingleTimeSeries.f64.utc.values.parquet");
-    assert_eq!(values, vec!["data_hash", "time_axis", "timestamp", "value"]);
-    // The series half is the catalog row, joined on the same pair.
+    assert_eq!(values, vec!["array_id", "timestamp", "value"]);
+    // The key that id stands for is spelled once per array, in a file of its own.
+    assert_eq!(
+        columns("SingleTimeSeries.f64.utc.arrays.parquet"),
+        vec!["id", "data_hash", "time_axis"]
+    );
+    // The series half is the catalog row, joined on the same id.
     let series = columns("SingleTimeSeries.f64.utc.series.parquet");
     for expected in [
-        "data_hash",
-        "time_axis",
+        "array_id",
         "id",
         "owner_id",
         "owner_type",
@@ -5019,16 +5025,13 @@ fn a_directory_import_commits_partition_by_partition() {
     // Sorted import order: `a_good` is committed before `b_bad` is opened.
     let batch = dir.path().join("batch");
     fs::create_dir(&batch).unwrap();
-    fs::copy(
-        out.join(format!("{stem}.values.parquet")),
-        batch.join("a_good.values.parquet"),
-    )
-    .unwrap();
-    fs::copy(
-        out.join(format!("{stem}.series.parquet")),
-        batch.join("a_good.series.parquet"),
-    )
-    .unwrap();
+    for role in ["values", "series", "arrays"] {
+        fs::copy(
+            out.join(format!("{stem}.{role}.parquet")),
+            batch.join(format!("a_good.{role}.parquet")),
+        )
+        .unwrap();
+    }
     fs::write(batch.join("b_bad.parquet"), b"this is not a parquet file").unwrap();
 
     let err = run_err(&dest, &["add", "--parquet", batch.to_str().unwrap()]);
@@ -5582,6 +5585,7 @@ fn a_dense_forecast_round_trips_through_its_own_partition() {
     assert_eq!(
         files,
         vec![
+            "Deterministic.f64.utc.arrays.parquet".to_string(),
             "Deterministic.f64.utc.series.parquet".to_string(),
             "Deterministic.f64.utc.values.parquet".to_string(),
         ]
@@ -5607,7 +5611,7 @@ fn a_dense_forecast_round_trips_through_its_own_partition() {
     let values = builder("Deterministic.f64.utc.values.parquet");
     assert_eq!(
         columns("Deterministic.f64.utc.values.parquet"),
-        vec!["data_hash", "time_axis", "timestamp", "issue_time", "value"]
+        vec!["array_id", "timestamp", "issue_time", "value"]
     );
     assert!(values.schema().fields().iter().all(|f| !f.is_nullable()));
     // The grid the coordinates belong to is the series half's, once per series.
@@ -5667,7 +5671,7 @@ fn a_whole_directory_of_partitions_re_imports() {
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
     assert!(report.contains("2 partitions"), "{report}");
-    assert_eq!(fs::read_dir(&out).unwrap().count(), 4, "two pairs");
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 6, "two partitions");
 
     // One `--parquet` pointing at the directory takes both partitions.
     run(&dest, &["add", "--parquet", out.to_str().unwrap()]);

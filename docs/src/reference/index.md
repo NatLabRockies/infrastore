@@ -6,7 +6,7 @@ the [Developer Guides](../guides/index.md); for concepts, the [Explanation](../e
 section.
 
 - [On-Disk File Format](./file-format.md) — The HDF5 layout and SQLite schema, byte for byte.
-- [Parquet Layout](./parquet-format.md) — The values/series file pairs `export -f parquet` writes
+- [Parquet Layout](./parquet-format.md) — The values/series/arrays files `export -f parquet` writes
   and `add --parquet` reads, and the same layout as SQLite tables (`-f sqlite`, `add --sqlite`).
 - [Element Types](./element-types.md) — What `element_type` means, the row layouts it names, and the
   conformance corpus every binding's codec is tested against.

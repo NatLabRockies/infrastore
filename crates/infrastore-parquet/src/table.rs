@@ -1,13 +1,15 @@
-//! A partition's two Arrow schemas and its footer. The Arrow-free half of the
+//! A partition's three Arrow schemas and its footer. The Arrow-free half of the
 //! layout -- the array key, the time axis, the column sets -- lives in
 //! [`infrastore_tabular::layout`] and is re-exported here.
 //!
 //! A partition is a **values** file holding every distinct array once, one row
-//! per value, and a **series** file holding one catalog row per series naming the
-//! array it reads. Both are keyed by `(data_hash, time_axis)` and sorted by it,
-//! which is what lets the import walk them as a merge join.
+//! per value, a **series** file holding one catalog row per series naming the
+//! array it reads, and an **arrays** file spelling each array's key
+//! `(data_hash, time_axis)` once under an integer `id`. The other two carry that
+//! id as `array_id` and are sorted by it, which is what lets the import walk
+//! them as a merge join.
 //!
-//! Every column in both is **required**, which is what the partitioning in
+//! Every column in all three is **required**, which is what the partitioning in
 //! [`crate::partition`] buys.
 
 use std::sync::Arc;
@@ -26,7 +28,10 @@ use crate::{Result, unsupported};
 /// version rather than by whichever column it happens to be missing.
 pub const FORMAT: &str = "infrastore.format";
 /// The value [`FORMAT`] carries.
-pub const FORMAT_V1: &str = "normalized_v1";
+///
+/// `normalized_v1` repeated the array key on every values and series row and
+/// had no arrays file; this build does not read it.
+pub const FORMAT_V2: &str = "normalized_v2";
 /// Footer key saying which half of a partition a file is.
 pub const ROLE: &str = "infrastore.role";
 /// Footer key asserting the property the import depends on: rows are contiguous
@@ -40,14 +45,14 @@ pub const ROWS_CONTIGUOUS: &str = "rows_contiguous_by_key";
 ///
 /// A million rows of a scalar `f64` array is 8 MB of values before compression,
 /// which is a comfortable read unit and small enough that row-group statistics on
-/// `data_hash` are worth consulting. The series file is small and needs no
+/// `array_id` are worth consulting. The series file is small and needs no
 /// policy: it has one row per series, not per value.
 pub const ROW_GROUP_TARGET: usize = 1_000_000;
 
 /// The footer keys that describe the **partition**, as opposed to the file.
 ///
-/// Both halves of a pair carry them and must agree: they are the same
-/// `PartitionKey` written twice, so a disagreement means the two files came from
+/// All three files of a partition carry them and must agree: they are the same
+/// `PartitionKey` written three times, so a disagreement means the two files came from
 /// different exports.
 pub const PARTITION_KEYS: [&str; 4] = [
     schema::TIME_SERIES_TYPE,
@@ -56,8 +61,8 @@ pub const PARTITION_KEYS: [&str; 4] = [
     schema::TIME_REFERENCE,
 ];
 
-/// The two Arrow schemas one partition writes, plus what the partition settled
-/// on.
+/// The three Arrow schemas one partition writes, plus what the partition
+/// settled on.
 pub struct PartitionSchema {
     pub key: PartitionKey,
     /// The width every composite row in this partition is padded to; `None` for
@@ -65,10 +70,11 @@ pub struct PartitionSchema {
     pub composite_width: Option<usize>,
     pub values: SchemaRef,
     pub series: SchemaRef,
+    pub arrays: SchemaRef,
 }
 
 impl PartitionSchema {
-    /// Build both schemas for `key`.
+    /// Build the schemas for `key`.
     ///
     /// `composite_width` must be the widest stored width among the partition's
     /// series, and is required exactly when the kind is composite.
@@ -79,11 +85,10 @@ impl PartitionSchema {
 
         // ---- values ----
         //
-        // The array key first, because that is what the rows are sorted by, then
+        // The array first, because that is what the rows are sorted by, then
         // the time columns, then the value. The file reads the way it is ordered.
         let mut values: Vec<Field> = vec![
-            Field::new(DATA_HASH, DataType::Utf8, false),
-            Field::new(TIME_AXIS, DataType::Utf8, false),
+            Field::new(ARRAY_ID, DataType::Int64, false),
             Field::new(TIMESTAMP, stamp.clone(), false),
         ];
         if ts_type.is_forecast() {
@@ -102,8 +107,7 @@ impl PartitionSchema {
 
         // ---- series ----
         let mut series: Vec<Field> = vec![
-            Field::new(DATA_HASH, DataType::Utf8, false),
-            Field::new(TIME_AXIS, DataType::Utf8, false),
+            Field::new(ARRAY_ID, DataType::Int64, false),
             Field::new(schema::ID, DataType::Int64, false),
             Field::new(schema::OWNER_ID, DataType::Int64, false),
         ];
@@ -156,6 +160,14 @@ impl PartitionSchema {
                 series,
                 footer(&key, composite_width, ROLE_SERIES),
             )),
+            arrays: Arc::new(Schema::new_with_metadata(
+                vec![
+                    Field::new(schema::ID, DataType::Int64, false),
+                    Field::new(DATA_HASH, DataType::Utf8, false),
+                    Field::new(TIME_AXIS, DataType::Utf8, false),
+                ],
+                footer(&key, composite_width, ROLE_ARRAYS),
+            )),
             key,
             composite_width,
         })
@@ -199,7 +211,7 @@ fn footer(
         (ValueKind::Composite(_), None) => vec![],
     };
     [
-        (FORMAT.to_string(), FORMAT_V1.to_string()),
+        (FORMAT.to_string(), FORMAT_V2.to_string()),
         (ROLE.to_string(), role.to_string()),
         (ROWS_CONTIGUOUS.to_string(), "true".to_string()),
         (
@@ -305,7 +317,11 @@ mod tests {
                 time_reference: Some(TimeReference::Utc),
             };
             let table = PartitionSchema::new(key, None).expect("the schemas should build");
-            for (role, schema) in [(ROLE_VALUES, &table.values), (ROLE_SERIES, &table.series)] {
+            for (role, schema) in [
+                (ROLE_VALUES, &table.values),
+                (ROLE_SERIES, &table.series),
+                (ROLE_ARRAYS, &table.arrays),
+            ] {
                 let written: Vec<&str> =
                     schema.fields().iter().map(|f| f.name().as_str()).collect();
                 assert_eq!(

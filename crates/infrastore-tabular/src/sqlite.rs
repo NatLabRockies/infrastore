@@ -2,10 +2,12 @@
 //!
 //! Same normalization, same partitions, same columns as the Parquet files: per
 //! `(time_series_type, value type, time_reference)` triple, a **values** table
-//! holding every distinct array once and a **series** table holding one catalog
-//! row per series, joined on the array key `(data_hash, time_axis)`. The column
-//! sets are [`layout::required_columns`], so the two containers cannot drift
-//! apart.
+//! holding every distinct array once, a **series** table holding one catalog
+//! row per series, and an **arrays** table spelling each array's key
+//! `(data_hash, time_axis)` once. The arrays table's `id` is its rowid, and the
+//! other two name an array by it (`array_id`) -- SQLite does not compress, so
+//! the key's text on every value row would dwarf the values. The column sets
+//! are [`layout::required_columns`], so the two containers cannot drift apart.
 //!
 //! What SQLite cannot say the way Arrow does:
 //!
@@ -20,8 +22,9 @@
 //!
 //! # Names
 //!
-//! A partition's tables are `<prefix><base>_values` and `<prefix><base>_series`,
-//! plus an index `<prefix><base>_values_key`. `<base>` is the Parquet stem with
+//! A partition's tables are `<prefix><base>_values`, `<prefix><base>_series`
+//! and `<prefix><base>_arrays`, plus an index `<prefix><base>_values_key` on
+//! the values table's `array_id`. `<base>` is the Parquet stem with
 //! everything outside `[A-Za-z0-9_]` mapped to `_`, so it always begins with the
 //! time-series type: `SingleTimeSeries_f64_utc`. That is what lets the import
 //! find exactly one export's tables: a pair belongs to prefix `P` when its name
@@ -50,7 +53,9 @@ use crate::export::{
     array_key, descriptor_row, per_step_shape, plan_keys, refuse_empty_counts, row_count,
     series_rows,
 };
-use crate::import::{ImportOptions, LaneValue, SeriesRow, SeriesSink, ValuesGroup, merge_join};
+use crate::import::{
+    ImportOptions, LaneValue, SeriesRow, SeriesSink, ValuesGroup, dangling, merge_join,
+};
 use crate::layout::{self, ArrayKey};
 use crate::partition::{PartitionKey, ValueKind};
 use crate::schema;
@@ -58,13 +63,15 @@ use crate::{Result, unsupported};
 
 const VALUES_SUFFIX: &str = "_values";
 const SERIES_SUFFIX: &str = "_series";
+const ARRAYS_SUFFIX: &str = "_arrays";
 const INDEX_SUFFIX: &str = "_values_key";
 
-/// One partition the export wrote: its two tables and what they hold.
+/// One partition the export wrote: its three tables and what they hold.
 #[derive(Debug, Clone)]
 pub struct WrittenTables {
     pub values_table: String,
     pub series_table: String,
+    pub arrays_table: String,
     pub time_series_type: TimeSeriesType,
     pub value_slug: String,
     pub reference: String,
@@ -73,11 +80,11 @@ pub struct WrittenTables {
     pub rows: usize,
 }
 
-/// One partition in a database: the shared name its two tables extend.
+/// One partition in a database: the shared name its three tables extend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlitePartition {
     pub db: PathBuf,
-    /// `<prefix><base>`, without the `_values` / `_series` suffix.
+    /// `<prefix><base>`, without the `_values` / `_series` / `_arrays` suffix.
     pub base: String,
 }
 
@@ -88,6 +95,10 @@ impl SqlitePartition {
 
     pub fn series_table(&self) -> String {
         format!("{}{SERIES_SUFFIX}", self.base)
+    }
+
+    pub fn arrays_table(&self) -> String {
+        format!("{}{ARRAYS_SUFFIX}", self.base)
     }
 
     /// What to call this partition in a message.
@@ -293,52 +304,75 @@ fn write_all(
         let ts_type = key.time_series_type;
         let values_table = format!("{base}{VALUES_SUFFIX}");
         let series_table = format!("{base}{SERIES_SUFFIX}");
-        let (q_values, q_series) = (quote_ident(&values_table), quote_ident(&series_table));
+        let arrays_table = format!("{base}{ARRAYS_SUFFIX}");
+        let (q_values, q_series, q_arrays) = (
+            quote_ident(&values_table),
+            quote_ident(&series_table),
+            quote_ident(&arrays_table),
+        );
 
         let values_columns = layout::required_columns(ts_type, layout::ROLE_VALUES);
         let series_columns = layout::required_columns(ts_type, layout::ROLE_SERIES);
+        let arrays_columns = layout::required_columns(ts_type, layout::ROLE_ARRAYS);
         tx.execute_batch(&format!(
-            "CREATE TABLE {q_values} ({});
+            "CREATE TABLE {q_arrays} ({}, UNIQUE ({}, {}));
+             CREATE TABLE {q_values} ({});
              CREATE TABLE {q_series} ({});",
-            column_defs(&values_columns, &key.value_kind),
-            column_defs(&series_columns, &key.value_kind),
+            column_defs(&arrays_columns, &key.value_kind, &q_arrays),
+            layout::DATA_HASH,
+            layout::TIME_AXIS,
+            column_defs(&values_columns, &key.value_kind, &q_arrays),
+            column_defs(&series_columns, &key.value_kind, &q_arrays),
         ))?;
+
+        // The arrays table first: ids in key order, from 1, so a re-run of the
+        // same export numbers its arrays the same way.
+        let mut insert = tx.prepare(&insert_sql(&arrays_table, &arrays_columns))?;
+        let mut array_ids = HashMap::with_capacity(arrays.len());
+        for (id, (array, members)) in (1i64..).zip(arrays) {
+            insert.execute((id, &array.data_hash, &array.time_axis))?;
+            // Every series sharing a key has the same values at the same
+            // instants, so the first stands for the array.
+            array_ids.insert(members[0], id);
+        }
+        drop(insert);
 
         let mut rows = 0usize;
         let mut insert = tx.prepare(&insert_sql(&values_table, &values_columns))?;
-        // Every series sharing a key has the same values at the same instants,
-        // so the first stands for the array.
         let firsts: Vec<usize> = arrays.values().map(|members| members[0]).collect();
         values(&firsts, &mut |position, data| {
             let one = &series[position];
-            rows += insert_values(&mut insert, &one.key, one.row, data, &key.value_kind)?;
+            let id = array_ids[&position];
+            rows += insert_values(&mut insert, id, one.row, data, &key.value_kind)?;
             Ok(())
         })?;
         drop(insert);
         // After the rows rather than before: a streamed export hands the arrays
-        // over in storage order, and keying an index one random hash at a time
-        // is far slower than sorting it once. The name was checked above.
+        // over in storage order, and keying an index one array at a time is far
+        // slower than sorting it once. The name was checked above.
         tx.execute_batch(&format!(
-            "CREATE INDEX \"{base}{INDEX_SUFFIX}\" ON {q_values} ({}, {});",
-            layout::DATA_HASH,
-            layout::TIME_AXIS,
+            "CREATE INDEX \"{base}{INDEX_SUFFIX}\" ON {q_values} ({});",
+            layout::ARRAY_ID,
         ))?;
 
         let mut insert = tx.prepare(&insert_sql(&series_table, &series_columns))?;
         let mut count = 0usize;
-        for position in arrays.values().flatten() {
-            let mut cells = series_cells(&series[*position]);
-            let params = series_columns
-                .iter()
-                .map(|c| cells.remove(c).expect("every required column has a cell"));
-            insert.execute(params_from_iter(params))?;
-            count += 1;
+        for (id, members) in (1i64..).zip(arrays.values()) {
+            for position in members {
+                let mut cells = series_cells(&series[*position], id);
+                let params = series_columns
+                    .iter()
+                    .map(|c| cells.remove(c).expect("every required column has a cell"));
+                insert.execute(params_from_iter(params))?;
+                count += 1;
+            }
         }
         drop(insert);
 
         written.push(WrittenTables {
             values_table,
             series_table,
+            arrays_table,
             time_series_type: ts_type,
             value_slug: key.value_kind.slug(),
             reference: layout::reference_literal(key.time_reference.as_ref()),
@@ -391,7 +425,9 @@ fn existing_names(conn: &Connection) -> Result<BTreeSet<String>> {
 fn refuse_collisions<'a>(conn: &Connection, bases: impl Iterator<Item = &'a String>) -> Result<()> {
     let existing = existing_names(conn)?;
     let clashes: Vec<String> = bases
-        .flat_map(|b| [VALUES_SUFFIX, INDEX_SUFFIX, SERIES_SUFFIX].map(|s| format!("{b}{s}")))
+        .flat_map(|b| {
+            [VALUES_SUFFIX, INDEX_SUFFIX, SERIES_SUFFIX, ARRAYS_SUFFIX].map(|s| format!("{b}{s}"))
+        })
         .filter(|name| existing.contains(&name.to_lowercase()))
         .collect();
     if clashes.is_empty() {
@@ -406,12 +442,16 @@ fn refuse_collisions<'a>(conn: &Connection, bases: impl Iterator<Item = &'a Stri
     )))
 }
 
-fn column_defs(columns: &[&str], kind: &ValueKind) -> String {
+/// `q_arrays` is the partition's arrays table, quoted, for `array_id` to
+/// reference.
+fn column_defs(columns: &[&str], kind: &ValueKind, q_arrays: &str) -> String {
     columns
         .iter()
         .map(|&c| match c {
             layout::VALUE => format!("{c} {}", value_affinity(kind)),
+            // The rowid, in the series table and the arrays table alike.
             schema::ID => format!("{c} INTEGER PRIMARY KEY"),
+            layout::ARRAY_ID => format!("{c} INTEGER NOT NULL REFERENCES {q_arrays} (id)"),
             _ => format!("{c} {} NOT NULL", column_affinity(c)),
         })
         .collect::<Vec<_>>()
@@ -420,7 +460,8 @@ fn column_defs(columns: &[&str], kind: &ValueKind) -> String {
 
 fn column_affinity(column: &str) -> &'static str {
     match column {
-        layout::TIMESTAMP
+        layout::ARRAY_ID
+        | layout::TIMESTAMP
         | layout::ISSUE_TIME
         | layout::SCENARIO
         | schema::OWNER_ID
@@ -453,7 +494,7 @@ fn insert_sql(table: &str, columns: &[&str]) -> String {
 /// Insert one array's value rows, returning how many.
 fn insert_values(
     insert: &mut rusqlite::Statement<'_>,
-    key: &ArrayKey,
+    array_id: i64,
     row: &TimeSeriesMetadata,
     data: &TimeSeriesData,
     kind: &ValueKind,
@@ -480,11 +521,7 @@ fn insert_values(
         } else {
             Value::Text(nest(cells, &shape).to_string())
         };
-        let mut params = vec![
-            Value::Text(key.data_hash.clone()),
-            Value::Text(key.time_axis.clone()),
-            Value::Integer(rows.target[k]),
-        ];
+        let mut params = vec![Value::Integer(array_id), Value::Integer(rows.target[k])];
         if !rows.issue.is_empty() {
             params.push(Value::Integer(rows.issue[k]));
         }
@@ -502,12 +539,11 @@ fn insert_values(
 
 /// One series row, keyed by column name. Holds a cell for every column any
 /// type's series table has; the caller picks the ones its table carries.
-fn series_cells(series: &Planned<'_>) -> HashMap<&'static str, Value> {
-    let Planned { row, key, grid, .. } = series;
+fn series_cells(series: &Planned<'_>, array_id: i64) -> HashMap<&'static str, Value> {
+    let Planned { row, grid, .. } = series;
     let count = grid.count.unwrap_or(0) as i64;
     let mut cells: HashMap<&'static str, Value> = HashMap::from([
-        (layout::DATA_HASH, Value::Text(key.data_hash.clone())),
-        (layout::TIME_AXIS, Value::Text(key.time_axis.clone())),
+        (layout::ARRAY_ID, Value::Integer(array_id)),
         (schema::ID, Value::Integer(row.id.map_or(0, |i| i.get()))),
         (schema::OWNER_ID, Value::Integer(row.owner_id)),
         (schema::LENGTH, Value::Integer(count)),
@@ -613,7 +649,7 @@ fn json_of(value: &Value) -> Json {
 /// A pair belongs to `prefix` when its name is the prefix, a time-series type
 /// name, `_`, and the rest; see the module docs. Finding none is an error, since
 /// importing nothing is almost always a wrong prefix or a wrong file. So is a
-/// values table with no series table beside it.
+/// values table without its series and arrays tables beside it.
 pub fn sqlite_partitions(path: &Path, prefix: &str) -> Result<Vec<SqlitePartition>> {
     check_prefix(prefix)?;
     let conn = open_readonly(path)?;
@@ -637,12 +673,14 @@ pub fn sqlite_partitions(path: &Path, prefix: &str) -> Result<Vec<SqlitePartitio
         if !is_ours {
             continue;
         }
-        if !lower.contains(&format!("{base}{SERIES_SUFFIX}").to_lowercase()) {
-            return Err(unsupported(format!(
-                "{} holds {table} but no {base}{SERIES_SUFFIX} beside it; a partition's two \
-                 tables come from one export",
-                path.display()
-            )));
+        for suffix in [SERIES_SUFFIX, ARRAYS_SUFFIX] {
+            if !lower.contains(&format!("{base}{suffix}").to_lowercase()) {
+                return Err(unsupported(format!(
+                    "{} holds {table} but no {base}{suffix} beside it; a partition's tables \
+                     come from one export",
+                    path.display()
+                )));
+            }
         }
         out.push(SqlitePartition {
             db: path.to_path_buf(),
@@ -665,8 +703,9 @@ pub fn sqlite_partitions(path: &Path, prefix: &str) -> Result<Vec<SqlitePartitio
 }
 
 /// Stream one partition's series into `sink`, returning how many were handed
-/// over. Both tables are read in array-key order and merge-joined, so peak
-/// memory is one array, never a partition.
+/// over. The values and series tables are each read through the arrays table,
+/// in array-key order, and merge-joined, so peak memory is one array, never a
+/// partition.
 pub fn read_sqlite_partition_with(
     partition: &SqlitePartition,
     options: &ImportOptions,
@@ -675,8 +714,13 @@ pub fn read_sqlite_partition_with(
     let conn = open_readonly(&partition.db)?;
     let values_table = partition.values_table();
     let series_table = partition.series_table();
+    let arrays_table = partition.arrays_table();
     // Discovery admits any name after `<prefix><type>_`, so quote what it found.
-    let (q_values, q_series) = (quote_ident(&values_table), quote_ident(&series_table));
+    let (q_values, q_series, q_arrays) = (
+        quote_ident(&values_table),
+        quote_ident(&series_table),
+        quote_ident(&arrays_table),
+    );
 
     // The partition's type and element type are constant across its series
     // table; they decide which columns to expect and how to decode `value`.
@@ -698,7 +742,7 @@ pub fn read_sqlite_partition_with(
                 return Ok(0);
             }
             return Err(unsupported(format!(
-                "{series_table} is empty but {values_table} is not; a partition's two tables \
+                "{series_table} is empty but {values_table} is not; a partition's tables \
                  come from one export"
             )));
         }
@@ -714,10 +758,37 @@ pub fn read_sqlite_partition_with(
     };
     let values_columns = check_columns(&conn, &values_table, ts_type, layout::ROLE_VALUES)?;
     let series_columns = check_columns(&conn, &series_table, ts_type, layout::ROLE_SERIES)?;
+    check_columns(&conn, &arrays_table, ts_type, layout::ROLE_ARRAYS)?;
     let dtype = ValueKind::of(element_type, &[]).leaf_dtype();
 
+    // An inner join drops a row whose `array_id` names nothing, so look for
+    // one first: either dangling side is an error, not a shorter import.
+    for (q_table, half) in [
+        (&q_values, layout::ROLE_VALUES),
+        (&q_series, layout::ROLE_SERIES),
+    ] {
+        let orphan: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT {id} FROM {q_table} WHERE {id} NOT IN (SELECT id FROM {q_arrays}) \
+                     LIMIT 1",
+                    id = layout::ARRAY_ID
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        if let Some(id) = orphan {
+            return Err(dangling(id, half));
+        }
+    }
+
     // ---- values ----
-    let mut select = vec![layout::DATA_HASH, layout::TIME_AXIS, layout::TIMESTAMP];
+    let mut select = vec!["a.data_hash", "a.time_axis", "v.timestamp"];
     let has_issue = values_columns.contains(layout::ISSUE_TIME);
     let lane = [layout::PERCENTILE, layout::SCENARIO]
         .into_iter()
@@ -727,12 +798,13 @@ pub fn read_sqlite_partition_with(
     }
     select.extend(lane);
     select.push(layout::VALUE);
+    // CROSS JOIN pins the order: the arrays table walked by its key (its
+    // UNIQUE index), each array's rows fetched through the values index.
     let mut values_stmt = conn.prepare(&format!(
-        "SELECT {} FROM {q_values} ORDER BY {}, {}, {}",
+        "SELECT {} FROM {q_arrays} AS a CROSS JOIN {q_values} AS v ON v.{} = a.id \
+         ORDER BY a.data_hash, a.time_axis, v.timestamp",
         select.join(", "),
-        layout::DATA_HASH,
-        layout::TIME_AXIS,
-        layout::TIMESTAMP,
+        layout::ARRAY_ID,
     ))?;
     let mut values_rows = values_stmt.query([])?;
     let mut held: Option<(ArrayKey, ValueRow)> = None;
@@ -788,27 +860,21 @@ pub fn read_sqlite_partition_with(
         schema::COMPONENT_FIELD,
         schema::APPLICATION_DATA,
     ];
-    let mut select: Vec<String> = [
-        layout::DATA_HASH,
-        layout::TIME_AXIS,
-        schema::ID,
-        schema::OWNER_ID,
-    ]
-    .map(String::from)
-    .to_vec();
+    let mut select: Vec<String> = ["a.data_hash", "a.time_axis", "s.id", "s.owner_id"]
+        .map(String::from)
+        .to_vec();
     select.extend(text_fields.iter().map(|c| {
         if series_columns.contains(*c) {
-            c.to_string()
+            format!("s.{c}")
         } else {
             "''".to_string()
         }
     }));
     let mut series_stmt = conn.prepare(&format!(
-        "SELECT {} FROM {q_series} ORDER BY {}, {}, {}",
+        "SELECT {} FROM {q_series} AS s JOIN {q_arrays} AS a ON a.id = s.{} \
+         ORDER BY a.data_hash, a.time_axis, s.id",
         select.join(", "),
-        layout::DATA_HASH,
-        layout::TIME_AXIS,
-        schema::ID,
+        layout::ARRAY_ID,
     ))?;
     let mut series_rows = series_stmt.query([])?;
     let mut held_row: Option<SeriesRow> = None;

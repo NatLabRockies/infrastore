@@ -1,6 +1,6 @@
-//! The normalized layout's Arrow-free core: the array key that joins a
-//! partition's two halves, the per-type time axis, the column sets each half
-//! carries, and the content hash a values group is keyed by.
+//! The normalized layout's Arrow-free core: the array key a partition's arrays
+//! table spells once, the per-type time axis, the column sets each of the three
+//! tables carries, and the content hash a values group is keyed by.
 //!
 //! Every writer of the layout — Parquet files, SQLite tables — builds its
 //! columns from [`required_columns`], so the formats cannot drift apart.
@@ -18,6 +18,8 @@ use crate::schema;
 pub const ROLE_VALUES: &str = "values";
 /// The series half.
 pub const ROLE_SERIES: &str = "series";
+/// The arrays table: one row per distinct array, spelling its key once.
+pub const ROLE_ARRAYS: &str = "arrays";
 
 /// Key columns.
 pub const TIMESTAMP: &str = "timestamp";
@@ -29,6 +31,11 @@ pub const PERCENTILE: &str = "percentile";
 pub const SCENARIO: &str = "scenario";
 /// The value.
 pub const VALUE: &str = "value";
+/// What a values or series row names its array by: the `id` of its row in the
+/// arrays table. An integer because it repeats on every value row, and the key
+/// it stands for is some hundred bytes of text. **Local to one export** — ids
+/// are assigned as the tables are written and mean nothing across two.
+pub const ARRAY_ID: &str = "array_id";
 /// Half the array key: the hex content hash of the array — see
 /// [`canonical_hash`]. Also a checksum on import.
 pub const DATA_HASH: &str = "data_hash";
@@ -37,6 +44,10 @@ pub const DATA_HASH: &str = "data_hash";
 pub const TIME_AXIS: &str = "time_axis";
 
 /// The identity of one stored array within a partition.
+///
+/// Written **once per array**, in the arrays table, beside the integer `id` the
+/// values and series rows carry instead ([`ARRAY_ID`]). A reader resolves the id
+/// back to this, so the join and the checksum still run on the key.
 ///
 /// **Both halves are needed.** `data_hash` covers the array bytes and not the
 /// time axis: the same 8760-value profile anchored on two different years is one
@@ -172,7 +183,7 @@ fn instant(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
 }
 
-/// Every column a file of this role and type must carry, in schema order.
+/// Every column a table of this role and type must carry, in schema order.
 ///
 /// The single source of truth for "the format promises every column is
 /// required": [`PartitionSchema::new`] builds these fields and the reader checks
@@ -183,8 +194,11 @@ fn instant(at: DateTime<Utc>) -> String {
 /// Only files carrying the [`FORMAT`] marker are held to it. A foreign file is
 /// allowed to carry almost nothing — that is what the inline options are for.
 pub fn required_columns(ts_type: TimeSeriesType, role: &str) -> Vec<&'static str> {
+    if role == ROLE_ARRAYS {
+        return vec![schema::ID, DATA_HASH, TIME_AXIS];
+    }
     if role == ROLE_VALUES {
-        let mut names = vec![DATA_HASH, TIME_AXIS, TIMESTAMP];
+        let mut names = vec![ARRAY_ID, TIMESTAMP];
         if ts_type.is_forecast() {
             names.push(ISSUE_TIME);
         }
@@ -197,8 +211,7 @@ pub fn required_columns(ts_type: TimeSeriesType, role: &str) -> Vec<&'static str
         return names;
     }
     let mut names = vec![
-        DATA_HASH,
-        TIME_AXIS,
+        ARRAY_ID,
         schema::ID,
         schema::OWNER_ID,
         schema::OWNER_TYPE,
@@ -241,7 +254,8 @@ pub fn reference_literal(reference: Option<&TimeReference>) -> String {
     )
 }
 
-/// The hex hash written in the `data_hash` column, and recomputed on import.
+/// The hex hash written in the arrays table's `data_hash` column, and
+/// recomputed on import.
 ///
 /// For every kind but the composite ones this is the catalog's own array hash:
 /// a round trip re-encodes the same bytes, so the two agree.

@@ -4631,8 +4631,8 @@ impl PyStore {
     /// exports in a few hundred megabytes.
     ///
     /// Returns one dict per partition written: `values_table`, `series_table`,
-    /// `time_series_type`, `value_type`, `time_reference`, `arrays`, `series`
-    /// and `rows`.
+    /// `arrays_table`, `time_series_type`, `value_type`, `time_reference`,
+    /// `arrays`, `series` and `rows`.
     #[pyo3(signature = (path, *, table_prefix="", time_range=None, owner_id=None, owner_category=None, owner_type=None, time_series_type=None, name=None, name_glob=None, component_field=None, zoneless=None, resolution=None, interval=None, initial_timestamp=None, length=None, features=None, features_exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn export_sqlite<'py>(
@@ -4687,6 +4687,7 @@ impl PyStore {
                 let d = PyDict::new(py);
                 d.set_item("values_table", t.values_table)?;
                 d.set_item("series_table", t.series_table)?;
+                d.set_item("arrays_table", t.arrays_table)?;
                 d.set_item("time_series_type", t.time_series_type.as_str())?;
                 d.set_item("value_type", t.value_slug)?;
                 d.set_item("time_reference", t.reference)?;

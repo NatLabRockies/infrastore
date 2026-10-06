@@ -2198,8 +2198,8 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(stru
  * than memory exports in a few hundred megabytes.
  *
  * `*out_json` receives a JSON array with one object per partition written:
- * `values_table`, `series_table`, `time_series_type`, `value_type`,
- * `time_reference`, `arrays`, `series` and `rows`.
+ * `values_table`, `series_table`, `arrays_table`, `time_series_type`,
+ * `value_type`, `time_reference`, `arrays`, `series` and `rows`.
  *
  * # Safety
  *

@@ -146,7 +146,7 @@ fn import(
 fn table_names(db: &Path) -> Vec<String> {
     let conn = rusqlite::Connection::open(db).unwrap();
     let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master ORDER BY name")
+        .prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
         .unwrap();
     stmt.query_map([], |r| r.get(0))
         .unwrap()
@@ -306,11 +306,13 @@ fn a_shared_profile_is_one_array_and_a_prefix_scopes_the_import() {
     assert_eq!(
         table_names(&db),
         [
+            "SingleTimeSeries_f64_utc_arrays",
             "SingleTimeSeries_f64_utc_series",
             "SingleTimeSeries_f64_utc_values",
             "SingleTimeSeries_f64_utc_values_key",
             "foo_series",
             "foo_values",
+            "run2_SingleTimeSeries_f64_utc_arrays",
             "run2_SingleTimeSeries_f64_utc_series",
             "run2_SingleTimeSeries_f64_utc_values",
             "run2_SingleTimeSeries_f64_utc_values_key",
@@ -353,6 +355,7 @@ fn a_discovered_table_name_needing_quotes_is_queried_safely() {
         .unwrap()
         .execute_batch(
             "CREATE TABLE \"SingleTimeSeries_a'b\"\"c_values\" (x);
+             CREATE TABLE \"SingleTimeSeries_a'b\"\"c_arrays\" (x);
              CREATE TABLE \"SingleTimeSeries_a'b\"\"c_series\" (time_series_type, element_type);
              INSERT INTO \"SingleTimeSeries_a'b\"\"c_series\" VALUES ('SingleTimeSeries', 'f64');",
         )
@@ -399,6 +402,58 @@ fn a_failed_export_into_a_new_file_leaves_no_file() {
     std::fs::write(&db, b"").expect("create an empty database");
     write_sqlite(&db, &series, "").unwrap_err();
     assert!(db.exists(), "a file this call did not create must survive");
+}
+
+#[test]
+fn the_array_key_is_spelled_once_and_named_by_rowid() {
+    let series = stored(vec![
+        hourly("a", &[1.0, 2.0]),
+        hourly("b", &[1.0, 2.0]),
+        hourly("c", &[3.0, 4.0]),
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("out.db");
+    write_sqlite(&db, &series, "").expect("export");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let columns = |table: &str| -> Vec<String> {
+        conn.prepare("SELECT name FROM pragma_table_info(?1)")
+            .unwrap()
+            .query_map([table], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        columns("SingleTimeSeries_f64_utc_arrays"),
+        ["id", "data_hash", "time_axis"]
+    );
+    assert_eq!(
+        columns("SingleTimeSeries_f64_utc_values"),
+        ["array_id", "timestamp", "value"]
+    );
+    assert!(!columns("SingleTimeSeries_f64_utc_series").contains(&"data_hash".to_string()));
+    // Two arrays for three series, each id its row's rowid.
+    let ids: Vec<(i64, i64)> = conn
+        .prepare("SELECT rowid, id FROM SingleTimeSeries_f64_utc_arrays ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(ids, [(1, 1), (2, 2)]);
+
+    // A values row naming an array the arrays table lacks is refused by the
+    // import, for a database written where the foreign key was not enforced.
+    conn.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO SingleTimeSeries_f64_utc_values VALUES (99, 0, 1.0);",
+    )
+    .unwrap();
+    drop(conn);
+    let partition = &sqlite_partitions(&db, "").unwrap()[0];
+    let err = read_sqlite_partition_with(partition, &ImportOptions::default(), &mut |_| Ok(()))
+        .unwrap_err();
+    assert!(err.to_string().contains("`array_id` 99"), "{err}");
 }
 
 #[test]

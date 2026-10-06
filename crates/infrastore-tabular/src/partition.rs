@@ -5,7 +5,7 @@
 //! columns** (a forecast has an `issue_time`, a static series does not), the
 //! **Arrow type of `value`**, and the **zone of `timestamp`**. So a selection is
 //! partitioned by the triple `(time_series_type, value type, time_reference)`
-//! and one file *pair* is written per distinct triple. Every column in either
+//! and one set of files is written per distinct triple. Every column in either
 //! file is then required — there are no nullable columns anywhere in this
 //! format.
 //!
@@ -148,8 +148,9 @@ impl PartitionKey {
     /// `<type>.<value-slug>.<reference-slug>` — the **stem** the partition's two
     /// files share.
     ///
-    /// A partition is two files, `<stem>.values.parquet` and
-    /// `<stem>.series.parquet`, and sharing a stem is how the import pairs them.
+    /// A partition is three files, `<stem>.values.parquet`,
+    /// `<stem>.series.parquet` and `<stem>.arrays.parquet`, and sharing a stem
+    /// is how the import groups them.
     ///
     /// A **convenience, not the truth**: the slug function is one-way (two zone
     /// names differing only in a character the slug flattens produce the same
@@ -169,6 +170,8 @@ impl PartitionKey {
 pub const VALUES_SUFFIX: &str = ".values.parquet";
 /// The suffix of the file holding one catalog row per series.
 pub const SERIES_SUFFIX: &str = ".series.parquet";
+/// The suffix of the file spelling each distinct array's key once.
+pub const ARRAYS_SUFFIX: &str = ".arrays.parquet";
 
 /// `<stem>.values.parquet`.
 pub fn values_name(stem: &str) -> String {
@@ -180,14 +183,20 @@ pub fn series_name(stem: &str) -> String {
     format!("{stem}{SERIES_SUFFIX}")
 }
 
-/// The stem a partition file belongs to, whichever half it is.
+/// `<stem>.arrays.parquet`.
+pub fn arrays_name(stem: &str) -> String {
+    format!("{stem}{ARRAYS_SUFFIX}")
+}
+
+/// The stem a partition file belongs to, whichever of the three it is.
 ///
-/// `None` for a `.parquet` file that is neither half — a foreign file, which the
+/// `None` for a `.parquet` file that is none of them — a foreign file, which the
 /// import reads as a values file with no series file beside it.
 pub fn stem_of(file_name: &str) -> Option<&str> {
     file_name
         .strip_suffix(VALUES_SUFFIX)
         .or_else(|| file_name.strip_suffix(SERIES_SUFFIX))
+        .or_else(|| file_name.strip_suffix(ARRAYS_SUFFIX))
 }
 
 /// The filename fragment for a time reference.
@@ -264,7 +273,7 @@ pub fn sanitize(fragment: &str) -> String {
 ///
 /// [`sanitize`] is many-to-one — the zones `a/b` and `a_b` both flatten to `a_b`
 /// — so two partitions really can want one stem, and the second would silently
-/// overwrite the first's two files. Collisions get a numeric suffix, in the
+/// overwrite the first's files. Collisions get a numeric suffix, in the
 /// keys' own sort order so a re-run of the same export produces the same names.
 pub fn disambiguate(keys: &[PartitionKey]) -> BTreeMap<PartitionKey, String> {
     let mut sorted: Vec<&PartitionKey> = keys.iter().collect();

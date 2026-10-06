@@ -22,6 +22,7 @@ def test_round_trip(source, tmp_path):
     db = str(tmp_path / "out.db")
     written = source.export_sqlite(db, table_prefix="run1_")
     assert [p["values_table"] for p in written] == ["run1_SingleTimeSeries_f64_utc_values"]
+    assert written[0]["arrays_table"] == "run1_SingleTimeSeries_f64_utc_arrays"
     # Both series hold the same values, so the partition holds one array.
     assert (written[0]["series"], written[0]["arrays"], written[0]["rows"]) == (2, 1, 24)
 

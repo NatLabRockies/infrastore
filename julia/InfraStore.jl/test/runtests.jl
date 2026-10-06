@@ -5729,6 +5729,7 @@ end
     )
     @test length(written) == 1
     @test startswith(written[1].values_table, "run1_SingleTimeSeries_")
+    @test endswith(written[1].arrays_table, "_arrays")
     @test (written[1].series, written[1].arrays, written[1].rows) == (1, 1, 2)
     # Tables are only added: the same names a second time are refused.
     @test_throws InfraStore.InvalidParameterError export_sqlite(

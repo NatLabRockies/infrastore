@@ -256,8 +256,8 @@ the grids a store holds (`list --length 24`) and retire a stray cohort without n
 `export` is the bulk read-direction inverse of `add`: every series the selector matches is written
 to its own CSV or JSON file under `--dir` (or to stdout when exactly one matches), optionally sliced
 with `--time-range`; `-f parquet` instead writes
-[one file pair per partition](#hand-it-to-something-else-parquet), and `-f sqlite` the same layout
-as [tables in a SQLite database](#or-into-a-sqlite-database). Setting `INFRASTORE_STORE` in the
+[three files per partition](#hand-it-to-something-else-parquet), and `-f sqlite` the same layout as
+[tables in a SQLite database](#or-into-a-sqlite-database). Setting `INFRASTORE_STORE` in the
 environment stands in for `--store`, every destructive command except `compact` accepts `--dry-run`
 to preview its effect, and the global `-y`/`--yes` answers every confirmation prompt so a script
 does not have to know which commands ask:
@@ -354,19 +354,22 @@ infrastore --store other.h5 add --parquet parquet/
 ```
 
 What comes out is a handful of **partitions**, not a file per series -- a store with thousands of
-series would otherwise become thousands of files. Each partition is a **pair**:
+series would otherwise become thousands of files. Each partition is **three files**:
 
 ```text
 parquet/
   SingleTimeSeries.f64.utc.values.parquet            every distinct array once, one row per value
   SingleTimeSeries.f64.utc.series.parquet            one catalog row per series
+  SingleTimeSeries.f64.utc.arrays.parquet            one row per distinct array: its id and key
   SingleTimeSeries.f64.America_Denver.values.parquet
   SingleTimeSeries.f64.America_Denver.series.parquet
+  SingleTimeSeries.f64.America_Denver.arrays.parquet
   Deterministic.f64.utc.values.parquet
   Deterministic.f64.utc.series.parquet
+  Deterministic.f64.utc.arrays.parquet
 ```
 
-One pair per `(type, value type, time reference)` triple, because those three cannot vary inside one
+One set per `(type, value type, time reference)` triple, because those three cannot vary inside one
 table without nullable or ill-typed columns -- a forecast has an `issue_time` and a static series
 does not, and a table has one Arrow type per column. The payoff is that **every column is
 required**, which is worth more to whoever queries the files than the files it costs.
@@ -374,13 +377,15 @@ required**, which is worth more to whoever queries the files than the files it c
 The split is the other half of it. The store is content-addressed, so a thousand components sharing
 one profile hold **one** array; writing the catalog row beside every value would write that profile
 a thousand times, and Parquet's compression does not find repeats across pages. So the values file
-holds each array once, keyed by the pair `(data_hash, time_axis)`, and the series file carries that
-same pair beside each catalog row. They join on it.
+holds each array once, and the series file names the array beside each catalog row. Both do it with
+an integer `array_id`; the arrays file spells out what each id stands for — the pair
+`(data_hash, time_axis)` — once per array, rather than on every value row. The values and series
+files join on `array_id`.
 
 `add --parquet` takes a file, a whole directory, or a partition stem, and commits one transaction
-per partition, so a partition that fails leaves the ones already committed alone. A pair `export`
-wrote re-adds with no other flag; a foreign file -- one from a dataframe, or a values file whose
-partner was not copied -- carries less, and is told what it is missing:
+per partition, so a partition that fails leaves the ones already committed alone. A partition
+`export` wrote re-adds with no other flag; a foreign file -- one from a dataframe, or a values file
+whose partner was not copied -- carries less, and is told what it is missing:
 
 ```sh
 infrastore --store demo.h5 add --parquet from_pandas.parquet \
@@ -410,7 +415,7 @@ same join, on the pair that keys both halves:
 ```sql
 SELECT s.name, s.owner_id, s.units, max(v.value) AS peak
 FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
-JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (array_id)
 GROUP BY s.name, s.owner_id, s.units;
 ```
 
@@ -420,7 +425,7 @@ Write it once as a view and nothing after has to think about it:
 CREATE VIEW load AS
 SELECT s.*, v.timestamp, v.value
 FROM 'parquet/SingleTimeSeries.f64.America_Denver.values.parquet' v
-JOIN 'parquet/SingleTimeSeries.f64.America_Denver.series.parquet' s USING (data_hash, time_axis);
+JOIN 'parquet/SingleTimeSeries.f64.America_Denver.series.parquet' s USING (array_id);
 
 -- One component's day, in its own spelling -- the timestamp column is zoned.
 SELECT timestamp, value FROM load
@@ -436,7 +441,7 @@ A forecast joins the same way, and its window is a column of the values half:
 ```sql
 SELECT v.issue_time, count(*) AS steps, max(v.value) AS peak
 FROM 'parquet/Deterministic.f64.utc.values.parquet' v
-JOIN 'parquet/Deterministic.f64.utc.series.parquet' s USING (data_hash, time_axis)
+JOIN 'parquet/Deterministic.f64.utc.series.parquet' s USING (array_id)
 WHERE s.name = 'load_det'
 GROUP BY v.issue_time
 ORDER BY v.issue_time;
@@ -456,7 +461,7 @@ ATTACH 'demo.h5.sqlite' AS catalog (TYPE sqlite);
 -- Two joins: the array key pairs the halves, then `id` reaches the catalog.
 SELECT s.name, s.owner_id, max(v.value) AS peak, c.timestamps_hash
 FROM 'parquet/SingleTimeSeries.f64.utc.values.parquet' v
-JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (data_hash, time_axis)
+JOIN 'parquet/SingleTimeSeries.f64.utc.series.parquet' s USING (array_id)
 JOIN catalog.time_series_readable AS c ON c.id = s.id
 GROUP BY s.name, s.owner_id, c.timestamps_hash;
 ```
@@ -478,18 +483,18 @@ infrastore --store scenario2.h5 -f sqlite export --db results.db --table-prefix 
 infrastore --store other.h5 add --sqlite results.db --table-prefix s2_
 ```
 
-Each partition becomes `<prefix><base>_values` and `<prefix><base>_series`, named like the Parquet
-stems with the dots turned to underscores. The database is created if it is missing; if it exists,
-the export only adds tables, and a name already taken fails the whole export before anything is
-written — which is what `--table-prefix` is for when several exports share one file. `add --sqlite`
-loads exactly the tables under the prefix it is given (none, by default). Timestamps are `INTEGER`
-unix milliseconds and non-scalar values are JSON arrays; the
+Each partition becomes `<prefix><base>_values`, `<prefix><base>_series` and `<prefix><base>_arrays`,
+named like the Parquet stems with the dots turned to underscores. The database is created if it is
+missing; if it exists, the export only adds tables, and a name already taken fails the whole export
+before anything is written — which is what `--table-prefix` is for when several exports share one
+file. `add --sqlite` loads exactly the tables under the prefix it is given (none, by default).
+Timestamps are `INTEGER` unix milliseconds and non-scalar values are JSON arrays; the
 [layout reference](../reference/parquet-format.md#sqlite-tables) has the full list of differences.
 
 ```sql
 SELECT s.owner_id, datetime(v.timestamp / 1000, 'unixepoch') AS at, v.value
 FROM s2_SingleTimeSeries_f64_utc_values v
-JOIN s2_SingleTimeSeries_f64_utc_series s USING (data_hash, time_axis)
+JOIN s2_SingleTimeSeries_f64_utc_series s USING (array_id)
 WHERE s.name = 'load';
 ```
 

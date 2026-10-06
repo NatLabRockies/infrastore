@@ -412,7 +412,7 @@ enum Commands {
     ///
     /// The read-direction inverse of `add`. CSV and JSON write one file per
     /// matched series into --dir, or to stdout when the selector matches
-    /// exactly one series; Parquet writes one values/series file pair per
+    /// exactly one series; Parquet writes one values/series/arrays file set per
     /// partition into --dir, which is then required. Both come back through
     /// `add`: CSV by detecting the layout from the header, Parquet via
     /// --parquet. SQLite writes the Parquet layout as tables into --db.

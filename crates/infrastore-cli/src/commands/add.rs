@@ -251,13 +251,13 @@ pub struct AddArgs {
     #[arg(long)]
     pub csv: Option<PathBuf>,
     /// Parquet partition to load, repeatable: a file, a directory, or a
-    /// partition stem. A pair written by `export -f parquet` is
+    /// partition stem. A partition written by `export -f parquet` is
     /// self-describing and needs no other flag; a foreign values file needs
     /// at least --owner-id and --owner-type.
     #[arg(long, value_name = "PATH")]
     pub parquet: Vec<PathBuf>,
     /// SQLite database written by `export -f sqlite` to load every partition
-    /// of. Self-describing, like a --parquet pair.
+    /// of. Self-describing, like a --parquet partition.
     #[arg(long, value_name = "DB")]
     pub sqlite: Option<PathBuf>,
     /// With --sqlite, load only the tables an export wrote under this prefix
@@ -788,8 +788,8 @@ fn parquet_partitions(paths: &[PathBuf]) -> Result<Vec<Partition>, String> {
 /// Resolve the flags and discover every file, before anything is read.
 ///
 /// A path may be a **file, a directory, or a partition stem**; a directory takes
-/// every partition in it, sorted, pairing each `.values.parquet` with the
-/// `.series.parquet` beside it. Discovery is separate from reading so that a
+/// every partition in it, sorted, grouping each `.values.parquet` with the
+/// `.series.parquet` and `.arrays.parquet` beside it. Discovery is separate from reading so that a
 /// malformed later partition is found while its predecessors are being
 /// committed, not before any of them is: each partition is its own transaction
 /// (see [`import_partition`]), and a directory import is all-or-nothing

@@ -22,7 +22,8 @@ values are streamed, a bounded batch at a time and each distinct array once, so
 a store far larger than memory exports in a few hundred megabytes.
 
 Returns one named tuple per partition written: `values_table`, `series_table`,
-`time_series_type`, `value_type`, `time_reference`, `arrays`, `series`, `rows`.
+`arrays_table`, `time_series_type`, `value_type`, `time_reference`, `arrays`,
+`series`, `rows`.
 """
 function export_sqlite(
     store::Store,
@@ -56,6 +57,7 @@ function export_sqlite(
         (
             values_table=String(r["values_table"]),
             series_table=String(r["series_table"]),
+            arrays_table=String(r["arrays_table"]),
             time_series_type=String(r["time_series_type"]),
             value_type=String(r["value_type"]),
             time_reference=String(r["time_reference"]),

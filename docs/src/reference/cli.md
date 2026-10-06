@@ -190,18 +190,20 @@ infrastore --store demo.h5 -f parquet export --name-glob 'load_*' --dir out/
 
 #### Parquet
 
-`-f parquet export --dir <DIR>` writes one **file pair** per `(type, value type, time reference)`
-partition: `<stem>.values.parquet` holds every distinct array once, one row per value, and
-`<stem>.series.parquet` holds one catalog row per series. Both carry the array key
-`(data_hash, time_axis)` and are sorted by it, so they join on it — which is what keeps a profile
-shared by a thousand components from being written a thousand times.
+`-f parquet export --dir <DIR>` writes **three files** per `(type, value type, time reference)`
+partition: `<stem>.values.parquet` holds every distinct array once, one row per value,
+`<stem>.series.parquet` holds one catalog row per series, and `<stem>.arrays.parquet` spells each
+array's key `(data_hash, time_axis)` once under an integer `id`. The first two carry that id as
+`array_id` and are sorted by it, so they join on it — which is what keeps a profile shared by a
+thousand components from being written a thousand times, and its key from being written on every
+value row.
 
 `add --parquet <PATH>` reads them back, from a file, a directory, or a partition stem
-(`out/SingleTimeSeries.f64.utc` names the pair). The import is a merge join over the two halves, one
-transaction per partition, and a dangling key on either side is an error — as is a pair whose
-footers disagree about the partition they describe, which is what half of one export beside half of
-another looks like. `--no-checksum` waives the `data_hash` comparison for values edited in a query
-engine.
+(`out/SingleTimeSeries.f64.utc` names the partition). The import is a merge join over the values and
+series files, one transaction per partition, and a dangling array on either side is an error — as is
+a partition whose footers disagree about the partition they describe, which is what half of one
+export beside half of another looks like. `--no-checksum` waives the `data_hash` comparison for
+values edited in a query engine.
 
 The inline flags split three ways: the owner, the name, the features and the five free-form
 descriptors are **overrides**; `--element-type`, `--element-shape`, `--resolution` and `--type` are
@@ -209,7 +211,7 @@ descriptors are **overrides**; `--element-type`, `--element-shape`, `--resolutio
 foreign file; and the grid flags (`--initial-timestamp`, `--interval`, `--horizon`, `--count`,
 `--percentile`, `--scenario-count`) and the CSV layout flags (`--layout`, `--owner-map`,
 `--owner-id-from`) are **refused**, because the values already carry the grid.
-[Parquet layout](parquet-format.md) is the format reference — both column sets, the array key,
+[Parquet layout](parquet-format.md) is the format reference — the three column sets, the array key,
 `time_axis` per type, footer keys, and the rules the import applies to a foreign file.
 
 Three limits on the export, all deliberate:
@@ -246,15 +248,16 @@ infrastore --store copy.h5 add --sqlite out.db --table-prefix run2_
 ```
 
 `-f sqlite export --db <FILE>` writes the Parquet layout as tables: per partition,
-`<prefix><base>_values` and `<prefix><base>_series` with the same columns, plus an index
-`<prefix><base>_values_key` on the array key. `<base>` is the Parquet stem with everything outside
-`[A-Za-z0-9_]` mapped to `_` (`SingleTimeSeries_f64_utc`), and `--table-prefix` is held to the same
-alphabet, so the tables need no quoting. A prefix must also not start with a digit or `sqlite_` (any
-case, which SQLite reserves), end in `_`, and contain no time-series type name as a `_`-separated
-segment, so no prefix's tables can be read as another's. The file is created if absent; an existing
-database keeps its own tables and gains these. If any name the export would create is already in the
-database, the export fails and writes nothing — it runs in one transaction either way. A prefix is
-how several exports share one database. Differences from the Parquet files:
+`<prefix><base>_values`, `<prefix><base>_series` and `<prefix><base>_arrays` with the same columns,
+plus an index `<prefix><base>_values_key` on `array_id`. The arrays table's `id` is its rowid.
+`<base>` is the Parquet stem with everything outside `[A-Za-z0-9_]` mapped to `_`
+(`SingleTimeSeries_f64_utc`), and `--table-prefix` is held to the same alphabet, so the tables need
+no quoting. A prefix must also not start with a digit or `sqlite_` (any case, which SQLite
+reserves), end in `_`, and contain no time-series type name as a `_`-separated segment, so no
+prefix's tables can be read as another's. The file is created if absent; an existing database keeps
+its own tables and gains these. If any name the export would create is already in the database, the
+export fails and writes nothing — it runs in one transaction either way. A prefix is how several
+exports share one database. Differences from the Parquet files:
 
 - Instants (`timestamp`, `issue_time`, `initial_timestamp`) are `INTEGER` unix milliseconds; the
   spelling is the series table's `time_reference` column.

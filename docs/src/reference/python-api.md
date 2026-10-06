@@ -1580,10 +1580,10 @@ def import_sqlite(
 and a `time_range` that clips each series as `read_by_ids_range` does. The database is created if
 absent and tables are only ever added: a name already taken, or an empty series in the selection,
 raises before anything is written, and `table_prefix` lets several exports share one database. It
-returns one dict per partition written (`values_table`, `series_table`, `time_series_type`,
-`value_type`, `time_reference`, `arrays`, `series`, `rows`). The values are streamed — a bounded
-batch at a time, each distinct array once — so a store far larger than memory exports in a few
-hundred megabytes.
+returns one dict per partition written (`values_table`, `series_table`, `arrays_table`,
+`time_series_type`, `value_type`, `time_reference`, `arrays`, `series`, `rows`). The values are
+streamed — a bounded batch at a time, each distinct array once — so a store far larger than memory
+exports in a few hundred megabytes.
 
 `import_sqlite` adds every series under `table_prefix` in one all-or-nothing transaction and returns
 the new ids in the order read. Ids are assigned fresh — the ones the tables recorded are not reused.

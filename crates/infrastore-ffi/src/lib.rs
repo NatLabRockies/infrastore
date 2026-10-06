@@ -5270,8 +5270,8 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
 /// than memory exports in a few hundred megabytes.
 ///
 /// `*out_json` receives a JSON array with one object per partition written:
-/// `values_table`, `series_table`, `time_series_type`, `value_type`,
-/// `time_reference`, `arrays`, `series` and `rows`.
+/// `values_table`, `series_table`, `arrays_table`, `time_series_type`,
+/// `value_type`, `time_reference`, `arrays`, `series` and `rows`.
 ///
 /// # Safety
 ///
@@ -5317,6 +5317,7 @@ pub unsafe extern "C" fn infrastore_store_export_sqlite(
             serde_json::json!({
                 "values_table": t.values_table,
                 "series_table": t.series_table,
+                "arrays_table": t.arrays_table,
                 "time_series_type": t.time_series_type.as_str(),
                 "value_type": t.value_slug,
                 "time_reference": t.reference,

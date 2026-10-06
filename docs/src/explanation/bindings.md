@@ -186,9 +186,10 @@ the CLI. The feature stays switchable (`--no-default-features --features vendore
 binary), and the line it draws is between the binary and the **libraries**: `infrastore-core`,
 `infrastore-py`, and `infrastore-ffi` never link Arrow, which `cargo tree --edges normal` on each is
 the check for. The CLI is the only surface that reads and writes Parquet _files_
-(`export -f parquet`, `add --parquet`): a **normalized, partitioned** layout of two files per
-partition — a values file holding each distinct array once and a series file holding the catalog
-rows that name it, joined on `(data_hash, time_axis)` — specified in the
+(`export -f parquet`, `add --parquet`): a **normalized, partitioned** layout of three files per
+partition — a values file holding each distinct array once, a series file holding the catalog rows
+that name it, and an arrays file spelling each array's key `(data_hash, time_axis)` once under the
+integer `array_id` the other two join on — specified in the
 [Parquet layout](../reference/parquet-format.md) reference. Python's `to_arrow()` / `from_arrow` are
 a different, in-memory thing — one two-column table per series, with the descriptors in the schema
 metadata rather than in columns — and are not a reader or writer for the CLI's files; a Python user
@@ -200,7 +201,7 @@ for a format their host languages already have readers for, and the gRPC server 
 files.
 
 **SQLite tables** carry the same layout (`export -f sqlite --db`, `add --sqlite`), one
-`_values`/`_series` table pair per partition, optionally under a `--table-prefix`. The
+`_values`/`_series`/`_arrays` table set per partition, optionally under a `--table-prefix`. The
 container-independent half of the layout lives in `infrastore-tabular`, which is Arrow-free and
 which `infrastore-parquet` builds on, so SQLite is not behind the `parquet` feature: the catalog
 already links SQLite. For the same reason it costs the libraries almost nothing, so the C ABI,

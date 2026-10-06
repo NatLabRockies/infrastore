@@ -19,9 +19,7 @@ use infrastore_core::{
     TypedArray, UnitSystem,
 };
 
-use crate::layout::{
-    self, ArrayKey, DATA_HASH, ISSUE_TIME, PERCENTILE, SCENARIO, TIME_AXIS, VALUE,
-};
+use crate::layout::{self, ARRAY_ID, ArrayKey, DATA_HASH, ISSUE_TIME, PERCENTILE, SCENARIO, VALUE};
 use crate::schema;
 use crate::{Result, unsupported};
 
@@ -136,8 +134,8 @@ pub type SeriesSink<'a> = &'a mut dyn FnMut(ImportedSeries) -> Result<()>;
 /// A values group no series row claims.
 fn unclaimed(key: &ArrayKey) -> infrastore_core::TimeSeriesError {
     unsupported(format!(
-        "the values file holds an array ({}) that no series row names; a partition's two \
-         halves come from one export and must describe the same arrays",
+        "the values file holds an array ({}) that no series row names; a partition's values \
+         and series come from one export and must describe the same arrays",
         short(key)
     ))
 }
@@ -145,8 +143,8 @@ fn unclaimed(key: &ArrayKey) -> infrastore_core::TimeSeriesError {
 /// A series row whose key names no values group.
 fn unbacked(key: &ArrayKey) -> infrastore_core::TimeSeriesError {
     unsupported(format!(
-        "a series row names an array ({}) the values file does not hold; a partition's two \
-         halves come from one export and must describe the same arrays",
+        "a series row names an array ({}) the values file does not hold; a partition's values \
+         and series come from one export and must describe the same arrays",
         short(key)
     ))
 }
@@ -154,8 +152,8 @@ fn unbacked(key: &ArrayKey) -> infrastore_core::TimeSeriesError {
 /// A key that comes back after another key's rows.
 pub fn reappeared(key: &ArrayKey, half: &str) -> infrastore_core::TimeSeriesError {
     unsupported(format!(
-        "the {half} file returns to array ({}) after another key's rows; both halves must be \
-         sorted by `{DATA_HASH}`, `{TIME_AXIS}`",
+        "the {half} file returns to array ({}) after another array's rows; both halves must be \
+         sorted by `{ARRAY_ID}`",
         short(key)
     ))
 }
@@ -1037,4 +1035,12 @@ fn canonicalize(data: &mut TimeSeriesData) -> Result<()> {
         TimeSeriesData::Scenarios(f) => f.data = shrunk,
     }
     Ok(())
+}
+
+/// An `array_id` no row of the arrays table carries.
+pub fn dangling(id: i64, half: &str) -> infrastore_core::TimeSeriesError {
+    unsupported(format!(
+        "a {half} row names `{ARRAY_ID}` {id}, which the arrays table does not hold; a \
+         partition's tables come from one export"
+    ))
 }

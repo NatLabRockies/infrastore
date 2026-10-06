@@ -123,12 +123,13 @@ Examples:
   infrastore --store demo.h5 -f parquet export --dir out/
   infrastore --store demo.h5 -f sqlite export --db out.db
 
--f parquet writes one <stem>.values.parquet / <stem>.series.parquet pair per
-(type, value type, time reference) partition into --dir, which must hold no
-.parquet files yet; `add --parquet <DIR>` reads them back.
+-f parquet writes <stem>.values.parquet, <stem>.series.parquet and
+<stem>.arrays.parquet per (type, value type, time reference) partition into
+--dir, which must hold no .parquet files yet; `add --parquet <DIR>` reads them
+back.
 
--f sqlite writes the same layout as <prefix><base>_values / _series tables
-into --db, creating the file if absent. A table name already in the database
+-f sqlite writes the same layout as <prefix><base>_values / _series / _arrays
+tables into --db, creating the file if absent. A table name already in the database
 fails the export before anything is written; --table-prefix lets several
 exports share one database. `add --sqlite <DB> [--table-prefix P]` reads them
 back.";

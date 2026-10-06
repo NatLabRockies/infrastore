@@ -1,15 +1,17 @@
 //! The normalized, partitioned table layout infrastore exports to, independent
 //! of the container that holds it.
 //!
-//! Per `(time_series_type, value type, time_reference)` partition, two tables:
-//! a **values** table holding every distinct array once, one row per value, and
-//! a **series** table holding one catalog row per series, joined on the array
-//! key `(data_hash, time_axis)`. Normalized because the store is
+//! Per `(time_series_type, value type, time_reference)` partition, three tables:
+//! a **values** table holding every distinct array once, one row per value, a
+//! **series** table holding one catalog row per series, and an **arrays** table
+//! spelling each array's key `(data_hash, time_axis)` once under an integer
+//! `id` — which is what the other two carry, as `array_id`, so the key's text is
+//! not repeated on every value row. Normalized because the store is
 //! content-addressed: a thousand components sharing one profile hold one array.
 //! See `docs/src/reference/parquet-format.md` for the full description.
 //!
-//! Two containers carry it: `infrastore-parquet` (two files per partition,
-//! behind the Arrow dependency tree) and [`sqlite`] (two tables per partition,
+//! Two containers carry it: `infrastore-parquet` (three files per partition,
+//! behind the Arrow dependency tree) and [`sqlite`] (three tables per partition,
 //! in this crate because SQLite is already linked by the core's catalog).
 //!
 //! Errors report through [`infrastore_core::TimeSeriesError`], as everywhere in

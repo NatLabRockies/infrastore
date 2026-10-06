@@ -128,7 +128,7 @@ pub fn run(
             output::write_raw(&content)?;
         }
         // Parquet is not a rendering of one series: the whole selection becomes
-        // a handful of partition file pairs, so it never walks the per-series
+        // a handful of partition files, so it never walks the per-series
         // loop below.
         Some(dir) if format.is_parquet() => {
             let pairs: Vec<(TimeSeriesMetadata, TimeSeriesData)> =
@@ -427,7 +427,7 @@ fn render_json(
     text.map(|s| s + "\n").map_err(|e| e.to_string())
 }
 
-/// Write the whole selection as partition file pairs, or explain that this
+/// Write the whole selection as partition files, or explain that this
 /// binary cannot.
 ///
 /// Two files per `(type, value type, time reference)` triple -- a values file
@@ -474,6 +474,7 @@ fn write_parquet(
                         "stem": p.stem,
                         "values": p.values_path.display().to_string(),
                         "series_file": p.series_path.display().to_string(),
+                        "arrays_file": p.arrays_path.display().to_string(),
                         "time_series_type": p.time_series_type.as_str(),
                         "value_type": p.value_slug,
                         "time_reference": p.reference,
@@ -531,6 +532,7 @@ fn write_sqlite(
                     .map(|t| json!({
                         "values_table": t.values_table,
                         "series_table": t.series_table,
+                        "arrays_table": t.arrays_table,
                         "time_series_type": t.time_series_type.as_str(),
                         "value_type": t.value_slug,
                         "time_reference": t.reference,
@@ -544,8 +546,8 @@ fn write_sqlite(
         || {
             for t in &written {
                 println!(
-                    "exported {} / {} ({} series over {} arrays, {} rows)",
-                    t.values_table, t.series_table, t.series, t.arrays, t.rows
+                    "exported {} / {} / {} ({} series over {} arrays, {} rows)",
+                    t.values_table, t.series_table, t.arrays_table, t.series, t.arrays, t.rows
                 );
             }
             println!(

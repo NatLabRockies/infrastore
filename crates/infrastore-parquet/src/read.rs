@@ -1,12 +1,15 @@
-//! Reading a partition's two files back, as a merge join.
+//! Reading a partition's files back, as a merge join.
 //!
-//! A partition is a **pair** sharing a stem: `<stem>.values.parquet` holds every
-//! distinct array once, one row per value, and `<stem>.series.parquet` holds one
-//! catalog row per series naming the array it reads. Both are sorted by the
-//! array key -- the pair `(data_hash, time_axis)` -- so the import walks them
-//! together: take the next values group, file every series row carrying that
-//! key, move on. Peak memory is one values group plus one row group of each
-//! file, never a partition.
+//! A partition is three files sharing a stem: `<stem>.values.parquet` holds
+//! every distinct array once, one row per value, `<stem>.series.parquet` holds
+//! one catalog row per series naming the array it reads, and
+//! `<stem>.arrays.parquet` spells each array's key -- the pair
+//! `(data_hash, time_axis)` -- once, under the integer `id` the other two carry
+//! as `array_id`. The arrays file is read whole (it has one row per distinct
+//! array); the other two are sorted by `array_id`, so the import walks them
+//! together: take the next values group, file every series row naming that
+//! array, move on. Peak memory is the arrays file, one values group and one row
+//! group of each file, never a partition.
 //!
 //! Either dangling side is an error. A series row whose key names no values
 //! group has no array to read; a values group no series row claims is an array
@@ -22,8 +25,9 @@
 //! with a `timestamp` and a `value` column. It carries no catalog rows, so the
 //! inline options supply what a series row would have.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
@@ -37,18 +41,22 @@ use infrastore_core::TypedArray;
 pub use infrastore_tabular::import::reference_from_arrow_zone;
 pub use infrastore_tabular::import::{ImportOptions, ImportedSeries, SeriesSink};
 use infrastore_tabular::import::{
-    LaneValue, SeriesRow, ValuesGroup, build, merge_join, reappeared,
+    LaneValue, SeriesRow, ValuesGroup, build, dangling, merge_join, reappeared,
 };
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use crate::partition;
 use crate::schema;
 use crate::table::{
-    self, ArrayKey, DATA_HASH, ISSUE_TIME, PERCENTILE, SCENARIO, TIME_AXIS, TIMESTAMP, VALUE,
+    self, ARRAY_ID, ArrayKey, DATA_HASH, ISSUE_TIME, PERCENTILE, SCENARIO, TIME_AXIS, TIMESTAMP,
+    VALUE,
 };
 use crate::{Result, arrow_err, parquet_err, unsupported};
 
-/// One partition on disk: its two halves, or a lone values file.
+/// One partition on disk: its values and series halves, or a lone values file.
+///
+/// The arrays file is not named here: it is `<stem>.arrays.parquet` beside the
+/// values file, always.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionFiles {
     /// The shared stem, or the whole file name for a foreign file.
@@ -134,6 +142,15 @@ pub fn partitions(path: &Path) -> Result<Vec<PartitionFiles>> {
         if name.ends_with(partition::SERIES_SUFFIX) {
             continue; // paired below, from its values half
         }
+        if let Some(stem) = name.strip_suffix(partition::ARRAYS_SUFFIX) {
+            if !path.join(partition::values_name(stem)).is_file() {
+                return Err(unsupported(format!(
+                    "{name} has no {} beside it: it names arrays that are not there",
+                    partition::values_name(stem)
+                )));
+            }
+            continue; // read with its values half
+        }
         out.push(one_file(&path.join(name))?);
     }
     if out.is_empty() {
@@ -151,8 +168,11 @@ fn one_file(path: &Path) -> Result<PartitionFiles> {
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| unsupported(format!("{} has no file name", path.display())))?;
-    if let Some(stem) = name.strip_suffix(partition::SERIES_SUFFIX) {
-        // Naming the series half is naming the partition, so read the pair.
+    if let Some(stem) = name
+        .strip_suffix(partition::SERIES_SUFFIX)
+        .or_else(|| name.strip_suffix(partition::ARRAYS_SUFFIX))
+    {
+        // Naming the series or arrays file is naming the partition.
         let values = path.with_file_name(partition::values_name(stem));
         if !values.is_file() {
             return Err(unsupported(format!(
@@ -160,10 +180,11 @@ fn one_file(path: &Path) -> Result<PartitionFiles> {
                 partition::values_name(stem)
             )));
         }
+        let series = path.with_file_name(partition::series_name(stem));
         return Ok(PartitionFiles {
             stem: stem.to_string(),
             values,
-            series: Some(path.to_path_buf()),
+            series: series.is_file().then_some(series),
         });
     }
     let stem = partition::stem_of(name).unwrap_or(name);
@@ -182,12 +203,36 @@ pub fn read_partition_with(
     options: &ImportOptions,
     sink: SeriesSink<'_>,
 ) -> Result<usize> {
+    let arrays_path = files
+        .values
+        .with_file_name(partition::arrays_name(&files.stem));
     let Some(series_path) = &files.series else {
-        return read_foreign_with(&files.values, options, sink);
+        return read_foreign_with(&files.values, &arrays_path, options, sink);
     };
-    let mut values = ValuesReader::open(&files.values)?;
-    let mut rows = SeriesReader::open(series_path)?;
-    check_pair(&values.footer, &rows.footer, files)?;
+    if !arrays_path.is_file() {
+        return Err(unsupported(format!(
+            "{} has no {} beside it: its rows name arrays by an id only that file resolves",
+            files.values.display(),
+            partition::arrays_name(&files.stem)
+        )));
+    }
+    let arrays = read_arrays(&arrays_path)?;
+    let mut values = ValuesReader::open(&files.values, Some(arrays.keys.clone()))?;
+    let mut rows = SeriesReader::open(series_path, arrays.keys.clone())?;
+    check_pair(
+        &values.footer,
+        &rows.footer,
+        &files.values,
+        series_path,
+        table::ROLE_SERIES,
+    )?;
+    check_pair(
+        &values.footer,
+        &arrays.footer,
+        &files.values,
+        &arrays_path,
+        table::ROLE_ARRAYS,
+    )?;
     let footer = values.footer.clone();
 
     merge_join(
@@ -200,10 +245,20 @@ pub fn read_partition_with(
 }
 
 /// Read a **foreign** values file: one with no series file beside it, and so no
-/// catalog rows at all. One series per distinct key if the key columns are
-/// there, one series in total if they are not.
-fn read_foreign_with(path: &Path, options: &ImportOptions, sink: SeriesSink<'_>) -> Result<usize> {
-    let mut values = ValuesReader::open(path)?;
+/// catalog rows at all. One series per distinct `array_id` if the column is
+/// there, one series in total if it is not. An arrays file beside it, if there
+/// is one, resolves each id to its key, so the checksum still runs.
+fn read_foreign_with(
+    path: &Path,
+    arrays_path: &Path,
+    options: &ImportOptions,
+    sink: SeriesSink<'_>,
+) -> Result<usize> {
+    let arrays = arrays_path
+        .is_file()
+        .then(|| read_arrays(arrays_path))
+        .transpose()?;
+    let mut values = ValuesReader::open(path, arrays.map(|a| a.keys))?;
     let footer = values.footer.clone();
     let mut filed = 0usize;
     while let Some(group) = values.next_group()? {
@@ -222,16 +277,18 @@ fn read_foreign_with(path: &Path, options: &ImportOptions, sink: SeriesSink<'_>)
 fn check_format(footer: &BTreeMap<String, String>, path: &Path) -> Result<()> {
     match footer.get(table::FORMAT) {
         None => Ok(()),
-        Some(v) if v == table::FORMAT_V1 => Ok(()),
+        Some(v) if v == table::FORMAT_V2 => Ok(()),
         Some(other) => Err(unsupported(format!(
-            "{} is {other}, which this build does not read (it reads {})",
+            "{} is {other}, which this build does not read (it reads {}); export it again \
+             with a build that matches",
             path.display(),
-            table::FORMAT_V1
+            table::FORMAT_V2
         ))),
     }
 }
 
-/// Refuse two halves that do not describe the same partition.
+/// Refuse two files that do not describe the same partition: the values file
+/// and one of the other two, whose role `expected_role` names.
 ///
 /// The merge join pairs by **file name**, and a name is easy to arrange by
 /// accident: copying one half of one export next to the other half of another
@@ -241,8 +298,8 @@ fn check_format(footer: &BTreeMap<String, String>, path: &Path) -> Result<()> {
 /// comes from the wrong export. A UTC values file paired with an `unspecified`
 /// series file changes a series' `time_reference` and says nothing.
 ///
-/// So the footers are compared first. Each half carries the whole
-/// `PartitionKey`, written twice by one export, plus the role it plays; a
+/// So the footers are compared first. Each file carries the whole
+/// `PartitionKey`, written by one export, plus the role it plays; a
 /// disagreement in either is refused naming the field and both files.
 ///
 /// Two **unmarked** files are left alone: a pair of foreign files that happen to
@@ -252,12 +309,13 @@ fn check_format(footer: &BTreeMap<String, String>, path: &Path) -> Result<()> {
 fn check_pair(
     values: &BTreeMap<String, String>,
     series: &BTreeMap<String, String>,
-    files: &PartitionFiles,
+    values_path: &Path,
+    series_path: &Path,
+    expected_role: &str,
 ) -> Result<()> {
-    let series_path = files.series.as_ref().expect("only called on a pair");
     let names = || {
         (
-            files.values.display().to_string(),
+            values_path.display().to_string(),
             series_path.display().to_string(),
         )
     };
@@ -271,14 +329,14 @@ fn check_pair(
             let (v, s) = names();
             let (with, without) = if marked { (v, s) } else { (s, v) };
             return Err(unsupported(format!(
-                "{with} is an infrastore partition file and {without} is not; a partition's two \
-                 halves are written together, so this pair was assembled by hand"
+                "{with} is an infrastore partition file and {without} is not; a partition's \
+                 files are written together, so this pair was assembled by hand"
             )));
         }
     }
     for (footer, expected, path) in [
-        (values, table::ROLE_VALUES, &files.values),
-        (series, table::ROLE_SERIES, series_path),
+        (values, table::ROLE_VALUES, values_path),
+        (series, expected_role, series_path),
     ] {
         let role = footer.get(table::ROLE).map(String::as_str);
         if role != Some(expected) {
@@ -359,7 +417,12 @@ fn check_columns(
 struct ValuesReader {
     reader: ParquetRecordBatchReader,
     footer: BTreeMap<String, String>,
+    /// What each `array_id` stands for; `None` for a foreign file with no arrays
+    /// file beside it.
+    arrays: Option<Rc<HashMap<i64, ArrayKey>>>,
     zone: Option<String>,
+    /// The `array_id` the open group's rows carry.
+    open_id: Option<i64>,
     open: Option<ValuesGroup>,
     ready: VecDeque<ValuesGroup>,
     seen: HashSet<ArrayKey>,
@@ -367,7 +430,7 @@ struct ValuesReader {
 }
 
 impl ValuesReader {
-    fn open(path: &Path) -> Result<Self> {
+    fn open(path: &Path, arrays: Option<Rc<HashMap<i64, ArrayKey>>>) -> Result<Self> {
         let file = std::fs::File::open(path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
         let footer: BTreeMap<String, String> = builder
@@ -381,7 +444,9 @@ impl ValuesReader {
         Ok(Self {
             reader: builder.build().map_err(parquet_err)?,
             footer,
+            arrays,
             zone: None,
+            open_id: None,
             open: None,
             ready: VecDeque::new(),
             seen: HashSet::new(),
@@ -416,8 +481,7 @@ impl ValuesReader {
             self.zone = arrow_zone(batch, TIMESTAMP)?;
         }
         // Absent for a foreign file, which is then one group with an empty key.
-        let hashes = text_column(batch, DATA_HASH)?;
-        let axes = text_column(batch, TIME_AXIS)?;
+        let ids = int_column(batch, ARRAY_ID)?;
         let stamps = read_timestamps(batch, TIMESTAMP)?;
         let issued = batch
             .column_by_name(ISSUE_TIME)
@@ -429,11 +493,21 @@ impl ValuesReader {
         let stride = values.dtype.size();
 
         for row in 0..batch.num_rows() {
-            let key = ArrayKey {
-                data_hash: cell(&hashes, row),
-                time_axis: cell(&axes, row),
-            };
-            if self.open.as_ref().is_none_or(|g| g.key != key) {
+            let id = ids.as_ref().map(|c| c[row]);
+            if self.open.is_none() || self.open_id != id {
+                let key = match (id, &self.arrays) {
+                    (Some(id), Some(arrays)) => arrays
+                        .get(&id)
+                        .cloned()
+                        .ok_or_else(|| dangling(id, table::ROLE_VALUES))?,
+                    // Nothing to resolve it against: the id still groups the
+                    // rows, and the empty hash is what skips the checksum.
+                    (id, _) => ArrayKey {
+                        data_hash: String::new(),
+                        time_axis: id.map(|id| id.to_string()).unwrap_or_default(),
+                    },
+                };
+                self.open_id = id;
                 if let Some(group) = self.open.take() {
                     self.ready.push_back(group);
                 }
@@ -479,6 +553,7 @@ struct SeriesReader {
     /// Kept rather than dropped after the version check: [`check_pair`] compares
     /// it against the values half's.
     footer: BTreeMap<String, String>,
+    arrays: Rc<HashMap<i64, ArrayKey>>,
     open: Vec<SeriesRow>,
     ready: VecDeque<Vec<SeriesRow>>,
     seen: HashSet<ArrayKey>,
@@ -486,7 +561,7 @@ struct SeriesReader {
 }
 
 impl SeriesReader {
-    fn open(path: &Path) -> Result<Self> {
+    fn open(path: &Path, arrays: Rc<HashMap<i64, ArrayKey>>) -> Result<Self> {
         let file = std::fs::File::open(path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
         let footer: BTreeMap<String, String> = builder
@@ -500,6 +575,7 @@ impl SeriesReader {
         Ok(Self {
             reader: builder.build().map_err(parquet_err)?,
             footer,
+            arrays,
             open: Vec::new(),
             ready: VecDeque::new(),
             seen: HashSet::new(),
@@ -519,7 +595,7 @@ impl SeriesReader {
                 None => self.done = true,
                 Some(batch) => {
                     let batch = batch.map_err(arrow_err)?;
-                    for row in read_series_rows(&batch)? {
+                    for row in read_series_rows(&batch, &self.arrays)? {
                         if self.open.first().is_none_or(|r| r.key != row.key) {
                             if !self.open.is_empty() {
                                 self.ready.push_back(std::mem::take(&mut self.open));
@@ -537,9 +613,16 @@ impl SeriesReader {
 }
 
 /// One batch of a series file as catalog rows.
-fn read_series_rows(batch: &RecordBatch) -> Result<Vec<SeriesRow>> {
-    let hashes = required_text(batch, DATA_HASH)?;
-    let axes = required_text(batch, TIME_AXIS)?;
+fn read_series_rows(
+    batch: &RecordBatch,
+    arrays: &HashMap<i64, ArrayKey>,
+) -> Result<Vec<SeriesRow>> {
+    let array_ids = int_column(batch, ARRAY_ID)?.ok_or_else(|| {
+        unsupported(format!(
+            "the series file has no `{ARRAY_ID}` column, which names the array every row is \
+             filed under"
+        ))
+    })?;
     let id = int_column(batch, schema::ID)?;
     let owner_id = int_column(batch, schema::OWNER_ID)?;
     let owner_type = text_column(batch, schema::OWNER_TYPE)?;
@@ -558,40 +641,91 @@ fn read_series_rows(batch: &RecordBatch) -> Result<Vec<SeriesRow>> {
     let component_field = text_column(batch, schema::COMPONENT_FIELD)?;
     let application_data = text_column(batch, schema::APPLICATION_DATA)?;
 
-    Ok((0..batch.num_rows())
-        .map(|i| SeriesRow {
-            key: ArrayKey {
-                data_hash: hashes[i].clone(),
-                time_axis: axes[i].clone(),
-            },
-            id: id.as_ref().map_or(0, |c| c[i]),
-            owner_id: owner_id.as_ref().map(|c| c[i]),
-            owner_type: cell(&owner_type, i),
-            owner_category: cell(&owner_category, i),
-            time_series_type: cell(&ts_type, i),
-            name: cell(&name, i),
-            resolution: cell(&resolution, i),
-            interval: cell(&interval, i),
-            horizon: cell(&horizon, i),
-            features: cell(&features, i),
-            element_type: cell(&element_type, i),
-            time_reference: cell(&time_reference, i),
-            units: cell(&units, i),
-            quantity_kind: cell(&quantity_kind, i),
-            unit_system: cell(&unit_system, i),
-            component_field: cell(&component_field, i),
-            application_data: cell(&application_data, i),
+    (0..batch.num_rows())
+        .map(|i| {
+            let key = arrays
+                .get(&array_ids[i])
+                .cloned()
+                .ok_or_else(|| dangling(array_ids[i], table::ROLE_SERIES))?;
+            Ok(SeriesRow {
+                key,
+                id: id.as_ref().map_or(0, |c| c[i]),
+                owner_id: owner_id.as_ref().map(|c| c[i]),
+                owner_type: cell(&owner_type, i),
+                owner_category: cell(&owner_category, i),
+                time_series_type: cell(&ts_type, i),
+                name: cell(&name, i),
+                resolution: cell(&resolution, i),
+                interval: cell(&interval, i),
+                horizon: cell(&horizon, i),
+                features: cell(&features, i),
+                element_type: cell(&element_type, i),
+                time_reference: cell(&time_reference, i),
+                units: cell(&units, i),
+                quantity_kind: cell(&quantity_kind, i),
+                unit_system: cell(&unit_system, i),
+                component_field: cell(&component_field, i),
+                application_data: cell(&application_data, i),
+            })
         })
-        .collect())
+        .collect()
 }
 
-/// A text column a series file cannot be without: half of the array key.
-fn required_text(batch: &RecordBatch, name: &str) -> Result<Vec<String>> {
-    text_column(batch, name)?.ok_or_else(|| {
+/// A partition's arrays file, whole: one row per distinct array, so even a very
+/// large partition's is small.
+struct Arrays {
+    footer: BTreeMap<String, String>,
+    keys: Rc<HashMap<i64, ArrayKey>>,
+}
+
+/// Read an arrays file, checking that `id` and the key it stands for ascend
+/// together. That is what makes the other two files, sorted by `array_id`,
+/// sorted by key as well -- the order the merge join walks them in.
+fn read_arrays(path: &Path) -> Result<Arrays> {
+    let file = std::fs::File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+    let footer: BTreeMap<String, String> = builder
+        .schema()
+        .metadata()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    check_format(&footer, path)?;
+    check_columns(builder.schema(), &footer, path, table::ROLE_ARRAYS)?;
+    let missing = |name: &str| {
         unsupported(format!(
-            "the series file has no `{name}` column, which is half the array key every row is \
-             filed under"
+            "{} has no `{name}` column; an arrays file is `{}`, `{DATA_HASH}`, `{TIME_AXIS}`",
+            path.display(),
+            schema::ID
         ))
+    };
+    let mut keys = HashMap::new();
+    let mut last: Option<(i64, ArrayKey)> = None;
+    for batch in builder.build().map_err(parquet_err)? {
+        let batch = batch.map_err(arrow_err)?;
+        let ids = int_column(&batch, schema::ID)?.ok_or_else(|| missing(schema::ID))?;
+        let hashes = text_column(&batch, DATA_HASH)?.ok_or_else(|| missing(DATA_HASH))?;
+        let axes = text_column(&batch, TIME_AXIS)?.ok_or_else(|| missing(TIME_AXIS))?;
+        for ((id, data_hash), time_axis) in ids.into_iter().zip(hashes).zip(axes) {
+            let key = ArrayKey {
+                data_hash,
+                time_axis,
+            };
+            if last.as_ref().is_some_and(|(i, k)| *i >= id || *k >= key) {
+                return Err(unsupported(format!(
+                    "{} is not sorted: `{}` and (`{DATA_HASH}`, `{TIME_AXIS}`) must both \
+                     strictly ascend, row by row",
+                    path.display(),
+                    schema::ID
+                )));
+            }
+            keys.insert(id, key.clone());
+            last = Some((id, key));
+        }
+    }
+    Ok(Arrays {
+        footer,
+        keys: Rc::new(keys),
     })
 }
 
