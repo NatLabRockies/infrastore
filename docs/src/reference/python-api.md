@@ -1590,6 +1590,10 @@ A `DeterministicSingleTimeSeries` is left out unless `include_derived=True`: it 
 `SingleTimeSeries`' values, flattened, and `import_sqlite` refuses a database holding one. Naming
 the type in the filter without the flag raises rather than exporting nothing.
 
+The partition tables' names depend on the data, so each export also keeps three views with fixed
+names — `<prefix>all_values`, `<prefix>all_series`, `<prefix>all_arrays` — spanning every partition
+under the prefix; see [fixed-name views](parquet-format.md#fixed-name-views).
+
 `import_sqlite` adds every series under `table_prefix` in one all-or-nothing transaction and returns
 the new ids in the order read. Ids are assigned fresh — the ones the tables recorded are not reused.
 Each array is checked against the `data_hash` its rows carry; `skip_checksum=True` waives that for

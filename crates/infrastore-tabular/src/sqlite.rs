@@ -32,10 +32,24 @@
 //! pick up `run1_SingleTimeSeries_…`, and neither picks up a user's own
 //! `foo_values`.
 //!
+//! # Fixed names
+//!
+//! Which partitions an export writes depends on the data, so a consumer cannot
+//! name their tables ahead of time. Beside them the export keeps three
+//! **views** whose names it can: `<prefix>all_values`, `<prefix>all_series`
+//! and `<prefix>all_arrays`, each a `UNION ALL` over every partition under the
+//! prefix, led by a `partition_name` column and carrying every column any
+//! partition has (`NULL` where a partition's type has none). `array_id` is per
+//! partition, so a join across the views is on `(partition_name, array_id)`.
+//!
 //! # Writing into an existing database
 //!
 //! Tables are only ever added, never replaced: a name already taken fails the
 //! export before anything is written, and the whole export is one transaction.
+//! The three views are the exception that is not one: they are derived, so an
+//! export under a prefix that already has them replaces them to span the new
+//! partitions too. A view or table of that name the export did not write is a
+//! collision like any other.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -64,6 +78,23 @@ use crate::{Result, unsupported};
 const VALUES_SUFFIX: &str = "_values";
 const SERIES_SUFFIX: &str = "_series";
 const ARRAYS_SUFFIX: &str = "_arrays";
+
+/// The three views an export keeps under each prefix, by the role of the
+/// tables each one spans and the suffix those tables carry. Their names are
+/// **fixed** -- `<prefix>all_values`, `<prefix>all_series`,
+/// `<prefix>all_arrays` -- where a partition's own tables are named for a
+/// partition a consumer cannot know in advance.
+const VIEWS: [(&str, &str, &str); 3] = [
+    (layout::ROLE_VALUES, VALUES_SUFFIX, "all_values"),
+    (layout::ROLE_SERIES, SERIES_SUFFIX, "all_series"),
+    (layout::ROLE_ARRAYS, ARRAYS_SUFFIX, "all_arrays"),
+];
+/// The views' first column: which partition a row came from, as its tables'
+/// shared name without the prefix. `array_id` (and the arrays table's `id`) is
+/// per partition, so a join across the views is on this **and** the id.
+pub const PARTITION_NAME: &str = "partition_name";
+/// In a view's SQL, what marks it as one this export wrote and may replace.
+const VIEW_MARKER: &str = "/* infrastore: every partition under this prefix */";
 const INDEX_SUFFIX: &str = "_values_key";
 
 /// One partition the export wrote: its three tables and what they hold.
@@ -296,9 +327,12 @@ fn write_all(
 
     // IMMEDIATE so the name check and the writes see the same database.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    refuse_collisions(&tx, bases.values())?;
+    refuse_collisions(&tx, bases.values(), prefix)?;
 
     let mut written = Vec::with_capacity(groups.len());
+    // Every series reading an array that holds a scalar `-0.0`, across all
+    // partitions: one failure that names them all, not one per attempt.
+    let mut negative_zero: Vec<&TimeSeriesMetadata> = Vec::new();
     for (key, arrays) in &groups {
         let base = &bases[key];
         let ts_type = key.time_series_type;
@@ -333,7 +367,7 @@ fn write_all(
             insert.execute((id, &array.data_hash, &array.time_axis))?;
             // Every series sharing a key has the same values at the same
             // instants, so the first stands for the array.
-            array_ids.insert(members[0], id);
+            array_ids.insert(members[0], (id, members));
         }
         drop(insert);
 
@@ -342,8 +376,11 @@ fn write_all(
         let firsts: Vec<usize> = arrays.values().map(|members| members[0]).collect();
         values(&firsts, &mut |position, data| {
             let one = &series[position];
-            let id = array_ids[&position];
-            rows += insert_values(&mut insert, id, one.row, data, &key.value_kind)?;
+            let (id, members) = array_ids[&position];
+            match insert_values(&mut insert, id, one.row, data, &key.value_kind)? {
+                Some(inserted) => rows += inserted,
+                None => negative_zero.extend(members.iter().map(|&m| series[m].row)),
+            }
             Ok(())
         })?;
         drop(insert);
@@ -381,8 +418,64 @@ fn write_all(
             rows,
         });
     }
+    if !negative_zero.is_empty() {
+        // In catalog order, whatever order the arrays were read in.
+        negative_zero.sort_by_key(|row| row.id);
+        let negative_zero: Vec<String> = negative_zero
+            .iter()
+            .map(|row| format!("'{}' (owner {})", row.name, row.owner_id))
+            .collect();
+        // Dropping the transaction rolls back everything written on the way.
+        return Err(unsupported(format!(
+            "{} of the selected series hold a scalar -0.0, which a SQLite REAL cannot store (it \
+             reads back as +0.0): {}. Nothing was written. Narrow the selection past them, or \
+             export to Parquet.",
+            negative_zero.len(),
+            negative_zero.join(", ")
+        )));
+    }
+    rebuild_views(&tx, prefix)?;
     tx.commit()?;
     Ok(written)
+}
+
+/// (Re)create the prefix's three fixed-name views over every partition now
+/// under it -- the ones this export wrote and any an earlier one did.
+fn rebuild_views(conn: &Connection, prefix: &str) -> Result<()> {
+    let bases = partition_bases(conn, prefix, "the database")?;
+    for (role, suffix, view) in VIEWS {
+        let columns = layout::all_columns(role);
+        let mut selects = Vec::with_capacity(bases.len());
+        for base in &bases {
+            let table = format!("{base}{suffix}");
+            let present = table_columns(conn, &table)?;
+            let cells: Vec<String> = columns
+                .iter()
+                .map(|&c| {
+                    if present.contains(c) {
+                        c.to_string()
+                    } else {
+                        format!("NULL AS {c}")
+                    }
+                })
+                .collect();
+            selects.push(format!(
+                "SELECT '{}' AS {PARTITION_NAME}, {} FROM {}",
+                base[prefix.len()..].replace('\'', "''"),
+                cells.join(", "),
+                quote_ident(&table)
+            ));
+        }
+        // ponytail: one UNION ALL term per partition, and SQLite caps a compound
+        // SELECT at 500 terms by default; chain views if an export ever has more.
+        let q_view = quote_ident(&format!("{prefix}{view}"));
+        conn.execute_batch(&format!(
+            "DROP VIEW IF EXISTS {q_view};
+             CREATE VIEW {q_view} AS {VIEW_MARKER} {};",
+            selects.join(" UNION ALL ")
+        ))?;
+    }
+    Ok(())
 }
 
 /// `<prefix>` plus the partition's stem as a SQL identifier: everything but
@@ -422,14 +515,33 @@ fn existing_names(conn: &Connection) -> Result<BTreeSet<String>> {
 }
 
 /// Fail, naming them, if any name the export would create already exists.
-fn refuse_collisions<'a>(conn: &Connection, bases: impl Iterator<Item = &'a String>) -> Result<()> {
+///
+/// The prefix's views are exempt when they are this export's own: those are
+/// replaced. Anything else under one of their names is a collision.
+fn refuse_collisions<'a>(
+    conn: &Connection,
+    bases: impl Iterator<Item = &'a String>,
+    prefix: &str,
+) -> Result<()> {
     let existing = existing_names(conn)?;
-    let clashes: Vec<String> = bases
+    let mut clashes: Vec<String> = bases
         .flat_map(|b| {
             [VALUES_SUFFIX, INDEX_SUFFIX, SERIES_SUFFIX, ARRAYS_SUFFIX].map(|s| format!("{b}{s}"))
         })
         .filter(|name| existing.contains(&name.to_lowercase()))
         .collect();
+    let mut ours = conn.prepare(
+        "SELECT count(*) FROM sqlite_master \
+         WHERE lower(name) = lower(?1) AND type = 'view' AND instr(sql, ?2) > 0",
+    )?;
+    for (_, _, view) in VIEWS {
+        let name = format!("{prefix}{view}");
+        if existing.contains(&name.to_lowercase())
+            && ours.query_row((&name, VIEW_MARKER), |r| r.get::<_, i64>(0))? == 0
+        {
+            clashes.push(name);
+        }
+    }
     if clashes.is_empty() {
         return Ok(());
     }
@@ -491,32 +603,36 @@ fn insert_sql(table: &str, columns: &[&str]) -> String {
     )
 }
 
-/// Insert one array's value rows, returning how many.
+/// Insert one array's value rows, returning how many -- or `None`, inserting
+/// nothing, when the array holds a scalar `-0.0`.
+///
+/// A REAL `-0.0` reads back as `+0.0`, which would flip the sign the checksum
+/// is taken over, so the export refuses it. Reported rather than raised so the
+/// caller can go on to find every such array and name them all at once.
 fn insert_values(
     insert: &mut rusqlite::Statement<'_>,
     array_id: i64,
     row: &TimeSeriesMetadata,
     data: &TimeSeriesData,
     kind: &ValueKind,
-) -> Result<usize> {
+) -> Result<Option<usize>> {
     let rows = series_rows(row, data)?;
     let elements = elements(rows.array)?;
     let shape = per_step_shape(row);
     let scalar = matches!(kind, ValueKind::Dense { shape: dims, .. } if dims.is_empty());
+    if scalar
+        && elements
+            .iter()
+            .any(|cell| matches!(cell, Value::Real(f) if *f == 0.0 && f.is_sign_negative()))
+    {
+        return Ok(None);
+    }
     for (k, offset) in rows.offsets.iter().enumerate() {
         let start = offset * rows.per_step;
         let cells = elements.get(start..start + rows.per_step).ok_or_else(|| {
             unsupported(format!("series '{}' is shorter than its shape", row.name))
         })?;
         let value = if scalar {
-            // A REAL `-0.0` reads back as `+0.0`; refuse it rather than flip
-            // the sign the checksum is taken over.
-            if matches!(cells[0], Value::Real(f) if f == 0.0 && f.is_sign_negative()) {
-                return Err(unsupported(format!(
-                    "series '{}' holds a scalar -0.0, which a SQLite REAL cannot store",
-                    row.name
-                )));
-            }
             cells[0].clone()
         } else {
             Value::Text(nest(cells, &shape).to_string())
@@ -534,7 +650,7 @@ fn insert_values(
         params.push(value);
         insert.execute(params_from_iter(params))?;
     }
-    Ok(rows.offsets.len())
+    Ok(Some(rows.offsets.len()))
 }
 
 /// One series row, keyed by column name. Holds a cell for every column any
@@ -653,6 +769,30 @@ fn json_of(value: &Value) -> Json {
 pub fn sqlite_partitions(path: &Path, prefix: &str) -> Result<Vec<SqlitePartition>> {
     check_prefix(prefix)?;
     let conn = open_readonly(path)?;
+    let bases = partition_bases(&conn, prefix, &path.display().to_string())?;
+    if bases.is_empty() {
+        return Err(unsupported(format!(
+            "{} holds no exported partitions{}",
+            path.display(),
+            if prefix.is_empty() {
+                " without a table prefix (pass the prefix the export used)".to_string()
+            } else {
+                format!(" under the table prefix {prefix:?}")
+            }
+        )));
+    }
+    Ok(bases
+        .into_iter()
+        .map(|base| SqlitePartition {
+            db: path.to_path_buf(),
+            base,
+        })
+        .collect())
+}
+
+/// The shared table name of every partition under `prefix`, sorted. `what`
+/// names the database in an error.
+fn partition_bases(conn: &Connection, prefix: &str, what: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
     let tables: Vec<String> = stmt
         .query_map([], |r| r.get(0))?
@@ -676,29 +816,14 @@ pub fn sqlite_partitions(path: &Path, prefix: &str) -> Result<Vec<SqlitePartitio
         for suffix in [SERIES_SUFFIX, ARRAYS_SUFFIX] {
             if !lower.contains(&format!("{base}{suffix}").to_lowercase()) {
                 return Err(unsupported(format!(
-                    "{} holds {table} but no {base}{suffix} beside it; a partition's tables \
-                     come from one export",
-                    path.display()
+                    "{what} holds {table} but no {base}{suffix} beside it; a partition's tables \
+                     come from one export"
                 )));
             }
         }
-        out.push(SqlitePartition {
-            db: path.to_path_buf(),
-            base: base.to_string(),
-        });
+        out.push(base.to_string());
     }
-    if out.is_empty() {
-        return Err(unsupported(format!(
-            "{} holds no exported partitions{}",
-            path.display(),
-            if prefix.is_empty() {
-                " without a table prefix (pass the prefix the export used)".to_string()
-            } else {
-                format!(" under the table prefix {prefix:?}")
-            }
-        )));
-    }
-    out.sort_by(|a, b| a.base.cmp(&b.base));
+    out.sort();
     Ok(out)
 }
 
@@ -914,6 +1039,13 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+fn table_columns(conn: &Connection, table: &str) -> Result<BTreeSet<String>> {
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
+    stmt.query_map([table], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(infrastore_core::TimeSeriesError::from)
+}
+
 /// The table's columns, after checking it carries every one the layout
 /// requires of it. Extra columns are allowed — a user may have added some.
 fn check_columns(
@@ -922,10 +1054,7 @@ fn check_columns(
     ts_type: TimeSeriesType,
     role: &str,
 ) -> Result<BTreeSet<String>> {
-    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
-    let columns: BTreeSet<String> = stmt
-        .query_map([table], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let columns = table_columns(conn, table)?;
     let missing: Vec<&str> = layout::required_columns(ts_type, role)
         .into_iter()
         .filter(|c| !columns.contains(*c))

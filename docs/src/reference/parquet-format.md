@@ -396,15 +396,46 @@ The arrays table is why this layout has one: SQLite does not compress, so the ke
 value row — and again in the index over it — outweighed the values many times over. The values table
 now carries an integer, and the index over it is an index of integers.
 
+### Fixed-name views
+
+Which partitions an export writes depends on the data, so a consumer cannot name their tables ahead
+of time. Beside them the export keeps three **views** whose names are fixed:
+
+| View                 | Spans                 | Columns                                                                                    |
+| -------------------- | --------------------- | ------------------------------------------------------------------------------------------ |
+| `<prefix>all_values` | every `_values` table | `partition_name`, `array_id`, `timestamp`, `issue_time`, `percentile`, `scenario`, `value` |
+| `<prefix>all_series` | every `_series` table | `partition_name`, `array_id`, then every series column any type has                        |
+| `<prefix>all_arrays` | every `_arrays` table | `partition_name`, `id`, `data_hash`, `time_axis`                                           |
+
+Each is a `UNION ALL` over the partitions under the prefix. `partition_name` is the tables' shared
+name without the prefix (`SingleTimeSeries_f64_utc`). A column a partition's type does not have —
+`issue_time` for a static series, `length` for a forecast — reads as `NULL` there, so these views
+are the one place the layout has nullable columns. `array_id` is per partition, so a join across the
+views is on **`(partition_name, array_id)`**:
+
+```sql
+SELECT s.owner_id, s.name, v.timestamp, v.value
+FROM all_series s
+JOIN all_values v USING (partition_name, array_id)
+WHERE s.owner_type = 'Generator';
+```
+
+An export under a prefix that already has the views replaces them, so they span the earlier
+partitions and the new ones. Any other table or view under one of the three names is a collision and
+fails the export. The import reads the tables and ignores the views. One consequence for anyone
+restructuring the tables by hand: SQLite will not drop or rename a column a view selects, so drop
+the views first.
+
 An export **only adds**: it may target a new file or an existing database, and fails, writing
 nothing, if any table or index name it would create is already there. `NaN` is written as `NULL`
 (SQLite stores it as one regardless), making `value` the one nullable column. Inside a JSON `value`,
 the infinities are the strings `"Infinity"` and `"-Infinity"`, since JSON numbers cannot hold them.
 Two values are refused because SQLite cannot hold them: a `u64` above `i64::MAX`, and a scalar
-`-0.0` (a `REAL` reads back as `+0.0`; inside a JSON array it survives). Row order in the tables
-does not matter, and neither does how the ids are numbered: the import joins each table to the
-arrays table and orders by the key itself, so values edited in place with plain SQL read back,
-subject to the `data_hash` check (or `--no-checksum`).
+`-0.0` (a `REAL` reads back as `+0.0`; inside a JSON array it survives). The `-0.0` refusal names
+every series affected in one error, in catalog order, rather than stopping at the first. Row order
+in the tables does not matter, and neither does how the ids are numbered: the import joins each
+table to the arrays table and orders by the key itself, so values edited in place with plain SQL
+read back, subject to the `data_hash` check (or `--no-checksum`).
 
 ```sql
 SELECT s.owner_id, datetime(v.timestamp / 1000, 'unixepoch') AS at, v.value

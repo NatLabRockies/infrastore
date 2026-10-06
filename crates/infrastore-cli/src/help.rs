@@ -132,7 +132,9 @@ back.
 tables into --db, creating the file if absent. A table name already in the database
 fails the export before anything is written; --table-prefix lets several
 exports share one database. `add --sqlite <DB> [--table-prefix P]` reads them
-back.
+back. Three views with fixed names span every partition under a prefix:
+<prefix>all_values, <prefix>all_series and <prefix>all_arrays, joined on
+(partition_name, array_id).
 
 Both leave DeterministicSingleTimeSeries out unless --include-derived: a
 derived forecast repeats its source series' values, and `add` refuses one.";

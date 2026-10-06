@@ -4721,6 +4721,9 @@ fn sqlite_export_adds_tables_and_refuses_a_collision() {
             "SingleTimeSeries_f64_utc_series",
             "SingleTimeSeries_f64_utc_values",
             "SingleTimeSeries_f64_utc_values_key",
+            "all_arrays",
+            "all_series",
+            "all_values",
             "mine",
         ]
     );

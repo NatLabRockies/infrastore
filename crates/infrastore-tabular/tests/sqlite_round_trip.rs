@@ -310,12 +310,18 @@ fn a_shared_profile_is_one_array_and_a_prefix_scopes_the_import() {
             "SingleTimeSeries_f64_utc_series",
             "SingleTimeSeries_f64_utc_values",
             "SingleTimeSeries_f64_utc_values_key",
+            "all_arrays",
+            "all_series",
+            "all_values",
             "foo_series",
             "foo_values",
             "run2_SingleTimeSeries_f64_utc_arrays",
             "run2_SingleTimeSeries_f64_utc_series",
             "run2_SingleTimeSeries_f64_utc_values",
             "run2_SingleTimeSeries_f64_utc_values_key",
+            "run2_all_arrays",
+            "run2_all_series",
+            "run2_all_values",
         ]
     );
 
@@ -457,6 +463,83 @@ fn the_array_key_is_spelled_once_and_named_by_rowid() {
 }
 
 #[test]
+fn fixed_name_views_span_every_partition_under_a_prefix() {
+    let stamps: Vec<DateTime<Utc>> = [0, 1, 5]
+        .iter()
+        .map(|h| t0() + Duration::hours(*h))
+        .collect();
+    let irregular = TimeSeriesData::NonSequentialTimeSeries(
+        NonSequentialTimeSeries::new(
+            stamps,
+            TypedArray::from_f64(vec![3], &[7.0, 8.0, 9.0]),
+            "irregular",
+        )
+        .unwrap(),
+    );
+    let series = stored(vec![hourly("load", &[1.0, 2.0]), utc(irregular)]);
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("out.db");
+    // Two exports under one prefix: the views end up spanning both.
+    write_sqlite(&db, &series[..1], "").expect("first export");
+    write_sqlite(&db, &series[1..], "").expect("second export, another partition");
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    // One query, no partition named: every series' values, joined through the
+    // views on the partition and the id within it.
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.partition_name, s.name, s.length, count(*), sum(v.value)
+             FROM all_series s
+             JOIN all_values v USING (partition_name, array_id)
+             JOIN all_arrays a ON a.partition_name = s.partition_name AND a.id = s.array_id
+             GROUP BY s.partition_name, s.name ORDER BY s.name",
+        )
+        .unwrap();
+    let rows: Vec<(String, String, Option<i64>, i64, f64)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "NonSequentialTimeSeries_f64_utc".to_string(),
+                "irregular".to_string(),
+                // A column the partition's type does not have reads as NULL.
+                None,
+                3,
+                24.0
+            ),
+            (
+                "SingleTimeSeries_f64_utc".to_string(),
+                "load".to_string(),
+                Some(2),
+                2,
+                3.0
+            ),
+        ]
+    );
+    drop(stmt);
+    drop(conn);
+
+    // The views are no part of the import, which reads the tables.
+    assert_eq!(import(&db, "", &ImportOptions::default()).len(), 2);
+
+    // A name of theirs that the export did not write is a collision.
+    let other = dir.path().join("taken.db");
+    rusqlite::Connection::open(&other)
+        .unwrap()
+        .execute_batch("CREATE TABLE all_values (x);")
+        .unwrap();
+    let err = write_sqlite(&other, &series[..1], "").unwrap_err();
+    assert!(err.to_string().contains("all_values"), "{err}");
+    assert_eq!(table_names(&other), ["all_values"]);
+}
+
+#[test]
 fn an_edited_value_fails_the_checksum_unless_waived() {
     let series = stored(vec![hourly("load", &[1.0, 2.0])]);
     let dir = tempfile::tempdir().unwrap();
@@ -512,10 +595,13 @@ fn import_after(
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("out.db");
     write_sqlite(&db, &stored(items), "").expect("export");
-    rusqlite::Connection::open(&db)
-        .unwrap()
-        .execute_batch(sql)
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    // SQLite refuses to drop or rename a column a view still selects, so the
+    // views go first -- as they would for anyone restructuring these tables.
+    conn.execute_batch("DROP VIEW all_values; DROP VIEW all_series; DROP VIEW all_arrays;")
         .unwrap();
+    conn.execute_batch(sql).unwrap();
+    drop(conn);
     for partition in sqlite_partitions(&db, "").map_err(|e| e.to_string())? {
         read_sqlite_partition_with(&partition, options, &mut |_| Ok(()))
             .map_err(|e| e.to_string())?;
@@ -656,13 +742,27 @@ fn nested_infinities_round_trip_and_a_scalar_negative_zero_is_refused() {
         "bitwise, so the checksum agreed too"
     );
 
+    // Every offender is named in the one error -- a second array's, and a
+    // series sharing the first's -- and the clean series is not.
+    let zero = dir.path().join("zero.db");
     let err = write_sqlite(
-        &dir.path().join("zero.db"),
-        &stored(vec![hourly("z", &[1.0, -0.0])]),
+        &zero,
+        &stored(vec![
+            hourly("z", &[1.0, -0.0]),
+            hourly("fine", &[1.0, 2.0]),
+            hourly("shares_z", &[1.0, -0.0]),
+            hourly("other", &[-0.0, 5.0]),
+        ]),
         "",
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("-0.0"), "{err}");
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("3 of the selected series"), "{err}");
+    for name in ["'z'", "'shares_z'", "'other'"] {
+        assert!(err.contains(name), "{name}: {err}");
+    }
+    assert!(!err.contains("'fine'"), "{err}");
+    assert!(!zero.exists(), "nothing was written");
 }
 
 #[test]

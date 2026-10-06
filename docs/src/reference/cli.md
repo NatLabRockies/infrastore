@@ -254,21 +254,24 @@ infrastore --store copy.h5 add --sqlite out.db --table-prefix run2_
 `-f sqlite export --db <FILE>` writes the Parquet layout as tables: per partition,
 `<prefix><base>_values`, `<prefix><base>_series` and `<prefix><base>_arrays` with the same columns,
 plus an index `<prefix><base>_values_key` on `array_id`. The arrays table's `id` is its rowid.
-`<base>` is the Parquet stem with everything outside `[A-Za-z0-9_]` mapped to `_`
-(`SingleTimeSeries_f64_utc`), and `--table-prefix` is held to the same alphabet, so the tables need
-no quoting. A prefix must also not start with a digit or `sqlite_` (any case, which SQLite
-reserves), end in `_`, and contain no time-series type name as a `_`-separated segment, so no
-prefix's tables can be read as another's. The file is created if absent; an existing database keeps
-its own tables and gains these. If any name the export would create is already in the database, the
-export fails and writes nothing — it runs in one transaction either way. A prefix is how several
-exports share one database. Differences from the Parquet files:
+Because those names depend on which partitions the data has, the export also keeps three views with
+**fixed** names — `<prefix>all_values`, `<prefix>all_series`, `<prefix>all_arrays` — each spanning
+every partition under the prefix and joined on `(partition_name, array_id)`; see
+[fixed-name views](parquet-format.md#fixed-name-views). `<base>` is the Parquet stem with everything
+outside `[A-Za-z0-9_]` mapped to `_` (`SingleTimeSeries_f64_utc`), and `--table-prefix` is held to
+the same alphabet, so the tables need no quoting. A prefix must also not start with a digit or
+`sqlite_` (any case, which SQLite reserves), end in `_`, and contain no time-series type name as a
+`_`-separated segment, so no prefix's tables can be read as another's. The file is created if
+absent; an existing database keeps its own tables and gains these. If any name the export would
+create is already in the database, the export fails and writes nothing — it runs in one transaction
+either way. A prefix is how several exports share one database. Differences from the Parquet files:
 
 - Instants (`timestamp`, `issue_time`, `initial_timestamp`) are `INTEGER` unix milliseconds; the
   spelling is the series table's `time_reference` column.
 - `value` is a plain `REAL`/`INTEGER` for a scalar element and a JSON array (nested over the element
   shape) otherwise. `NaN` is `NULL`, so `value` is the one nullable column; inside a JSON array the
   infinities are the strings `"Infinity"` and `"-Infinity"`. A `u64` above `i64::MAX` and a scalar
-  `-0.0` (which a `REAL` cannot keep) are refused.
+  `-0.0` (which a `REAL` cannot keep) are refused; the `-0.0` error names every series affected.
 
 `add --sqlite <FILE>` reads it back: every partition whose tables are named `<prefix>`, then a
 time-series type, then `_…` — so without `--table-prefix` it takes only the unprefixed export, and

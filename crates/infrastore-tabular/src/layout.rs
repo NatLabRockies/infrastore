@@ -245,6 +245,44 @@ pub fn required_columns(ts_type: TimeSeriesType, role: &str) -> Vec<&'static str
     names
 }
 
+/// Every column a table of this role carries in **any** partition, in schema
+/// order: the superset of [`required_columns`] over the types.
+///
+/// What a view across partitions selects. A partition's own table holds only
+/// the columns its type has, so the rest read as `NULL` there.
+pub fn all_columns(role: &str) -> Vec<&'static str> {
+    if role == ROLE_ARRAYS {
+        return vec![schema::ID, DATA_HASH, TIME_AXIS];
+    }
+    if role == ROLE_VALUES {
+        return vec![ARRAY_ID, TIMESTAMP, ISSUE_TIME, PERCENTILE, SCENARIO, VALUE];
+    }
+    vec![
+        ARRAY_ID,
+        schema::ID,
+        schema::OWNER_ID,
+        schema::OWNER_TYPE,
+        schema::OWNER_CATEGORY,
+        schema::TIME_SERIES_TYPE,
+        schema::NAME,
+        schema::INITIAL_TIMESTAMP,
+        schema::RESOLUTION,
+        schema::LENGTH,
+        schema::INTERVAL,
+        schema::HORIZON,
+        schema::COUNT,
+        schema::FEATURES,
+        schema::ELEMENT_TYPE,
+        schema::ELEMENT_SHAPE,
+        schema::TIME_REFERENCE,
+        schema::UNITS,
+        schema::QUANTITY_KIND,
+        schema::UNIT_SYSTEM,
+        schema::COMPONENT_FIELD,
+        schema::APPLICATION_DATA,
+    ]
+}
+
 /// How a reference is written in the `time_reference` column and footer:
 /// its storage string, or [`schema::UNSPECIFIED_REFERENCE`] when there is none.
 pub fn reference_literal(reference: Option<&TimeReference>) -> String {
@@ -305,4 +343,36 @@ pub fn is_composite(element_type: ElementType) -> bool {
         element_type,
         ElementType::Scalar(_) | ElementType::Tuple { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A view across partitions selects [`all_columns`]; a column a type's own
+    /// table carries and the view does not would silently vanish from it.
+    #[test]
+    fn all_columns_holds_every_types_columns_in_the_same_order() {
+        for ts_type in [
+            TimeSeriesType::SingleTimeSeries,
+            TimeSeriesType::NonSequentialTimeSeries,
+            TimeSeriesType::PersistentTimeSeries,
+            TimeSeriesType::Deterministic,
+            TimeSeriesType::DeterministicSingleTimeSeries,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ] {
+            for role in [ROLE_VALUES, ROLE_SERIES, ROLE_ARRAYS] {
+                let all = all_columns(role);
+                let mut rest = all.iter();
+                for column in required_columns(ts_type, role) {
+                    assert!(
+                        rest.any(|c| *c == column),
+                        "{} {role}: `{column}` is missing from, or out of order in, {all:?}",
+                        ts_type.as_str()
+                    );
+                }
+            }
+        }
+    }
 }

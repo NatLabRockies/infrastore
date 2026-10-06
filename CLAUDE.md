@@ -51,12 +51,16 @@ SQLite. It exposes multiple bindings over a shared core:
 - **SQLite tables** — the same normalized layout as tables in a SQLite database
   (`export -f sqlite --db FILE`, `add --sqlite FILE`), one `<prefix><base>_values` /
   `<prefix><base>_series` / `<prefix><base>_arrays` set per partition, the arrays table's `id` its
-  rowid and `array_id` a declared reference to it. `infrastore-tabular` holds the Arrow-free half of
-  the layout both containers share — partitioning, array key, column sets, row walking, series
-  assembly and the merge join — plus the SQLite container; `infrastore-parquet` builds on it. Not a
-  cargo feature: SQLite is already linked by the catalog. An export only adds tables and fails,
-  writing nothing, on any name collision; `--table-prefix` scopes both directions. Unlike Parquet it
-  **is** in the bindings — `export_sqlite` / `import_sqlite` in Python, `import_sqlite!` in Julia,
+  rowid and `array_id` a declared reference to it. Since those names depend on the data, the export
+  also keeps three **fixed-name views** per prefix — `<prefix>all_values`, `<prefix>all_series`,
+  `<prefix>all_arrays` — each a `UNION ALL` over every partition under it, joined on
+  `(partition_name, array_id)`; they are the one thing an export replaces rather than adds, and the
+  only place the layout has nullable columns. `infrastore-tabular` holds the Arrow-free half of the
+  layout both containers share — partitioning, array key, column sets, row walking, series assembly
+  and the merge join — plus the SQLite container; `infrastore-parquet` builds on it. Not a cargo
+  feature: SQLite is already linked by the catalog. An export only adds tables and fails, writing
+  nothing, on any name collision; `--table-prefix` scopes both directions. Unlike Parquet it **is**
+  in the bindings — `export_sqlite` / `import_sqlite` in Python, `import_sqlite!` in Julia,
   `infrastore_store_export_sqlite` / `infrastore_store_import_sqlite` across the C ABI, all over
   `infrastore_tabular::sqlite::{export_store, import_store}` — since `infrastore-tabular` adds no
   dependency the libraries lack. `export_store` **streams**: it plans the tables from the catalog

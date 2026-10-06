@@ -498,6 +498,16 @@ JOIN s2_SingleTimeSeries_f64_utc_series s USING (array_id)
 WHERE s.name = 'load';
 ```
 
+The table names depend on which partitions the data has. To query without knowing them, use the
+three views every export keeps under its prefix — `all_values`, `all_series`, `all_arrays` — which
+span all of its partitions:
+
+```sql
+SELECT s.owner_id, s.name, v.timestamp, v.value
+FROM s2_all_series s
+JOIN s2_all_values v USING (partition_name, array_id);
+```
+
 SQLite needs no cargo feature: it stays in a binary built without Parquet.
 
 ## Stamp Provenance on the Artifact
