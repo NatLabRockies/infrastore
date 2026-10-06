@@ -2198,6 +2198,11 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(stru
  * bounded batch at a time and each distinct array once, so a store far larger
  * than memory exports in a few hundred megabytes.
  *
+ * A `DeterministicSingleTimeSeries` is left out unless `include_derived`: it
+ * repeats its source `SingleTimeSeries`' values, and
+ * `infrastore_store_import_sqlite` refuses a database holding one. A filter
+ * naming the type without the flag is `INFRASTORE_ERR_INVALID_PARAMETER`.
+ *
  * `*out_json` receives a JSON array with one object per partition written:
  * `values_table`, `series_table`, `arrays_table`, `time_series_type`,
  * `value_type`, `time_reference`, `arrays`, `series` and `rows`.
@@ -2220,6 +2225,7 @@ int32_t infrastore_store_export_sqlite(const struct InfraStore *handle,
                                        int64_t end_ms,
                                        const char *path,
                                        const char *table_prefix,
+                                       bool include_derived,
                                        char **out_json,
                                        uint64_t *out_len);
 

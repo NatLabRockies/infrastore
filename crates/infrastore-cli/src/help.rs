@@ -132,7 +132,10 @@ back.
 tables into --db, creating the file if absent. A table name already in the database
 fails the export before anything is written; --table-prefix lets several
 exports share one database. `add --sqlite <DB> [--table-prefix P]` reads them
-back.";
+back.
+
+Both leave DeterministicSingleTimeSeries out unless --include-derived: a
+derived forecast repeats its source series' values, and `add` refuses one.";
 
 pub const TRANSFORM: &str = "\
 Examples:

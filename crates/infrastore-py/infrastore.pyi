@@ -761,6 +761,7 @@ class Store:
         *,
         table_prefix: str = "",
         time_range: tuple[datetime, datetime] | None = None,
+        include_derived: bool = False,
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,

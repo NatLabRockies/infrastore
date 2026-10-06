@@ -42,9 +42,12 @@ SQLite. It exposes multiple bindings over a shared core:
   files as a **merge join**, one transaction per partition, with a dangling array on either side (or
   an `array_id` the arrays file lacks) an error and `--no-checksum` waiving the `data_hash` check. A
   values file with no series file beside it is a **foreign** file. An empty series **fails** the
-  export, naming every one and writing nothing. Python's `to_arrow()`/`from_arrow()` are per-series
-  in-memory conveniences, **not** this format — "one schema, two producers" was withdrawn. See
-  `docs/src/reference/parquet-format.md`.
+  export, naming every one and writing nothing. A `DeterministicSingleTimeSeries` is **left out of
+  both containers' exports by default** — it repeats its source's values and no import takes one
+  back — and a filter naming it is refused; `--include-derived` (`include_derived` in the bindings'
+  SQLite export) writes it as a partition of its own. Python's `to_arrow()`/`from_arrow()` are
+  per-series in-memory conveniences, **not** this format — "one schema, two producers" was
+  withdrawn. See `docs/src/reference/parquet-format.md`.
 - **SQLite tables** — the same normalized layout as tables in a SQLite database
   (`export -f sqlite --db FILE`, `add --sqlite FILE`), one `<prefix><base>_values` /
   `<prefix><base>_series` / `<prefix><base>_arrays` set per partition, the arrays table's `id` its

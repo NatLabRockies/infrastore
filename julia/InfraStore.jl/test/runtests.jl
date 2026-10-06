@@ -5749,6 +5749,15 @@ end
         target, db; table_prefix="run1_"
     )
     @test length(list_metadata(target)) == 1
+
+    # A derived forecast is left out unless asked for.
+    transform_single_time_series!(source, Hour(2), Hour(1))
+    plain = export_sqlite(source, joinpath(mktempdir(), "plain.db"))
+    @test all(p -> p.time_series_type == "SingleTimeSeries", plain)
+    all_types = export_sqlite(
+        source, joinpath(mktempdir(), "all.db"); include_derived=true
+    )
+    @test "DeterministicSingleTimeSeries" in [p.time_series_type for p in all_types]
     close!(source)
     close!(target)
 end

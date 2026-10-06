@@ -1566,6 +1566,7 @@ wheel does not link Arrow; DuckDB and polars both read these tables directly.)
 ```python
 def export_sqlite(
     self, path: str, *, table_prefix: str = "", time_range=None,
+    include_derived: bool = False,
     owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
     name=None, name_glob=None, component_field=None, zoneless=None,
     resolution=None, interval=None, initial_timestamp=None, length=None,
@@ -1584,6 +1585,10 @@ returns one dict per partition written (`values_table`, `series_table`, `arrays_
 `time_series_type`, `value_type`, `time_reference`, `arrays`, `series`, `rows`). The values are
 streamed — a bounded batch at a time, each distinct array once — so a store far larger than memory
 exports in a few hundred megabytes.
+
+A `DeterministicSingleTimeSeries` is left out unless `include_derived=True`: it repeats its source
+`SingleTimeSeries`' values, flattened, and `import_sqlite` refuses a database holding one. Naming
+the type in the filter without the flag raises rather than exporting nothing.
 
 `import_sqlite` adds every series under `table_prefix` in one all-or-nothing transaction and returns
 the new ids in the order read. Ids are assigned fresh — the ones the tables recorded are not reused.

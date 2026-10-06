@@ -1386,7 +1386,8 @@ The [normalized table layout](parquet-format.md#sqlite-tables) the CLI's `export
 not link Arrow.)
 
 ```julia
-export_sqlite(store, path; table_prefix="", time_range=nothing, filters...) -> Vector{NamedTuple}
+export_sqlite(store, path; table_prefix="", time_range=nothing, include_derived=false,
+              filters...) -> Vector{NamedTuple}
 import_sqlite!(store, path; table_prefix="", skip_checksum=false) -> Vector{Int64}
 ```
 
@@ -1398,6 +1399,10 @@ one named tuple per partition written (`values_table`, `series_table`, `arrays_t
 `time_series_type`, `value_type`, `time_reference`, `arrays`, `series`, `rows`). The values are
 streamed — a bounded batch at a time, each distinct array once — so a store far larger than memory
 exports in a few hundred megabytes.
+
+A `DeterministicSingleTimeSeries` is left out unless `include_derived=true`: it repeats its source
+`SingleTimeSeries`' values, flattened, and `import_sqlite!` refuses a database holding one. Naming
+the type in the filter without the flag throws rather than exporting nothing.
 
 `import_sqlite!` adds every series under `table_prefix` in one all-or-nothing transaction and
 returns the new ids in the order read. Ids are assigned fresh — the ones the tables recorded are not

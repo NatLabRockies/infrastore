@@ -1193,7 +1193,10 @@ int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
    SQLite database at path -- the layout `infrastore export -f sqlite` writes.
    With has_time_range each series is clipped as infrastore_store_read_by_ids_range
    clips. table_prefix may be NULL. Tables are only ever added; a name already
-   taken, or an empty series, fails before anything is written. out_json is an
+   taken, or an empty series, fails before anything is written. A
+   DeterministicSingleTimeSeries is left out unless include_derived (it repeats
+   its source's values and no import takes one back); a filter naming the type
+   without it is INFRASTORE_ERR_INVALID_PARAMETER. out_json is an
    OWNED JSON array, one object per partition written, freed with
    infrastore_string_free. */
 int32_t infrastore_store_export_sqlite(const struct InfraStore *handle,
@@ -1201,6 +1204,7 @@ int32_t infrastore_store_export_sqlite(const struct InfraStore *handle,
                                        bool has_time_range, bool time_range_zoneless,
                                        int64_t start_ms, int64_t end_ms,
                                        const char *path, const char *table_prefix,
+                                       bool include_derived,
                                        char **out_json, uint64_t *out_len);
 
 /* Add every series in the tables under table_prefix (NULL: none) in one

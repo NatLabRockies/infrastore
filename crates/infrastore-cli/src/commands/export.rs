@@ -18,6 +18,7 @@ use crate::store_access;
 
 use super::show;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     store_path: &Path,
     selector: &SelectorArgs,
@@ -25,8 +26,17 @@ pub fn run(
     db: Option<&Path>,
     table_prefix: Option<&str>,
     time_range: Option<&str>,
+    include_derived: bool,
     format: Format,
 ) -> Result<(), String> {
+    // The per-series formats write whatever the selector matched, so the flag
+    // would mean nothing there.
+    if include_derived && !(format.is_parquet() || format == Format::Sqlite) {
+        return Err(
+            "--include-derived applies to the partitioned exports; pass -f parquet or -f sqlite"
+                .to_string(),
+        );
+    }
     if (format == Format::Sqlite) != db.is_some() {
         return Err("--db and -f sqlite go together: pass both or neither".to_string());
     }
@@ -80,12 +90,19 @@ pub fn run(
             range,
             db,
             table_prefix.unwrap_or(""),
+            include_derived,
             format,
         );
     }
-    let metas = store
-        .list_metadata(selector.to_filter()?)
-        .map_err(|e| e.to_string())?;
+    let filter = selector.to_filter()?;
+    let filter_type = filter.time_series_type;
+    let mut metas = store.list_metadata(filter).map_err(|e| e.to_string())?;
+    // The partitioned layout leaves derived series out unless asked; the
+    // SQLite path above applies the same rule inside `export_store`.
+    if format.is_parquet() {
+        infrastore_tabular::export::retain_exportable(filter_type, &mut metas, include_derived)
+            .map_err(|e| e.to_string())?;
+    }
     if metas.is_empty() {
         return match dir {
             // Without --dir, stdout *is* the exported series, so a notice
@@ -516,10 +533,12 @@ fn write_sqlite(
     range: Option<infrastore_core::TimeRange>,
     db: &Path,
     prefix: &str,
+    include_derived: bool,
     format: Format,
 ) -> Result<(), String> {
-    let written = infrastore_tabular::sqlite::export_store(store, filter, range, db, prefix)
-        .map_err(|e| format!("writing to {}: {e}", db.display()))?;
+    let written =
+        infrastore_tabular::sqlite::export_store(store, filter, range, db, prefix, include_derived)
+            .map_err(|e| format!("writing to {}: {e}", db.display()))?;
     let series: usize = written.iter().map(|t| t.series).sum();
     output::report(
         format,

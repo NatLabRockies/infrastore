@@ -214,7 +214,7 @@ foreign file; and the grid flags (`--initial-timestamp`, `--interval`, `--horizo
 [Parquet layout](parquet-format.md) is the format reference — the three column sets, the array key,
 `time_axis` per type, footer keys, and the rules the import applies to a foreign file.
 
-Three limits on the export, all deliberate:
+Limits on the export, all deliberate:
 
 - **`--dir` is required.** Parquet's footer sits at the end of the file and its offsets point
   backwards, so a writer has to seek and a pipe cannot.
@@ -225,6 +225,10 @@ Three limits on the export, all deliberate:
 - **An empty series fails it.** Every selected series with no values is named, and nothing is
   written — a series row whose key matches no values rows is indistinguishable from a truncated
   export, so it is refused rather than represented. Narrow the selection past it.
+- **Derived series are left out.** A `DeterministicSingleTimeSeries` repeats its source
+  `SingleTimeSeries`' values and `add` refuses one on the way back in, so `-f parquet` and
+  `-f sqlite` skip them and refuse a `--type` naming them. `--include-derived` writes them as
+  partitions of their own.
 - **`-f parquet` is only accepted on `export`.** It is a binary container, not a rendering of a
   result; there is no `list -f parquet`.
 

@@ -48,6 +48,37 @@ pub fn plan_keys<'a>(series: impl Iterator<Item = (&'a TimeSeriesMetadata, Array
     out
 }
 
+/// Drop the derived rows from a selection, unless `include_derived` keeps them.
+///
+/// A `DeterministicSingleTimeSeries` is windows over a stored
+/// `SingleTimeSeries`, so exporting it writes that series' values a second
+/// time, flattened -- and no import takes the type back, because it is derived
+/// rather than added. Left out by default; an export that wants the forecast
+/// table to query asks for it, and gets a partition the import will refuse.
+///
+/// `filter_type` is the type the selection's own filter named. Naming the
+/// derived type without `include_derived` is refused rather than answered with
+/// nothing, which would read as "the store holds none".
+pub fn retain_exportable(
+    filter_type: Option<TimeSeriesType>,
+    metas: &mut Vec<TimeSeriesMetadata>,
+    include_derived: bool,
+) -> Result<()> {
+    if include_derived {
+        return Ok(());
+    }
+    if filter_type == Some(TimeSeriesType::DeterministicSingleTimeSeries) {
+        return Err(unsupported(
+            "a DeterministicSingleTimeSeries is derived from a stored SingleTimeSeries, so an \
+             export leaves it out unless asked to include derived series. No import takes one \
+             back either way: to move it, export the SingleTimeSeries and run \
+             `transform_single_time_series` on the other side",
+        ));
+    }
+    metas.retain(|m| m.time_series_type != TimeSeriesType::DeterministicSingleTimeSeries);
+    Ok(())
+}
+
 /// Refuse a selection holding an empty series, naming every one.
 ///
 /// A series with no values has a catalog row and a zero-length array; the format

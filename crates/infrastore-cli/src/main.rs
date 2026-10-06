@@ -437,6 +437,11 @@ enum Commands {
         /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
+        /// With -f parquet or -f sqlite, also write DeterministicSingleTimeSeries
+        /// partitions. They are left out by default: each repeats its source
+        /// SingleTimeSeries' values, and `add` refuses one on the way back in.
+        #[arg(long)]
+        include_derived: bool,
     },
     /// Generate shell completions to stdout.
     ///
@@ -835,6 +840,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             db,
             table_prefix,
             time_range,
+            include_derived,
         } => commands::export::run(
             &require_store(cli)?,
             selector,
@@ -842,6 +848,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             db.as_deref(),
             table_prefix.as_deref(),
             time_range.as_deref(),
+            *include_derived,
             cli.format,
         ),
         Commands::Completions { shell } => {

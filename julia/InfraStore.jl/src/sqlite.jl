@@ -5,13 +5,13 @@
 # container of that layout stays CLI-only: it would link Arrow into the library.
 
 """
-    export_sqlite(store, path; table_prefix="", time_range=nothing, filters...)
-        -> Vector{NamedTuple}
+    export_sqlite(store, path; table_prefix="", time_range=nothing,
+                  include_derived=false, filters...) -> Vector{NamedTuple}
 
 Export the series the filter selects (the same filter keywords as
 [`list_metadata`](@ref); none exports the whole store) as tables in the SQLite
-database at `path` — one `<prefix><base>_values` / `<prefix><base>_series` pair
-per `(time_series_type, value type, time_reference)` partition, the layout
+database at `path` — one `<prefix><base>_values` / `<prefix><base>_series` /
+`<prefix><base>_arrays` set per `(time_series_type, value type, time_reference)` partition, the layout
 `infrastore export -f sqlite` writes.
 
 `time_range` clips each series as [`read_by_ids`](@ref)'s does. The database is
@@ -20,6 +20,11 @@ empty series in the selection, throws before anything is written.
 `table_prefix` scopes the names so several exports can share one database. The
 values are streamed, a bounded batch at a time and each distinct array once, so
 a store far larger than memory exports in a few hundred megabytes.
+
+A `DeterministicSingleTimeSeries` is left out unless `include_derived=true`: it
+repeats its source `SingleTimeSeries`' values, and [`import_sqlite!`](@ref)
+refuses a database holding one. A filter naming the type without the flag
+throws.
 
 Returns one named tuple per partition written: `values_table`, `series_table`,
 `arrays_table`, `time_series_type`, `value_type`, `time_reference`, `arrays`,
@@ -30,6 +35,7 @@ function export_sqlite(
     path::AbstractString;
     table_prefix::AbstractString="",
     time_range::TimeRangeArg=nothing,
+    include_derived::Bool=false,
     kwargs...,
 )
     has_range = time_range !== nothing
@@ -48,6 +54,7 @@ function export_sqlite(
                 tr_end::Int64,
                 path_arg::Cstring,
                 prefix_arg::Cstring,
+                include_derived::Bool,
                 out_json::Ref{Ptr{Cchar}},
                 out_len::Ref{UInt64},
             )::Int32

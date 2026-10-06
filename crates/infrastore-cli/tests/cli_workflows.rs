@@ -4975,6 +4975,87 @@ fn export_writes_one_file_pair_per_partition() {
 
 #[cfg(feature = "parquet")]
 #[test]
+fn derived_series_are_exported_only_when_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("derived.h5");
+    seed_one(dir.path(), &store);
+    run(
+        &store,
+        &["transform", "--horizon", "PT2H", "--interval", "PT1H"],
+    );
+    let files = |out: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".values.parquet"))
+            .collect();
+        names.sort();
+        names
+    };
+
+    // By default the derived forecast is left out, in both containers.
+    let plain = dir.path().join("plain");
+    run(
+        &store,
+        &["-f", "parquet", "export", "--dir", plain.to_str().unwrap()],
+    );
+    assert_eq!(files(&plain), ["SingleTimeSeries.f64.utc.values.parquet"]);
+    let db = dir.path().join("plain.db");
+    let report = run(
+        &store,
+        &["-f", "sqlite", "export", "--db", db.to_str().unwrap()],
+    );
+    assert!(report.contains("1 partitions"), "{report}");
+
+    // Naming the type without the flag is refused rather than answered empty.
+    let named = dir.path().join("named");
+    let by_type = ["--type", "DeterministicSingleTimeSeries"];
+    let mut args = vec!["-f", "parquet", "export", "--dir", named.to_str().unwrap()];
+    args.extend(by_type);
+    let err = run_err(&store, &args);
+    assert!(err.contains("derived"), "{err}");
+
+    // Asked for, it is a partition of its own.
+    let all = dir.path().join("all");
+    run(
+        &store,
+        &[
+            "-f",
+            "parquet",
+            "export",
+            "--dir",
+            all.to_str().unwrap(),
+            "--include-derived",
+        ],
+    );
+    assert_eq!(
+        files(&all),
+        [
+            "DeterministicSingleTimeSeries.f64.utc.values.parquet",
+            "SingleTimeSeries.f64.utc.values.parquet",
+        ]
+    );
+    let db = dir.path().join("all.db");
+    let report = run(
+        &store,
+        &[
+            "-f",
+            "sqlite",
+            "export",
+            "--db",
+            db.to_str().unwrap(),
+            "--include-derived",
+        ],
+    );
+    assert!(report.contains("2 partitions"), "{report}");
+
+    // The flag means nothing to the per-series formats.
+    let err = run_err(&store, &["-f", "csv", "export", "--include-derived"]);
+    assert!(err.contains("--include-derived"), "{err}");
+}
+
+#[cfg(feature = "parquet")]
+#[test]
 fn a_parquet_export_honors_the_time_range() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("pq_range.h5");

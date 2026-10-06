@@ -4630,10 +4630,15 @@ impl PyStore {
     /// time and each distinct array once, so a store far larger than memory
     /// exports in a few hundred megabytes.
     ///
+    /// A `DeterministicSingleTimeSeries` is left out unless `include_derived`:
+    /// it repeats its source `SingleTimeSeries`' values, and `import_sqlite`
+    /// refuses a database holding one. A filter naming the type without the
+    /// flag raises.
+    ///
     /// Returns one dict per partition written: `values_table`, `series_table`,
     /// `arrays_table`, `time_series_type`, `value_type`, `time_reference`,
     /// `arrays`, `series` and `rows`.
-    #[pyo3(signature = (path, *, table_prefix="", time_range=None, owner_id=None, owner_category=None, owner_type=None, time_series_type=None, name=None, name_glob=None, component_field=None, zoneless=None, resolution=None, interval=None, initial_timestamp=None, length=None, features=None, features_exact=false))]
+    #[pyo3(signature = (path, *, table_prefix="", time_range=None, include_derived=false, owner_id=None, owner_category=None, owner_type=None, time_series_type=None, name=None, name_glob=None, component_field=None, zoneless=None, resolution=None, interval=None, initial_timestamp=None, length=None, features=None, features_exact=false))]
     #[allow(clippy::too_many_arguments)]
     fn export_sqlite<'py>(
         &self,
@@ -4641,6 +4646,7 @@ impl PyStore {
         path: PathBuf,
         table_prefix: &str,
         time_range: Option<(PyInstant, PyInstant)>,
+        include_derived: bool,
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
@@ -4679,6 +4685,7 @@ impl PyStore {
             range,
             &path,
             table_prefix,
+            include_derived,
         )
         .map_err(map_err)?;
         written

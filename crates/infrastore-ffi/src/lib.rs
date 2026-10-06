@@ -5269,6 +5269,11 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
 /// bounded batch at a time and each distinct array once, so a store far larger
 /// than memory exports in a few hundred megabytes.
 ///
+/// A `DeterministicSingleTimeSeries` is left out unless `include_derived`: it
+/// repeats its source `SingleTimeSeries`' values, and
+/// `infrastore_store_import_sqlite` refuses a database holding one. A filter
+/// naming the type without the flag is `INFRASTORE_ERR_INVALID_PARAMETER`.
+///
 /// `*out_json` receives a JSON array with one object per partition written:
 /// `values_table`, `series_table`, `arrays_table`, `time_series_type`,
 /// `value_type`, `time_reference`, `arrays`, `series` and `rows`.
@@ -5292,6 +5297,7 @@ pub unsafe extern "C" fn infrastore_store_export_sqlite(
     end_ms: i64,
     path: *const c_char,
     table_prefix: *const c_char,
+    include_derived: bool,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5309,7 +5315,8 @@ pub unsafe extern "C" fn infrastore_store_export_sqlite(
         filter,
         range,
         &path,
-        &prefix
+        &prefix,
+        include_derived
     ));
     let rows: Vec<serde_json::Value> = written
         .iter()
@@ -9647,6 +9654,7 @@ mod abi_tests {
                     0,
                     db.as_ptr(),
                     prefix.as_ptr(),
+                    false,
                     &mut json,
                     &mut json_len,
                 )

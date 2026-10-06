@@ -2,11 +2,12 @@
 `add --sqlite` from Python, over the same tables."""
 
 import sqlite3
+from datetime import timedelta
 
 import numpy as np
 import pytest
 
-from infrastore import TimeSeriesError, Store
+from infrastore import TimeSeriesError, TimeSeriesType, Store
 from conftest import add_on_grid, t
 
 
@@ -39,6 +40,22 @@ def test_round_trip(source, tmp_path):
         (2, "reactive_power"),
     }
     np.testing.assert_array_equal(target.read_by_id(ids[0]).data, np.arange(24.0))
+
+
+def test_derived_series_are_exported_only_when_asked_for(source, tmp_path):
+    source.transform_single_time_series(timedelta(hours=2), timedelta(hours=1))
+    written = source.export_sqlite(str(tmp_path / "plain.db"))
+    assert {p["time_series_type"] for p in written} == {"SingleTimeSeries"}
+    with pytest.raises(TimeSeriesError):
+        source.export_sqlite(
+            str(tmp_path / "named.db"),
+            time_series_type=TimeSeriesType.DeterministicSingleTimeSeries,
+        )
+    written = source.export_sqlite(str(tmp_path / "all.db"), include_derived=True)
+    assert {p["time_series_type"] for p in written} == {
+        "SingleTimeSeries",
+        "DeterministicSingleTimeSeries",
+    }
 
 
 def test_filter_and_time_range_narrow_the_export(source, tmp_path):

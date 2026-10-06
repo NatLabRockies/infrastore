@@ -50,8 +50,8 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params_from_iter};
 use serde_json::Value as Json;
 
 use crate::export::{
-    array_key, descriptor_row, per_step_shape, plan_keys, refuse_empty_counts, row_count,
-    series_rows,
+    array_key, descriptor_row, per_step_shape, plan_keys, refuse_empty_counts, retain_exportable,
+    row_count, series_rows,
 };
 use crate::import::{
     ImportOptions, LaneValue, SeriesRow, SeriesSink, ValuesGroup, dangling, merge_join,
@@ -1265,31 +1265,24 @@ fn read_in_chunks(
 /// Within a partition the arrays are therefore written in the order they are
 /// stored rather than in key order; the tables' index is what orders them.
 ///
-/// A `DeterministicSingleTimeSeries` is **omitted**: the import refuses the
-/// type, and a database's only selector is its prefix, so one such partition
-/// would make the whole export unreadable back. A filter naming the type
-/// itself is refused.
+/// A `DeterministicSingleTimeSeries` is **omitted unless `include_derived`**
+/// (see [`retain_exportable`]), and a filter naming the type without it is
+/// refused. Including them has a cost beyond the repeated values: the import
+/// refuses the type, and a database's only selector is its prefix, so one such
+/// partition makes the whole prefix unreadable back.
 pub fn export_store(
     store: &Store,
     filter: ListFilter,
     time_range: Option<TimeRange>,
     path: &Path,
     prefix: &str,
+    include_derived: bool,
 ) -> Result<Vec<WrittenTables>> {
     // Before any read, so a bad prefix does not cost the selection.
     check_prefix(prefix)?;
-    // Refused rather than answered with no tables, which would read as "the
-    // store holds none".
-    if filter.time_series_type == Some(TimeSeriesType::DeterministicSingleTimeSeries) {
-        return Err(unsupported(
-            "a DeterministicSingleTimeSeries is derived from a stored SingleTimeSeries and no \
-             import takes one back; export the SingleTimeSeries and run \
-             `transform_single_time_series` on the other side. An unfiltered export omits \
-             these rows and writes the rest",
-        ));
-    }
+    let filter_type = filter.time_series_type;
     let mut metas = store.list_metadata(filter)?;
-    metas.retain(|m| m.time_series_type != TimeSeriesType::DeterministicSingleTimeSeries);
+    retain_exportable(filter_type, &mut metas, include_derived)?;
     let ids: Vec<TimeSeriesId> = metas
         .iter()
         .map(|m| {

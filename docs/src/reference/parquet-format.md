@@ -266,9 +266,12 @@ Refused rather than coerced:
   since `P1M` clamps to month end.
 - **`Struct` and `List` value columns.** Those are the decoded form this version does not write.
 - **A `DeterministicSingleTimeSeries` partition.** The type is derived from a stored
-  `SingleTimeSeries` rather than added; import that and run `transform`. The SQLite export therefore
-  omits these rows (and refuses a filter naming the type), since a database cannot have one
-  partition set aside the way a set of files can.
+  `SingleTimeSeries` rather than added; import that and run `transform`. Both exports therefore
+  **leave these rows out by default** and refuse a filter naming the type. `--include-derived`
+  (`include_derived` in the bindings) writes them, for a consumer that wants the forecast table to
+  query — at the cost of repeating the source series' values, and of a partition no import takes
+  back. In a Parquet directory that partition can be set aside; in a SQLite database it cannot, so
+  the import refuses the whole prefix.
 
 A dense forecast is placed by its **coordinates**, not its row order, so a file a query engine
 sorted or partitioned still reads correctly. Every slot must be filled exactly once: a cube has no

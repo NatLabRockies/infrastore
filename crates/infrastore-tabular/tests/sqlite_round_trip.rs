@@ -87,7 +87,7 @@ fn assert_streams_alike(store: &Store, pairs: &[(TimeSeriesMetadata, TimeSeriesD
     let dir = tempfile::tempdir().unwrap();
     let (whole, streamed) = (dir.path().join("whole.db"), dir.path().join("streamed.db"));
     let whole_result = write_sqlite(&whole, pairs, "p_");
-    let streamed_result = export_store(store, ListFilter::new(), None, &streamed, "p_");
+    let streamed_result = export_store(store, ListFilter::new(), None, &streamed, "p_", false);
     match (whole_result, streamed_result) {
         (Ok(_), Ok(_)) => assert_eq!(dump(&streamed), dump(&whole)),
         (Err(a), Err(b)) => assert_eq!(b.to_string(), a.to_string()),
@@ -790,12 +790,12 @@ fn a_store_exports_a_selection_and_imports_all_or_nothing() {
     let db = dir.path().join("out.db");
 
     // A bad prefix is refused before anything is read or created.
-    assert!(export_store(&source, ListFilter::new(), None, &db, "no-dash").is_err());
+    assert!(export_store(&source, ListFilter::new(), None, &db, "no-dash", false).is_err());
     assert!(!db.exists());
 
     let filter = ListFilter::new().name_glob("[ls]*");
     let range = TimeRange::spelled(t0() + Duration::hours(1), t0() + Duration::hours(3), false);
-    let written = export_store(&source, filter, Some(range), &db, "").expect("export");
+    let written = export_store(&source, filter, Some(range), &db, "", false).expect("export");
     assert_eq!(written.iter().map(|t| t.series).sum::<usize>(), 2);
     assert_eq!(written.iter().map(|t| t.rows).sum::<usize>(), 4);
 
@@ -838,13 +838,27 @@ fn a_derived_forecast_is_left_out_so_the_export_reads_back() {
     // Asking for the derived type by name is refused, not answered with nothing.
     let derived = ListFilter::new()
         .time_series_type(infrastore_core::TimeSeriesType::DeterministicSingleTimeSeries);
-    let err = export_store(&source, derived, None, &db, "").unwrap_err();
+    let err = export_store(&source, derived.clone(), None, &db, "", false).unwrap_err();
     assert!(err.to_string().contains("derived"), "{err}");
     assert!(!db.exists());
 
-    let written = export_store(&source, ListFilter::new(), None, &db, "").expect("export");
+    let written = export_store(&source, ListFilter::new(), None, &db, "", false).expect("export");
     assert_eq!(written.iter().map(|t| t.series).sum::<usize>(), 1);
     let mut target = Store::create(None, true).unwrap();
     let ids = import_store(&mut target, &db, "", &ImportOptions::default()).expect("import");
     assert_eq!(ids.len(), 1);
+
+    // Asked for, the derived series is written as a partition of its own --
+    // by name or with the rest -- and the import refuses that partition.
+    let written = export_store(&source, derived, None, &db, "only_", true).expect("by name");
+    assert_eq!(written.len(), 1);
+    assert_eq!(
+        written[0].time_series_type,
+        infrastore_core::TimeSeriesType::DeterministicSingleTimeSeries
+    );
+    let written = export_store(&source, ListFilter::new(), None, &db, "all_", true).expect("all");
+    assert_eq!(written.iter().map(|t| t.series).sum::<usize>(), 2);
+    let mut target = Store::create(None, true).unwrap();
+    let err = import_store(&mut target, &db, "all_", &ImportOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("derived"), "{err}");
 }
