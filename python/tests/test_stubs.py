@@ -1,14 +1,17 @@
 """Guard against drift between the runtime module and infrastore.pyi.
 
-Every public runtime name must appear in the stub, and every public method of
-every stubbed class must exist at runtime (and vice versa). Signatures are not
-compared — the stub is hand-written — but name-level drift is caught here.
+Every public runtime name and class member must appear in the stub. Runtime
+record keys and callable signatures are checked too. A separate ``ty`` fixture
+checks that consumers receive the intended static types.
 """
 
 import ast
+import inspect
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import infrastore
+import numpy as np
 
 STUB_PATH = (
     Path(__file__).resolve().parents[2]
@@ -18,6 +21,16 @@ STUB_PATH = (
 )
 
 
+def class_members(node: ast.ClassDef) -> set[str]:
+    members = set()
+    for item in node.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            members.add(item.name)
+        elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            members.add(item.target.id)
+    return members
+
+
 def load_stub():
     tree = ast.parse(STUB_PATH.read_text())
     classes: dict[str, set[str]] = {}
@@ -25,13 +38,7 @@ def load_stub():
     assigns: set[str] = set()
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
-            members = set()
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    members.add(item.name)
-                elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
-                    members.add(item.target.id)
-            classes[node.name] = members
+            classes[node.name] = class_members(node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             functions.add(node.name)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
@@ -44,8 +51,24 @@ def load_stub():
 
 
 STUB_CLASSES, STUB_FUNCTIONS, STUB_ASSIGNS = load_stub()
-# Type aliases in the stub with no runtime counterpart.
-STUB_ONLY = {"Period", "TimeSeriesData", "ArrowTable"}
+# Type-only aliases and TypedDicts with no runtime counterpart.
+STUB_ONLY = {
+    "Period",
+    "TimeSeriesData",
+    "ArrowTable",
+    "FeatureValue",
+    "FeatureMap",
+    "TimeSeriesTypeName",
+    "OwnerCategoryName",
+    "StaticTimeSeriesTypeName",
+    "UnitSystemName",
+    "DtypeName",
+    "TimeSeriesMetadata",
+    "TimeSeriesAddItem",
+    "StaticReaderGrid",
+    "StaticReaderGroup",
+    "ForecastReaderTimeline",
+}
 
 
 def public_runtime_names():
@@ -85,6 +108,56 @@ def test_class_members_match():
     assert not problems, "\n".join(problems)
 
 
+def test_metadata_typed_dict_matches_runtime_record():
+    from infrastore import (
+        Deterministic,
+        OwnerCategory,
+        SingleTimeSeries,
+        Store,
+        TimeSeriesType,
+    )
+
+    store = Store.create(in_memory=True)
+    try:
+        series = SingleTimeSeries(
+            datetime(2024, 1, 1, tzinfo=timezone.utc),
+            timedelta(hours=1),
+            np.asarray([1.0, 2.0], dtype=np.float64),
+            "load",
+        )
+        store.add_time_series(
+            1,
+            "Generator",
+            OwnerCategory.Component,
+            series,
+            features={"scenario": "high"},
+        )
+        (metadata,) = store.list_metadata()
+        assert set(metadata) == STUB_CLASSES["TimeSeriesMetadata"]
+
+        reader = store.build_static_reader(timedelta(hours=1))
+        assert set(reader.grid()) == STUB_CLASSES["StaticReaderGrid"]
+        (group,) = reader.groups()
+        assert set(group) == STUB_CLASSES["StaticReaderGroup"]
+
+        forecast = Deterministic(
+            datetime(2024, 1, 1, tzinfo=timezone.utc),
+            timedelta(hours=1),
+            timedelta(hours=2),
+            timedelta(hours=1),
+            3,
+            np.arange(6, dtype=np.float64).reshape(2, 3),
+            "forecast",
+        )
+        store.add_time_series(2, "Generator", OwnerCategory.Component, forecast)
+        forecast_reader = store.build_forecast_reader(
+            TimeSeriesType.Deterministic, timedelta(hours=1)
+        )
+        assert set(forecast_reader.timeline()) == STUB_CLASSES["ForecastReaderTimeline"]
+    finally:
+        store.close()
+
+
 # ---- signature drift -------------------------------------------------------
 #
 # Name-level checks above catch a member that appears or vanishes. They cannot
@@ -99,8 +172,6 @@ def test_class_members_match():
 # and deliberately more precise than anything the runtime exposes. Argument
 # names, their order, their kind, and whether they have a default are compared,
 # because those are what a caller writes.
-
-import inspect
 
 
 def stub_signatures():
