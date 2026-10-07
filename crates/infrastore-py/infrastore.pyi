@@ -8,7 +8,7 @@ appears here; keep the two in sync.
 from datetime import datetime, timedelta
 from types import TracebackType
 from collections.abc import Sequence
-from typing import Any, final
+from typing import Any, Literal, NotRequired, TypeAlias, TypedDict, final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -30,6 +30,25 @@ TimeSeriesData = (
     | Probabilistic
     | Scenarios
 )
+FeatureValue: TypeAlias = bool | int | float | str
+FeatureMap: TypeAlias = dict[str, FeatureValue]
+TimeSeriesTypeName: TypeAlias = Literal[
+    "SingleTimeSeries",
+    "NonSequentialTimeSeries",
+    "PersistentTimeSeries",
+    "Deterministic",
+    "DeterministicSingleTimeSeries",
+    "Probabilistic",
+    "Scenarios",
+]
+OwnerCategoryName: TypeAlias = Literal["Component", "SupplementalAttribute"]
+StaticTimeSeriesTypeName: TypeAlias = Literal[
+    "SingleTimeSeries", "NonSequentialTimeSeries", "PersistentTimeSeries"
+]
+UnitSystemName: TypeAlias = Literal["natural_units", "component_base"]
+DtypeName: TypeAlias = Literal[
+    "f64", "f32", "i64", "i32", "u64", "bool", "i16", "i8", "u32", "u16", "u8"
+]
 
 __version__: str
 
@@ -75,6 +94,43 @@ class OwnerCategory:
     def __eq__(self, value: object) -> bool: ...
     def __int__(self) -> int: ...
     def __hash__(self) -> int: ...
+
+class TimeSeriesMetadata(TypedDict):
+    """One stored association row returned by the catalog lookup methods."""
+
+    owner_id: int
+    owner_type: str
+    owner_category: OwnerCategoryName
+    time_series_type: TimeSeriesTypeName
+    name: str
+    data_hash: str
+    id: int
+    initial_timestamp: str | None
+    length: int | None
+    resolution: str | None
+    horizon: str | None
+    interval: str | None
+    count: int | None
+    percentiles: list[float] | None
+    element_type: str
+    element_shape: list[int]
+    timestamps: list[str] | None
+    features: FeatureMap
+    units: str | None
+    quantity_kind: str | None
+    unit_system: UnitSystemName | None
+    time_reference: str | None
+    component_field: str | None
+    application_data: str | None
+
+class TimeSeriesAddItem(TypedDict):
+    """One item accepted by :meth:`Store.add_time_series_bulk`."""
+
+    owner_id: int
+    owner_type: str
+    owner_category: OwnerCategory
+    time_series: TimeSeriesData
+    features: NotRequired[FeatureMap | None]
 
 # ---- Time-series value types ----------------------------------------------
 #
@@ -595,16 +651,37 @@ class ParentChildAssociation:
 
 # ---- Readers ---------------------------------------------------------------
 
+class StaticReaderGrid(TypedDict):
+    time_series_type: StaticTimeSeriesTypeName
+    initial_timestamp: str
+    resolution: str | None
+    length: int
+    time_reference: str | None
+
+class StaticReaderGroup(TypedDict):
+    dtype: DtypeName
+    element_type: str
+    element_shape: list[int]
+    ids: list[int]
+
+class ForecastReaderTimeline(TypedDict):
+    initial_timestamp: str
+    resolution: str
+    interval: str
+    count: int
+    time_series_type: TimeSeriesTypeName
+    time_reference: str | None
+
 @final
 class StaticReader:
-    def grid(self) -> dict[str, Any]: ...
-    def groups(self) -> list[dict[str, Any]]: ...
+    def grid(self) -> StaticReaderGrid: ...
+    def groups(self) -> list[StaticReaderGroup]: ...
     def timestamps(self) -> list[datetime]: ...
     def group_values(self, index: int) -> NDArray[Any]: ...
 
 @final
 class ForecastReader:
-    def timeline(self) -> dict[str, Any]: ...
+    def timeline(self) -> ForecastReaderTimeline: ...
     def entries(self) -> list[int]: ...
     def timestamps(self) -> list[datetime]: ...
     def entry_values(self, index: int) -> NDArray[Any]: ...
@@ -681,11 +758,11 @@ class Store:
         owner_category: OwnerCategory,
         time_series: TimeSeriesData,
         *,
-        features: dict[str, int | float | bool | str] | None = None,
+        features: FeatureMap | None = None,
     ) -> int: ...
-    def add_time_series_bulk(self, items: list[dict[str, Any]]) -> list[int]: ...
-    def get_metadata_by_id(self, id: int) -> dict[str, Any] | None: ...
-    def list_metadata_by_ids(self, ids: list[int]) -> list[dict[str, Any]]: ...
+    def add_time_series_bulk(self, items: list[TimeSeriesAddItem]) -> list[int]: ...
+    def get_metadata_by_id(self, id: int) -> TimeSeriesMetadata | None: ...
+    def list_metadata_by_ids(self, ids: list[int]) -> list[TimeSeriesMetadata]: ...
     def association_exists(self, id: int) -> bool: ...
     def read_by_ids(self, ids: list[int]) -> list[TimeSeriesData]: ...
     def read_by_ids_range(
@@ -838,7 +915,7 @@ class Store:
         length: int | None = None,
         features: dict[str, int | float | bool | str] | None = None,
         features_exact: bool = False,
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[TimeSeriesMetadata]: ...
     def list_names(
         self,
         *,
