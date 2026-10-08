@@ -51,7 +51,7 @@ def load_stub():
 
 
 STUB_CLASSES, STUB_FUNCTIONS, STUB_ASSIGNS = load_stub()
-# Type-only aliases and TypedDicts with no runtime counterpart.
+# Stub-only aliases and TypedDicts with no runtime counterpart.
 STUB_ONLY = {
     "Period",
     "TimeSeriesData",
@@ -68,6 +68,7 @@ STUB_ONLY = {
     "StaticReaderGrid",
     "StaticReaderGroup",
     "ForecastReaderTimeline",
+    "TimeSeriesCountSummaryRow",
 }
 
 
@@ -87,6 +88,28 @@ def test_every_stub_name_exists_at_runtime():
     stubbed = (set(STUB_CLASSES) | STUB_FUNCTIONS | STUB_ASSIGNS) - STUB_ONLY
     ghosts = {n for n in stubbed if not hasattr(infrastore, n)}
     assert not ghosts, f"stubbed names that do not exist at runtime: {sorted(ghosts)}"
+
+
+def test_time_series_count_summary_record_matches_stub():
+    from infrastore import OwnerCategory, SingleTimeSeries, Store
+
+    store = Store.create(in_memory=True)
+    try:
+        store.add_time_series(
+            1,
+            "Generator",
+            OwnerCategory.Component,
+            SingleTimeSeries(
+                datetime(2024, 1, 1, tzinfo=timezone.utc),
+                timedelta(hours=1),
+                np.asarray([1.0, 2.0], dtype=np.float64),
+                "load",
+            ),
+        )
+        (row,) = store.time_series_count_summary()
+        assert set(row) == STUB_CLASSES["TimeSeriesCountSummaryRow"]
+    finally:
+        store.close()
 
 
 def test_class_members_match():

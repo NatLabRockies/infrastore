@@ -4277,10 +4277,33 @@ impl PyStore {
     /// `NotFoundError` if any id names no row — unlike `association_exists`,
     /// this call is already committed to reading, so a stale reference is a
     /// failure rather than an answer.
-    fn read_by_ids(&self, py: Python<'_>, ids: Vec<i64>) -> PyResult<Vec<Py<PyAny>>> {
+    ///
+    /// `len` (static timesteps) or `count` (forecast windows) applies one
+    /// strict `ReadWindow` to every id. If `start_time` is omitted, each row
+    /// starts at its own first value and keeps its own spelling, so the batch
+    /// may mix zoneless and instant-bearing series. A supplied start must land
+    /// on every row's grid and have one compatible aware/naive spelling across
+    /// the set. A requested extent past any row's end or a mismatched extent
+    /// kind is an error, never a clipped result. With no window arguments this
+    /// reads each series whole.
+    #[pyo3(signature = (ids, *, start_time=None, len=None, count=None))]
+    fn read_by_ids(
+        &self,
+        py: Python<'_>,
+        ids: Vec<i64>,
+        start_time: Option<PyInstant>,
+        len: Option<usize>,
+        count: Option<usize>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
         let ids = to_ids(&ids);
+        let window = core_lib::ReadWindow {
+            start: start_time.as_ref().map(|s| s.instant),
+            zoneless: start_time.as_ref().is_some_and(|s| s.is_zoneless()),
+            len,
+            count,
+        };
         self.store()?
-            .read_by_ids(&ids, core_lib::ReadWindow::full())
+            .read_by_ids(&ids, window)
             .map_err(map_err)?
             .into_iter()
             .map(|d| time_series_data_to_py(py, d))
@@ -4519,6 +4542,34 @@ impl PyStore {
                 d.set_item("interval", iso(r.interval))?;
                 d.set_item("window_count", r.window_count)?;
                 d.set_item("count", r.count)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Group association counts by owner kind, stored type, temporal grid,
+    /// and timestamp spelling without materializing each metadata row. Names,
+    /// features, and forecast-only dimensions are folded into each count.
+    fn time_series_count_summary<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = self.store()?.time_series_count_summary().map_err(map_err)?;
+        rows.iter()
+            .map(|row| {
+                let d = PyDict::new(py);
+                d.set_item("owner_type", &row.owner_type)?;
+                d.set_item("owner_category", row.owner_category.as_str())?;
+                d.set_item("time_series_type", row.time_series_type.as_str())?;
+                d.set_item(
+                    "initial_timestamp",
+                    row.initial_timestamp.map(|t| t.to_rfc3339()),
+                )?;
+                d.set_item(
+                    "time_reference",
+                    row.time_reference
+                        .as_ref()
+                        .map(core_lib::TimeReference::as_storage_string),
+                )?;
+                d.set_item("resolution", row.resolution.map(|p| p.to_iso8601()))?;
+                d.set_item("count", row.count)?;
                 Ok(d)
             })
             .collect()
@@ -5037,6 +5088,37 @@ filter_pymethods! {
     /// included — so it is safe to call in hot loops.
     fn has_any_time_series(&self) -> bool {
         |store, filter| store.has_any_time_series(filter).map_err(map_err)
+    }
+}
+
+#[pymethods]
+impl PyStore {
+    /// Whether an exact stored type and complete feature set exists for this
+    /// owner and name. `features=None` means the empty feature set.
+    ///
+    /// Unlike `has_any_time_series`, a request for `Deterministic` does not
+    /// include `DeterministicSingleTimeSeries`. The query is an index-backed
+    /// existence probe and does not construct metadata dicts.
+    #[pyo3(signature = (*, owner_id, owner_category, name, time_series_type, features=None))]
+    fn has_time_series(
+        &self,
+        owner_id: i64,
+        owner_category: PyOwnerCategory,
+        name: &str,
+        time_series_type: &Bound<'_, PyAny>,
+        features: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<bool> {
+        let time_series_type = pyany_to_requested_type(time_series_type, "time_series_type")?;
+        let features = features_from_dict(features)?;
+        self.store()?
+            .has_time_series(
+                owner_id,
+                owner_category.into(),
+                name,
+                time_series_type,
+                &features,
+            )
+            .map_err(map_err)
     }
 }
 

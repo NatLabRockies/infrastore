@@ -14,6 +14,7 @@ use infrastore_core::{
     ParentChildAssociation, ParentChildFilter,
     StaticReader, StaticGroup, ForecastReader, ForecastEntry, WindowSlot,
     TimeSeriesCounts, TimeSeriesCountsDetailed, StaticSummaryRow, ForecastSummaryRow,
+    TimeSeriesCountSummaryRow,
     ForecastParameters, StaticConsistency, CompactionReport, IntegrityReport,
     TimeSeriesError, Result, DATA_FORMAT_VERSION,
 };
@@ -124,9 +125,9 @@ impl Store {
         new_name: Option<&str>,   // None keeps the source name
     ) -> Result<TimeSeriesId>;    // the copy's own id
 
-    // Read many full series at once. Packed `SingleTimeSeries` are read in one
-    // decompress-once pass per dataset. Results follow the order the ids are
-    // given, repeats included; `NotFound` if any id names no row.
+    // Read many series at once with one strict window. Packed `SingleTimeSeries`
+    // are read in one decompress-once pass per dataset. Results follow the order
+    // the ids are given, repeats included; `NotFound` if any id names no row.
     pub fn read_by_ids(
         &self,
         ids: &[TimeSeriesId],
@@ -184,9 +185,18 @@ impl Store {
         &self,
         ids: &[TimeSeriesId],
     ) -> Result<Vec<TimeSeriesMetadata>>;
+    // Existence for one owner/name/type and complete feature set. This type
+    // match is exact, not the Deterministic family match of ListFilter.
+    pub fn has_time_series(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+        name: &str,
+        time_series_type: TimeSeriesType,
+        features: &Features,
+    ) -> Result<bool>;
     // Existence over a filter without listing: "does this owner have any time
-    // series (of type T)?". Both probes answer from a covering index and are
-    // safe for hot loops.
+    // series (of type T)?". This query uses the requested-type family semantics.
     pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool>;
     // Whether the store holds no content of any kind — no time series, no
     // associations in any catalog. One short-circuited existence probe per
@@ -222,6 +232,7 @@ impl Store {
         resolution: Option<Period>,
     ) -> Result<Vec<StaticConsistency>>;
     pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>>;
+    pub fn time_series_count_summary(&self) -> Result<Vec<TimeSeriesCountSummaryRow>>;
     pub fn num_distinct_arrays(&self) -> Result<i64>;
     pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed>;
     pub fn list_owner_ids(
@@ -378,8 +389,10 @@ can be moved between threads, but sharing one requires external synchronization 
 - **`read_by_id` / `read_by_ids`** — Reconstruct the stored type as a
   [`TimeSeriesData`](#timeseriesdata) variant (static series and all forecast types). A read names
   only an id, so the row's own `time_series_type` decides what comes back — there is no requested
-  type to disagree with it. A `ReadWindow` is _checked_: a start off the series' grid, or an extent
-  past its end, is `InvalidParameter` rather than the smaller answer a range would clip to.
+  type to disagree with it. A `ReadWindow` is _checked_: a start off any selected series' grid, or
+  an extent past any selected series' end, is `InvalidParameter` rather than the smaller answer a
+  range would clip to. `read_by_ids` applies one window to every id and preserves input order and
+  repeated ids. A named start also requires one compatible timestamp spelling across the set.
 - **`read_by_ids_range`** — The bounds read. `start` is inclusive and `end` is exclusive, and it
   _clips_ to what is there — see [Reading a time range](#reading-a-time-range) for what each type
   applies that to. Both bounds must be spelled the way the series are, and a selection spanning both
@@ -396,6 +409,14 @@ can be moved between threads, but sharing one requires external synchronization 
   `Deterministic` (what a read-then-write copy through the bindings would produce). Only a metadata
   row is written: the array is content-addressed and shared. `new_name = None` keeps the source
   name. Errors with `DuplicateTimeSeries` if the destination identity already exists.
+- **`has_time_series`** — An exact existence probe over
+  `(owner_id, owner_category, name,
+  time_series_type, features)`. The entire feature set is hashed,
+  including the empty set, and the stored type is compared exactly. It returns a boolean from an
+  indexed `SELECT 1` query without hydrating metadata. This is intentionally narrower than
+  `has_any_time_series`, whose `ListFilter::time_series_type` follows the requested-type rule and
+  whose features can be a subset. Neither probe changes duplicate insertion or derived-forecast
+  conflict checks.
 - **`list_metadata`** — The identify half of the whole surface: which series exist, what type and
   grid each is, which array each resolves to (`data_hash`), and the `id` that addresses it. Its
   [`ListFilter`](#listfilter) reads `time_series_type` through
@@ -496,6 +517,11 @@ caller. All are read-only and hit SQLite once.
   at different resolutions legitimately have different grids — so pass `Some(resolution)` to scope
   the check to one grid. Returns `IntegrityError` when the series at a single resolution disagree.
 - **`counts_by_type`** — Association count per [`TimeSeriesType`](#timeseriestype).
+- **`time_series_count_summary`** — One [`TimeSeriesCountSummaryRow`](#report-and-count-types) per
+  `(owner_type, owner_category, time_series_type, initial_timestamp, time_reference, resolution)`
+  group. It aggregates names, features, and forecast-only dimensions into `count`, and retains the
+  timestamp reference so consumers can regroup without listing every association. One catalog
+  `GROUP BY` query.
 - **`num_distinct_arrays`** — Distinct stored content hashes; series sharing an array count once.
 - **`time_series_counts_detailed`** — [`TimeSeriesCountsDetailed`](#report-and-count-types):
   distinct owners split by category, and distinct _arrays_ (not associations) split into static vs
@@ -1798,6 +1824,18 @@ pub struct ForecastSummaryRow {
     pub horizon: Option<Period>,
     pub interval: Option<Period>,
     pub window_count: Option<i64>,
+    pub count: i64,
+}
+// One association-count group for `time_series_count_summary`. The UTC
+// instant and its reference are both retained, so equal instants with distinct
+// spellings remain distinguishable.
+pub struct TimeSeriesCountSummaryRow {
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub time_series_type: TimeSeriesType,
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    pub time_reference: Option<TimeReference>,
+    pub resolution: Option<Period>,
     pub count: i64,
 }
 pub struct CompactionReport {   // on-disk compaction rewrites the .h5; see the file-format reference

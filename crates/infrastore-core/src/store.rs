@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Result, TimeSeriesError};
-use crate::hash::array_hash;
+use crate::hash::{array_hash, features_hash};
 use crate::metadata::{
     AssociationIdentity, Endpoint, MetadataFilter, MetadataStore, PARENT_CHILD_TABLE,
     ParentChildAssociation, ParentChildFilter, SUPPLEMENTAL_ATTRIBUTE_TABLE, SeriesFamily,
@@ -4511,6 +4511,37 @@ impl Store {
         })
     }
 
+    /// Whether an association matches this owner, name, stored type, and whole
+    /// feature set.
+    ///
+    /// Unlike [`Self::has_any_time_series`], `time_series_type` is exact:
+    /// asking for `Deterministic` does not match a stored
+    /// `DeterministicSingleTimeSeries`. `features` is also exact, including an
+    /// empty map. Resolution and forecast interval are not predicates here, so
+    /// this answers whether any row with the given association descriptors
+    /// exists at any grid.
+    ///
+    /// A covering-index existence probe (`SELECT 1`), not a metadata listing;
+    /// no matching row is hydrated. The same `has_time_series` call is safe in
+    /// duplicate checks and hot per-owner loops.
+    pub fn has_time_series(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+        name: &str,
+        time_series_type: TimeSeriesType,
+        features: &Features,
+    ) -> Result<bool> {
+        self.metadata.exists(&MetadataFilter {
+            owner_id: Some(owner_id),
+            owner_category: Some(owner_category),
+            time_series_type: Some(TypeMatch::Exact(time_series_type)),
+            name: Some(name.to_owned()),
+            features_hash: Some(features_hash(features)),
+            ..Default::default()
+        })
+    }
+
     /// True iff at least one association matches `filter`, answering "does
     /// this component have any time series (of type T)?" without listing them.
     ///
@@ -4716,6 +4747,17 @@ impl Store {
     /// no binding has to scan and group.
     pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
         self.metadata.counts_by_type()
+    }
+
+    /// Association counts grouped by owner kind, stored type, and temporal
+    /// grid, preserving timestamp spelling. This is a compact count surface for
+    /// callers that need grid-level grouping but not one metadata row per
+    /// association; name, features, and forecast-only dimensions are folded
+    /// into the count.
+    pub fn time_series_count_summary(
+        &self,
+    ) -> Result<Vec<crate::metadata::TimeSeriesCountSummaryRow>> {
+        self.metadata.time_series_count_summary()
     }
 
     /// Number of distinct stored arrays (content hashes); shared series count once.
