@@ -299,17 +299,23 @@ to what is there:
 )
 ```
 
-`read_by_id` takes the other kind of slice: `start_time` plus a `len` of timesteps or a `count` of
-windows, **checked** rather than clipped, so an over-long request raises rather than quietly
-returning less.
+`read_by_id` and `read_by_ids` also take a strict window rather than clipped bounds. `len` counts
+static timesteps and `count` counts forecast windows. The batch form applies that window to every id
+and preserves order and repeats. `start_time` is optional. Without it, each row starts at its own
+beginning, so mixed zoneless and aware series are allowed. A named off-grid start, a spelling
+mismatch, or a window longer than any selected series raises instead of quietly returning less.
 
 To read **many whole series at once** — e.g. loading everything for a plot — `read_by_ids` takes a
 list of ids and returns the typed series objects in the same order. Packed `SingleTimeSeries` are
 read in one decompress-once pass per dataset, which is much faster than a `read_by_id` each:
 
 ```python
+ids = [series_id]
+start = datetime(2024, 1, 1, 6, tzinfo=timezone.utc)
+end = datetime(2024, 1, 1, 12, tzinfo=timezone.utc)
 series = store.read_by_ids(ids)
-window = store.read_by_ids_range(ids, (start, end))   # the same clip on every series
+window = store.read_by_ids_range(ids, (start, end))
+strict = store.read_by_ids(ids, start_time=start, len=6)  # exactly six steps from start
 ```
 
 ### As a table

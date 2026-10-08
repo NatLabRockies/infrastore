@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    AddRequest, Deterministic, FeatureValue, Features, ListFilter, OwnerCategory, Period,
-    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesError, TimeSeriesId, TimeSeriesMetadata,
-    TimeSeriesType, TypedArray, UnitSystem,
+    AddRequest, Deterministic, FeatureValue, Features, ListFilter, NonSequentialTimeSeries,
+    OwnerCategory, Period, ReadWindow, SingleTimeSeries, Store, TimeReference, TimeSeriesData,
+    TimeSeriesError, TimeSeriesId, TimeSeriesMetadata, TimeSeriesType, TypedArray, UnitSystem,
 };
 
 mod common;
@@ -309,6 +309,35 @@ fn bulk_read_range_matches_per_key_get_time_series() {
         store
             .read_by_ids(&keys, infrastore_core::ReadWindow::full())
             .unwrap()
+    );
+}
+
+#[test]
+fn bulk_read_window_preserves_order_and_values_across_backends() {
+    for_each_backend(
+        |store| {
+            let a = add_sts(store, 1, "load_a", 10.0);
+            let b = add_sts(store, 2, "load_b", 100.0);
+            (a, b)
+        },
+        |store, (a, b), backend| {
+            let start = t0() + Duration::hours(1);
+            let got = store
+                .read_by_ids(&[*b, *a, *b], ReadWindow::from(start).with_len(2))
+                .unwrap_or_else(|error| panic!("{backend}: {error}"));
+            let values: Vec<Vec<f64>> = got
+                .iter()
+                .map(|series| series.as_single().unwrap().data.to_f64_vec().unwrap())
+                .collect();
+            assert_eq!(
+                values,
+                vec![vec![101.0, 102.0], vec![11.0, 12.0], vec![101.0, 102.0]]
+            );
+            assert!(
+                got.iter()
+                    .all(|series| series.as_single().unwrap().initial_timestamp == start)
+            );
+        },
     );
 }
 
@@ -796,6 +825,196 @@ fn has_any_time_series_answers_owner_level_existence() {
 }
 
 #[test]
+fn has_time_series_matches_exact_type_and_complete_features() {
+    let mut store = Store::create(None, true).unwrap();
+    add_sts(&mut store, 1, "load", 10.0);
+
+    let high: Features = [
+        ("scenario".into(), FeatureValue::Str("high".into())),
+        ("model_year".into(), FeatureValue::Int(2030)),
+    ]
+    .into();
+    store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts("load", 20.0, 4)),
+            )
+            .with_features(high.clone()),
+        )
+        .unwrap();
+
+    let probe = |owner_id, owner_category, name, time_series_type, features| {
+        store.has_time_series(owner_id, owner_category, name, time_series_type, &features)
+    };
+
+    // An empty feature set is a concrete identity, not an omitted filter.
+    assert!(
+        probe(
+            1,
+            OwnerCategory::Component,
+            "load",
+            TimeSeriesType::SingleTimeSeries,
+            Features::new(),
+        )
+        .unwrap()
+    );
+    assert!(
+        probe(
+            1,
+            OwnerCategory::Component,
+            "load",
+            TimeSeriesType::SingleTimeSeries,
+            high.clone(),
+        )
+        .unwrap()
+    );
+
+    let partial: Features = [("scenario".into(), FeatureValue::Str("high".into()))].into();
+    assert!(
+        store
+            .has_any_time_series(
+                ListFilter::new()
+                    .owner_id(1)
+                    .owner_category(OwnerCategory::Component)
+                    .name("load")
+                    .time_series_type(TimeSeriesType::SingleTimeSeries)
+                    .features(partial.clone()),
+            )
+            .unwrap()
+    );
+    assert!(
+        !probe(
+            1,
+            OwnerCategory::Component,
+            "load",
+            TimeSeriesType::SingleTimeSeries,
+            partial,
+        )
+        .unwrap()
+    );
+
+    assert!(
+        !probe(
+            2,
+            OwnerCategory::Component,
+            "load",
+            TimeSeriesType::SingleTimeSeries,
+            Features::new(),
+        )
+        .unwrap()
+    );
+    assert!(
+        !probe(
+            1,
+            OwnerCategory::SupplementalAttribute,
+            "load",
+            TimeSeriesType::SingleTimeSeries,
+            Features::new(),
+        )
+        .unwrap()
+    );
+    assert!(
+        !probe(
+            1,
+            OwnerCategory::Component,
+            "other",
+            TimeSeriesType::SingleTimeSeries,
+            Features::new(),
+        )
+        .unwrap()
+    );
+    assert!(
+        !probe(
+            1,
+            OwnerCategory::Component,
+            "load",
+            TimeSeriesType::NonSequentialTimeSeries,
+            Features::new(),
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn has_time_series_does_not_widen_deterministic_to_derived_forecasts() {
+    let mut store = Store::create(None, true).unwrap();
+    store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts("forecast", 10.0, 4)),
+            )
+            .with_features(Features::new()),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .transform_single_time_series(
+                Duration::hours(2),
+                Duration::hours(1),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap()
+            .transformed,
+        1
+    );
+
+    let family_filter = ListFilter::new()
+        .owner_id(1)
+        .owner_category(OwnerCategory::Component)
+        .name("forecast")
+        .time_series_type(TimeSeriesType::Deterministic)
+        .exact_features(Features::new());
+    assert!(store.has_any_time_series(family_filter).unwrap());
+    assert!(
+        store
+            .has_time_series(
+                1,
+                OwnerCategory::Component,
+                "forecast",
+                TimeSeriesType::DeterministicSingleTimeSeries,
+                &Features::new(),
+            )
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_time_series(
+                1,
+                OwnerCategory::Component,
+                "forecast",
+                TimeSeriesType::Deterministic,
+                &Features::new(),
+            )
+            .unwrap()
+    );
+
+    let conflict = store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(det("forecast", 40.0)),
+            )
+            .with_features(Features::new()),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(conflict, TimeSeriesError::InvalidParameter(ref message)
+            if message.contains("mutually exclusive")),
+        "{conflict:?}"
+    );
+}
+
+#[test]
 fn existence_probes_distinguish_features() {
     let mut store = Store::create(None, true).unwrap();
     let mut high: Features = BTreeMap::new();
@@ -847,6 +1066,219 @@ fn existence_probes_distinguish_features() {
         store
             .has_any_time_series(by_owner().features(Features::new()))
             .unwrap()
+    );
+}
+
+#[test]
+fn time_series_count_summary_preserves_timestamp_references() {
+    for_each_backend(
+        |store| {
+            let mut add = |owner_id, data| {
+                store
+                    .add(AddRequest::new(
+                        owner_id,
+                        "Generator",
+                        OwnerCategory::Component,
+                        data,
+                    ))
+                    .unwrap()
+            };
+
+            add(1, TimeSeriesData::SingleTimeSeries(sts("load", 0.0, 4)));
+            add(2, TimeSeriesData::SingleTimeSeries(sts("wind", 10.0, 4)));
+            add(
+                3,
+                TimeSeriesData::SingleTimeSeries(
+                    sts("load", 20.0, 4).with_time_reference(TimeReference::Utc),
+                ),
+            );
+            add(
+                4,
+                TimeSeriesData::SingleTimeSeries(
+                    sts("load", 30.0, 4)
+                        .with_time_reference(TimeReference::Zone("America/Denver".into())),
+                ),
+            );
+            add(
+                5,
+                TimeSeriesData::SingleTimeSeries(
+                    sts("load", 40.0, 4).with_time_reference(TimeReference::Zoneless),
+                ),
+            );
+            add(
+                6,
+                TimeSeriesData::Deterministic(
+                    det("forecast", 50.0).with_time_reference(TimeReference::Utc),
+                ),
+            );
+            add(
+                7,
+                TimeSeriesData::Deterministic(
+                    det("other_forecast", 60.0).with_time_reference(TimeReference::Utc),
+                ),
+            );
+            add(
+                8,
+                TimeSeriesData::Deterministic(
+                    det("forecast", 70.0)
+                        .with_time_reference(TimeReference::Zone("America/Denver".into())),
+                ),
+            );
+            let mut features = Features::new();
+            features.insert("scenario".into(), FeatureValue::Str("high".into()));
+            let forecast = Deterministic::new(
+                t0(),
+                Duration::hours(1),
+                Duration::hours(2),
+                Duration::hours(2),
+                2,
+                TypedArray::from_f64(vec![2, 2], &[80.0, 81.0, 82.0, 83.0]),
+                "forecast",
+            )
+            .unwrap()
+            .with_time_reference(TimeReference::Utc);
+            store
+                .add(
+                    AddRequest::new(
+                        6,
+                        "Generator",
+                        OwnerCategory::Component,
+                        TimeSeriesData::Deterministic(forecast),
+                    )
+                    .with_features(features),
+                )
+                .unwrap();
+            let mut features = Features::new();
+            features.insert("scenario".into(), FeatureValue::Str("medium".into()));
+            store
+                .add(
+                    AddRequest::new(
+                        10,
+                        "Generator",
+                        OwnerCategory::Component,
+                        TimeSeriesData::SingleTimeSeries(
+                            sts("wind", 85.0, 4).with_time_reference(TimeReference::Utc),
+                        ),
+                    )
+                    .with_features(features),
+                )
+                .unwrap();
+            store
+                .add(AddRequest::new(
+                    1,
+                    "Generator",
+                    OwnerCategory::SupplementalAttribute,
+                    TimeSeriesData::SingleTimeSeries(
+                        sts("load", 80.0, 4).with_time_reference(TimeReference::Utc),
+                    ),
+                ))
+                .unwrap();
+            store
+                .add(AddRequest::new(
+                    9,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::NonSequentialTimeSeries(
+                        NonSequentialTimeSeries::new(
+                            vec![t0(), t0() + Duration::minutes(30)],
+                            TypedArray::from_f64(vec![2], &[90.0, 91.0]),
+                            "events",
+                        )
+                        .unwrap()
+                        .with_time_reference(TimeReference::Utc),
+                    ),
+                ))
+                .unwrap();
+        },
+        |store, (), backend| {
+            let rows = store.time_series_count_summary().unwrap();
+            let count = |owner_category, time_series_type, reference: Option<&TimeReference>| {
+                rows.iter()
+                    .find(|row| {
+                        row.owner_category == owner_category
+                            && row.time_series_type == time_series_type
+                            && row.time_reference.as_ref() == reference
+                    })
+                    .unwrap_or_else(|| panic!("{backend}: no {time_series_type:?}/{reference:?}"))
+                    .count
+            };
+            assert_eq!(rows.len(), 8, "{backend}: one row per distinct count group");
+            assert_eq!(
+                count(
+                    OwnerCategory::Component,
+                    TimeSeriesType::SingleTimeSeries,
+                    None
+                ),
+                2,
+                "{backend}: names fold into the same unreferenced group"
+            );
+            assert_eq!(
+                count(
+                    OwnerCategory::Component,
+                    TimeSeriesType::SingleTimeSeries,
+                    Some(&TimeReference::Utc)
+                ),
+                2,
+                "{backend}: names and feature maps fold into one grid group"
+            );
+            assert_eq!(
+                count(
+                    OwnerCategory::Component,
+                    TimeSeriesType::SingleTimeSeries,
+                    Some(&TimeReference::Zone("America/Denver".into()))
+                ),
+                1,
+                "{backend}: named zone is preserved"
+            );
+            assert_eq!(
+                count(
+                    OwnerCategory::Component,
+                    TimeSeriesType::SingleTimeSeries,
+                    Some(&TimeReference::Zoneless)
+                ),
+                1,
+                "{backend}: zoneless is preserved"
+            );
+            assert_eq!(
+                count(
+                    OwnerCategory::Component,
+                    TimeSeriesType::Deterministic,
+                    Some(&TimeReference::Utc)
+                ),
+                3,
+                "{backend}: forecast names, feature maps, and intervals fold into one group"
+            );
+            assert_eq!(
+                count(
+                    OwnerCategory::Component,
+                    TimeSeriesType::Deterministic,
+                    Some(&TimeReference::Zone("America/Denver".into()))
+                ),
+                1,
+                "{backend}: forecast spelling remains visible"
+            );
+            assert_eq!(
+                count(
+                    OwnerCategory::SupplementalAttribute,
+                    TimeSeriesType::SingleTimeSeries,
+                    Some(&TimeReference::Utc)
+                ),
+                1,
+                "{backend}: owner category is a separate group"
+            );
+            let irregular = rows
+                .iter()
+                .find(|row| row.time_series_type == TimeSeriesType::NonSequentialTimeSeries)
+                .unwrap_or_else(|| panic!("{backend}: irregular group missing"));
+            assert_eq!(irregular.initial_timestamp, None, "{backend}");
+            assert_eq!(irregular.resolution, None, "{backend}");
+            assert_eq!(
+                irregular.time_reference,
+                Some(TimeReference::Utc),
+                "{backend}"
+            );
+            assert_eq!(irregular.count, 1, "{backend}");
+        },
     );
 }
 

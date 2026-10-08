@@ -12,12 +12,14 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
-
 from infrastore import (
+    Deterministic,
     InvalidParameterError,
+    NonSequentialTimeSeries,
     NotFoundError,
     OwnerCategory,
     OwnerMismatchError,
+    PersistentTimeSeries,
     SingleTimeSeries,
     Store,
     SupplementalAttributeAssociation,
@@ -39,6 +41,19 @@ def _add(
 ) -> int:
     return store.add_time_series(
         owner, "Generator", OwnerCategory.Component, _sts(name, base), **kwargs
+    )
+
+
+def _det(name: str, base: float = 0.0, count: int = 4) -> Deterministic:
+    data = np.arange(2 * count, dtype=np.float64).reshape(2, count) + base
+    return Deterministic(
+        _t0(),
+        timedelta(hours=1),
+        timedelta(hours=2),
+        timedelta(hours=1),
+        count,
+        data,
+        name,
     )
 
 
@@ -134,8 +149,10 @@ class TestReading:
 
     def test_read_by_ids_follows_the_order_it_was_given(self):
         store = Store.create(in_memory=True)
-        ids = [_add(store, name, base=base) for name, base in
-               [("a", 1.0), ("b", 10.0), ("c", 100.0)]]
+        ids = [
+            _add(store, name, base=base)
+            for name, base in [("a", 1.0), ("b", 10.0), ("c", 100.0)]
+        ]
 
         got = store.read_by_ids([ids[2], ids[0], ids[2]])
         assert [float(np.asarray(g.data)[0]) for g in got] == [100.0, 1.0, 100.0]
@@ -143,6 +160,137 @@ class TestReading:
         with pytest.raises(NotFoundError):
             store.read_by_ids([ids[0], 9999])
         assert store.read_by_ids([]) == []
+
+    def test_read_by_ids_applies_a_strict_window_and_keeps_order(self):
+        store = Store.create(in_memory=True)
+        ids = [
+            _add(store, name, owner=index, base=base)
+            for index, (name, base) in enumerate(
+                [("a", 1.0), ("b", 10.0), ("c", 100.0)], start=1
+            )
+        ]
+        start = _t0() + timedelta(hours=1)
+
+        got = store.read_by_ids([ids[2], ids[0], ids[2]], start_time=start, len=2)
+        assert [np.asarray(series.data).tolist() for series in got] == [
+            [101.0, 102.0],
+            [2.0, 3.0],
+            [101.0, 102.0],
+        ]
+        assert [series.initial_timestamp for series in got] == [start, start, start]
+
+        with pytest.raises(NotFoundError):
+            store.read_by_ids([ids[0], 9999], start_time=start, len=2)
+        with pytest.raises(InvalidParameterError):
+            store.read_by_ids([ids[0]], start_time=_t0() + timedelta(minutes=30), len=1)
+        with pytest.raises(InvalidParameterError):
+            store.read_by_ids([ids[0]], start_time=_t0() + timedelta(hours=3), len=2)
+
+    def test_read_by_ids_window_rejects_incompatible_timestamp_spellings(self):
+        store = Store.create(in_memory=True)
+        aware = store.add_time_series(
+            1,
+            "Generator",
+            OwnerCategory.Component,
+            _sts("aware"),
+        )
+        wall = store.add_time_series(
+            2,
+            "Generator",
+            OwnerCategory.Component,
+            SingleTimeSeries(
+                _t0().replace(tzinfo=None),
+                timedelta(hours=1),
+                np.arange(4, dtype=np.float64),
+                "wall",
+            ),
+        )
+
+        # Without a named start, each series supplies its own anchor and
+        # spelling. A bounded read remains valid across the two groups.
+        unanchored = store.read_by_ids([aware, wall], len=2)
+        assert [np.asarray(series.data).tolist() for series in unanchored] == [
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ]
+        assert unanchored[0].initial_timestamp == _t0()
+        assert unanchored[1].initial_timestamp == _t0().replace(tzinfo=None)
+
+        with pytest.raises(InvalidParameterError):
+            store.read_by_ids([aware, wall], start_time=_t0(), len=2)
+        with pytest.raises(InvalidParameterError):
+            store.read_by_ids([wall], start_time=_t0(), len=2)
+
+    def test_read_by_ids_slices_forecasts_by_window_count(self):
+        store = Store.create(in_memory=True)
+        ids = [
+            store.add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory.Component,
+                _det("forecast", base=float(owner * 100)),
+            )
+            for owner in (1, 2)
+        ]
+        start = _t0() + timedelta(hours=1)
+
+        got = store.read_by_ids([ids[1], ids[0], ids[1]], start_time=start, count=2)
+        assert all(isinstance(series, Deterministic) for series in got)
+        assert [np.asarray(series.data).tolist() for series in got] == [
+            [[201.0, 202.0], [205.0, 206.0]],
+            [[101.0, 102.0], [105.0, 106.0]],
+            [[201.0, 202.0], [205.0, 206.0]],
+        ]
+        assert all(series.initial_timestamp == start for series in got)
+        with pytest.raises(InvalidParameterError):
+            store.read_by_ids([ids[0]], start_time=start, len=2)
+        with pytest.raises(InvalidParameterError):
+            store.read_by_ids([ids[0]], start_time=start, count=4)
+
+    def test_read_by_ids_slices_irregular_types_on_their_stored_axis(self):
+        store = Store.create(in_memory=True)
+        timestamps = [
+            _t0(),
+            _t0() + timedelta(hours=3),
+            _t0() + timedelta(hours=4),
+            _t0() + timedelta(days=2),
+        ]
+        non_sequential = store.add_time_series(
+            1,
+            "Generator",
+            OwnerCategory.Component,
+            NonSequentialTimeSeries(
+                timestamps, np.asarray([1.0, 2.0, 3.0, 4.0]), "events"
+            ),
+        )
+        persistent = store.add_time_series(
+            2,
+            "Generator",
+            OwnerCategory.Component,
+            PersistentTimeSeries(
+                timestamps, np.asarray([10.0, 40.0, 70.0, 100.0]), "availability"
+            ),
+        )
+
+        start = timestamps[1]
+        got = store.read_by_ids([persistent, non_sequential, persistent], start_time=start, len=2)
+        assert all(isinstance(series, PersistentTimeSeries) for series in (got[0], got[2]))
+        assert isinstance(got[1], NonSequentialTimeSeries)
+        assert [np.asarray(series.data).tolist() for series in got] == [
+            [40.0, 70.0],
+            [2.0, 3.0],
+            [40.0, 70.0],
+        ]
+        assert [series.timestamps for series in got] == [timestamps[1:3]] * 3
+
+        with pytest.raises(InvalidParameterError):
+            store.read_by_ids(
+                [non_sequential, persistent],
+                start_time=_t0() + timedelta(hours=1),
+                len=1,
+            )
+        with pytest.raises(InvalidParameterError):
+            store.read_by_ids([non_sequential], start_time=timestamps[2], len=3)
 
     def test_read_by_id_resolves_a_window_in_one_call(self):
         store = Store.create(in_memory=True)

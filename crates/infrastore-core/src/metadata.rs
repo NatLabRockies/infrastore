@@ -179,6 +179,23 @@ pub struct ForecastSummaryRow {
     pub count: i64,
 }
 
+/// One grouped association count by owner kind, stored type, and temporal grid.
+///
+/// Names, features, and forecast-only dimensions are deliberately omitted so
+/// callers can count all series sharing the same owner/type/grid without loading
+/// every metadata row. `time_reference` is part of the group because an
+/// instant's spelling can matter to consumers even when its UTC value is the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeSeriesCountSummaryRow {
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub time_series_type: TimeSeriesType,
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    pub time_reference: Option<TimeReference>,
+    pub resolution: Option<Period>,
+    pub count: i64,
+}
+
 // ---- Association catalogs --------------------------------------------------
 //
 // Two tables, one shape. Both record a relationship between two catalog
@@ -2203,6 +2220,48 @@ impl MetadataStore {
         Ok(out)
     }
 
+    /// Association counts grouped by owner type/category, stored series type,
+    /// initial instant, its timestamp reference, and resolution. One grouped
+    /// query; names, features, and forecast-only dimensions are aggregated together.
+    pub fn time_series_count_summary(&self) -> Result<Vec<TimeSeriesCountSummaryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT owner_type, owner_category, time_series_type, initial_timestamp,
+                    time_reference, resolution, COUNT(*)
+             FROM time_series_associations
+             GROUP BY owner_type, owner_category, time_series_type, initial_timestamp,
+                      time_reference, resolution
+             ORDER BY owner_type, owner_category, time_series_type, initial_timestamp,
+                      time_reference, resolution",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (owner_type, owner_category, ts_type, initial, reference, resolution, count) = row?;
+            out.push(TimeSeriesCountSummaryRow {
+                owner_type,
+                owner_category: decode_category(owner_category)?,
+                time_series_type: decode_type(ts_type)?,
+                initial_timestamp: parse_opt_rfc3339(initial)?,
+                time_reference: reference
+                    .map(|value| TimeReference::parse(&value))
+                    .transpose()?,
+                resolution: resolution.map(|value| iso_to_period(&value)).transpose()?,
+                count,
+            });
+        }
+        Ok(out)
+    }
+
     /// Number of distinct stored arrays (content hashes) referenced by any
     /// association. Series that share an array (de-duplicated by content) count
     /// once. One `COUNT(DISTINCT)` query.
@@ -3764,15 +3823,15 @@ mod index_plan_tests {
 
     #[test]
     fn named_existence_probe_uses_an_index() {
-        // The hot per-component probe behind `exists` when a caller asks
-        // "does this owner have a series of this type with this name?" —
-        // the exact SQL `MetadataFilter::to_sql` renders for that filter.
-        // The four bound predicates form a left prefix of the uniqueness
-        // index, so the planner answers with a covering four-column seek.
+        // The exact-association probe pins owner, category, concrete type,
+        // name, and the whole feature-set hash. The first four predicates seek
+        // the left prefix of the uniqueness index; the feature hash is checked
+        // while scanning only rows with that owner/name identity. No row is
+        // hydrated for the boolean result.
         assert_uses_index(
             "SELECT 1 FROM time_series_associations
              WHERE 1=1 AND owner_id = ? AND owner_category = ?
-               AND time_series_type = ? AND name = ? LIMIT 1",
+               AND time_series_type = ? AND name = ? AND features_hash = ? LIMIT 1",
             "uq_ts_assoc_coalesced",
         );
     }

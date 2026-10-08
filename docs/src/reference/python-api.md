@@ -204,6 +204,20 @@ def list_metadata_by_ids(self, ids: list[int]) -> list[dict]: ...
 # The listing addressed by id, in the order given; NotFoundError if any is stale.
 def association_exists(self, id: int) -> bool: ...          # no row fetched
 
+def has_time_series(
+    self,
+    *,
+    owner_id: int,
+    owner_category: OwnerCategory,
+    name: str,
+    time_series_type: TimeSeriesType | str,
+    features: dict[str, int | float | bool | str] | None = None,
+) -> bool: ...
+# Exact stored type and complete feature-set existence for one owner/name.
+# `features=None` means the empty set. Resolution and forecast interval are not
+# predicates. Unlike has_any_time_series, Deterministic does not include
+# DeterministicSingleTimeSeries.
+
 def transform_single_time_series(
     self,
     horizon: timedelta | str,
@@ -242,10 +256,19 @@ def read_by_ids_range(
 # clips on its own terms: the result begins at the breakpoint in force at `start`.
 
 def read_by_ids(
-    self, ids: list[int]
-) -> list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
+    self,
+    ids: list[int],
+    *,
+    start_time: datetime | None = None,
+    len: int | None = None,
+    count: int | None = None,
+) -> list[SingleTimeSeries | NonSequentialTimeSeries | PersistentTimeSeries
+          | Deterministic | Probabilistic | Scenarios]: ...
 # The same read addressed by catalog association id. Results follow the order the
-# ids are given, repeats included; NotFoundError if any id names no row.
+# ids are given, repeats included; NotFoundError if any id names no row. `len` or
+# `count` can be used without `start_time`, starting each row at its own first
+# value and spelling. A supplied start must be on every grid and share one
+# compatible zoned/zoneless spelling across the set.
 
 def read_by_id(
     self,
@@ -320,9 +343,9 @@ def list_owner_types(self, *, ...) -> list[str]: ...   # distinct owner types, s
 # is remove_by_filter's.
 # `time_series_type` is a TimeSeriesType (or its member name as a str).
 # TimeSeriesType.Deterministic matches both Deterministic and
-# DeterministicSingleTimeSeries rows. Every filter surface takes it, including
+# DeterministicSingleTimeSeries rows in filter surfaces, including
 # has_any_time_series, get_resolutions, get_intervals, list_owner_ids, and
-# build_forecast_reader.
+# build_forecast_reader. `has_time_series` is deliberately exact instead.
 def list_owner_ids(
     self,
     owner_category: OwnerCategory,
@@ -334,7 +357,8 @@ def list_owner_ids(
 
 def has_any_time_series(self, *, ...) -> bool: ...
 # Existence without listing ("does this owner have any time series?"); same
-# keyword-only filter arguments as list_metadata. Index-probe fast.
+# keyword-only filter arguments as list_metadata. Type matching follows the
+# requested-type family rule, and features are a subset unless features_exact.
 def is_empty(self) -> bool: ...
 # Whether the store holds nothing at all — no time series, no associations in
 # any catalog. One index probe per catalog table, so its cost does not grow with
@@ -346,6 +370,11 @@ def get_intervals(self, time_series_type: TimeSeriesType | None = None) -> list[
 def get_time_series_counts(self) -> dict: ...
 def time_series_counts_detailed(self) -> dict: ...
 def counts_by_type(self) -> dict[str, int]: ...       # {time_series_type name: count}
+def time_series_count_summary(self) -> list[TimeSeriesCountSummaryRow]: ...
+# One grouped query, with fields `owner_type`, `owner_category`,
+# `time_series_type`, `initial_timestamp`, `time_reference`, `resolution`, and
+# `count`. Names, features, and forecast-only dimensions are aggregated into
+# the count. Timestamp references stay separate even for equal UTC instants.
 def num_distinct_arrays(self) -> int: ...
 def show(self, *, file=None) -> None: ...
 # Prints the above as a summary — see below. `file` is any writable object,
@@ -412,8 +441,12 @@ with store.transaction():
 - **`read_by_ids`** returns one typed object per id, in the order the ids are given, repeats
   included (an empty id list returns an empty list). It is the bulk counterpart to `read_by_id`:
   packed `SingleTimeSeries` are read in one decompress-once pass per dataset instead of one read
-  each. An id naming no row raises `NotFoundError` and fails the whole call, unlike
-  `association_exists`, which asks the question rather than committing to a read.
+  each. Optional `len` or `count` applies one strict window to every id. Without `start_time`, each
+  row starts at its own first value and spelling. A supplied start must be on every selected series'
+  grid and share a compatible aware/naive spelling. Missing IDs, off-grid starts, extents past any
+  series, or using `len` for forecasts / `count` for static types raises rather than clipping. An id
+  naming no row raises `NotFoundError` and fails the whole call, unlike `association_exists`, which
+  asks the question rather than committing to a read.
 - **`read_by_ids_range`** is the bounds read: it _clips_ every series to what falls between the two
   instants, where `read_by_id`'s window is _checked_. An export names bounds and does not know how
   many steps each series has inside them.
@@ -463,6 +496,15 @@ with store.transaction():
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`;
   **`time_series_counts_detailed`** adds `supplemental_attributes_with_time_series` and spells the
   other two `static_time_series_count` / `forecast_count`.
+- **`time_series_count_summary`** returns one row per
+  `(owner_type, owner_category,
+  time_series_type, initial_timestamp, time_reference, resolution)`
+  group, with `count` for the number of associations. It intentionally aggregates names, features,
+  and forecast-only dimensions to provide compact grid-level counts without listing metadata rows.
+  `initial_timestamp` is the UTC RFC 3339 instant, `time_reference` retains how the row's timestamps
+  were spelled, and `resolution` names its grid. Each can be `None` when the row does not define it.
+  An unspecified reference remains `None`, and equal UTC instants with different references remain
+  distinct groups.
 - **`show`** prints those same counts as a block of text and returns `None`. It is the
   hand-inspection surface — what a store holds, at a glance, without composing four calls and
   formatting the result. See [`show()`](#show).
@@ -470,7 +512,8 @@ with store.transaction():
   `(owner_type, owner_category, time_series_type, name, initial_timestamp, resolution,
   time_step_count)`
   with its `count`; **`forecast_summary`** does the same for forecasts, adding `horizon`,
-  `interval`, and `window_count`.
+  `interval`, and `window_count`. For compact counts by grid while preserving the original timestamp
+  reference, use `time_series_count_summary`.
 - **`get_forecast_parameters`** returns
   `{"horizon": str, "interval": str, "count": int, "resolution": str, "initial_timestamp": str}`,
   where `horizon`, `interval`, and `resolution` are ISO 8601 duration strings (e.g. `"PT1H"`) and
@@ -490,8 +533,10 @@ with store.transaction():
   list is empty. It checks stored arrays against their recorded hashes and does not inspect the
   SQLite catalog, so `ok` is not a statement about the store as a whole — see
   [content addressing](../explanation/content-addressing.md#what-it-does-not-cover).
-- **`read_by_ids_range`** with `time_range=(start, end)` slices on the time axis; `end` is
-  exclusive.
+- **`read_by_ids_range`** with `time_range=(start, end)` slices on the time axis; `end` is exclusive
+  and clips to each series' available data. `read_by_ids` takes the checked alternative: `len` or
+  `count` must fit every selected series. Without `start_time`, each row starts at its own
+  beginning; a supplied start must be on every grid and use a compatible timestamp spelling.
 
 ### `show()`
 
