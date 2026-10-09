@@ -2267,15 +2267,15 @@ impl MetadataStore {
     /// features are aggregated. This scans and groups the catalog, and a highly
     /// ragged store can return nearly one summary row per association.
     pub fn time_series_count_summary(&self) -> Result<Vec<TimeSeriesCountSummaryRow>> {
-        let mut stmt = self.conn.prepare(
+        const QUERY: &str =
             "SELECT owner_type, owner_category, time_series_type, initial_timestamp,
-                    time_reference, resolution, length, timestamps_hash, horizon, interval,
-                    count, COUNT(*)
+                time_reference, resolution, length, timestamps_hash, horizon, interval,
+                count, COUNT(*)
              FROM time_series_associations
              GROUP BY owner_type, owner_category, time_series_type, initial_timestamp,
                       time_reference, resolution, length, timestamps_hash, horizon, interval,
-                      count",
-        )?;
+                      count";
+        let mut stmt = self.conn.prepare(QUERY)?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -3720,6 +3720,32 @@ mod timestamp_cache_tests {
             cache.insert([seed as u8; 32], &vector(seed));
         }
         assert_eq!(cache.get(&[9u8; 32]), Some(vector(9)));
+    }
+}
+
+#[cfg(test)]
+mod count_summary_tests {
+    use super::*;
+
+    #[test]
+    fn time_series_count_summary_rejects_a_malformed_timestamp_hash() {
+        let metadata = MetadataStore::open_in_memory().unwrap();
+        metadata
+            .conn
+            .execute(
+                "INSERT INTO time_series_associations
+                 (owner_id, owner_type, owner_category, time_series_type, name,
+                  data_hash, features_hash, timestamps_hash)
+                 VALUES (1, 'Generator', 0, ?1, 'events', zeroblob(32), zeroblob(32), X'01')",
+                [TimeSeriesType::NonSequentialTimeSeries.code()],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            metadata.time_series_count_summary(),
+            Err(TimeSeriesError::IntegrityError(message))
+                if message.contains("timestamps_hash must be 32 bytes")
+        ));
     }
 }
 

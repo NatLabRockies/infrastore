@@ -7530,6 +7530,61 @@ mod resolve_windows_tests {
 }
 
 #[cfg(test)]
+mod read_window_context_tests {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    #[test]
+    fn window_errors_keep_row_context_and_unrelated_errors_unchanged() {
+        let mut store = Store::create(None, true).unwrap();
+        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let id = store
+            .add(AddRequest::new(
+                4,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    initial,
+                    Duration::hours(1),
+                    TypedArray::from_f64(vec![2], &[1.0, 2.0]),
+                    "short",
+                )),
+            ))
+            .unwrap();
+        let mut metadata = store.get_metadata_by_id(id).unwrap().unwrap();
+        metadata.resolution = None;
+
+        let error = ReadWindow::full()
+            .with_len(1)
+            .resolve(&metadata)
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            TimeSeriesError::IntegrityError(message)
+                if message.contains("association")
+                    && message.contains("short")
+                    && message.contains("owner 4")
+        ));
+
+        metadata.id = None;
+        let error = ReadWindow::full()
+            .with_len(1)
+            .resolve(&metadata)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TimeSeriesError::IntegrityError(message)
+                if message.contains("association with unknown id")
+                    && message.contains("short")
+        ));
+        assert!(matches!(
+            contextualize_read_window_error(TimeSeriesError::NotFound, &metadata),
+            TimeSeriesError::NotFound
+        ));
+    }
+}
+
+#[cfg(test)]
 mod pending_format_upgrade_tests {
     //! Closing the loop the `InMemory` open deliberately leaves open.
     //!
