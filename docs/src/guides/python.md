@@ -306,8 +306,11 @@ beginning, so mixed zoneless and aware series are allowed. A named off-grid star
 mismatch, or a window longer than any selected series raises instead of quietly returning less.
 
 To read **many whole series at once** — e.g. loading everything for a plot — `read_by_ids` takes a
-list of ids and returns the typed series objects in the same order. Packed `SingleTimeSeries` are
-read in one decompress-once pass per dataset, which is much faster than a `read_by_id` each:
+list of ids and returns the typed series objects in the same order. Whole-series calls batch packed
+`SingleTimeSeries` in one decompress-once pass per dataset, which is much faster than a `read_by_id`
+each. A strict window still fetches metadata in one query, but currently reads each requested slice
+separately, including repeated ids. The whole-series performance guarantee does not apply to a
+windowed call:
 
 ```python
 ids = [series_id]

@@ -146,12 +146,13 @@ bindings reimplement storage — they all funnel through the one core.
 
 ## Feature Coverage Varies by Binding
 
-The bindings funnel through one core, and the main read/write surface is broadly consistent. Both
-static series types are available everywhere (read+write, except the read-only gRPC server), and
-[forecasts](./time-series-types.md#forecasts) read back across every interface. Rust and Python also
-expose a concrete-type exact existence probe, which does not widen `Deterministic` to derived views,
-and a grid-level count summary. Julia's similarly named `has_time_series` retains requested-type
-filter semantics. The read-only gRPC server does not accept writes:
+The bindings funnel through one core, and the main read/write surface is broadly consistent. All
+three static series types are available everywhere (read+write, except the read-only gRPC server),
+and [forecasts](./time-series-types.md#forecasts) read back across every interface. Rust and Python
+also expose `has_exact_time_series`, a full-key existence probe that does not widen `Deterministic`
+to derived views, and a grouped temporal-axis count summary. Julia's `has_time_series` remains a
+requested-type filter query; it is not the same operation as the full-key probe. The read-only gRPC
+server does not accept writes:
 
 | Capability                    | Rust core | C ABI | Python          | Julia | CLI          | gRPC        |
 | ----------------------------- | --------- | ----- | --------------- | ----- | ------------ | ----------- |
@@ -162,7 +163,7 @@ filter semantics. The read-only gRPC server does not accept writes:
 | Create forecasts              | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
 | Read forecast values          | ✅        | ✅    | ✅              | ✅    | ✅           | ✅          |
 | Forecast metadata / counts    | ✅        | ✅    | ✅              | ✅    | ✅           | list/counts |
-| Concrete-type exact existence | ✅        | ❌    | ✅              | ❌    | ❌           | ❌          |
+| Exact-key existence           | ✅        | ❌    | ✅              | ❌    | ❌           | ❌          |
 | Grid-level count summary      | ✅        | ❌    | ✅              | ❌    | ❌           | ❌          |
 | Readers (columnar sweep)      | ✅        | ✅    | ✅              | ✅    | `grid`       | ❌          |
 | Association catalogs          | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |

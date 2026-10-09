@@ -179,12 +179,13 @@ pub struct ForecastSummaryRow {
     pub count: i64,
 }
 
-/// One grouped association count by owner kind, stored type, and temporal grid.
+/// One grouped association count by owner kind, stored type, and complete temporal axis.
 ///
-/// Names, features, and forecast-only dimensions are deliberately omitted so
-/// callers can count all series sharing the same owner/type/grid without loading
-/// every metadata row. `time_reference` is part of the group because an
-/// instant's spelling can matter to consumers even when its UTC value is the same.
+/// Names and features are omitted. `time_step_count` retains the stored time-axis length and,
+/// for forecasts, the number of steps in each horizon. Irregular series also retain their
+/// timestamp-axis hash, and forecasts retain their horizon, interval, and window count. Fields not
+/// used by a stored type are `None`. `time_reference` is also part of the group
+/// because timestamp spelling can matter even when UTC instants are equal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeSeriesCountSummaryRow {
     pub owner_type: String,
@@ -193,6 +194,11 @@ pub struct TimeSeriesCountSummaryRow {
     pub initial_timestamp: Option<DateTime<Utc>>,
     pub time_reference: Option<TimeReference>,
     pub resolution: Option<Period>,
+    pub time_step_count: Option<i64>,
+    pub timestamps_hash: Option<[u8; 32]>,
+    pub horizon: Option<Period>,
+    pub interval: Option<Period>,
+    pub window_count: Option<i64>,
     pub count: i64,
 }
 
@@ -543,6 +549,12 @@ fn decode_type(code: i64) -> Result<TimeSeriesType> {
         .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad time_series_type code {code}")))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NullablePeriodIdentity {
+    Null,
+    Value(Period),
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MetadataFilter {
     pub owner_id: Option<i64>,
@@ -573,6 +585,9 @@ pub struct MetadataFilter {
     /// group, not an oversight.
     pub zoneless: Option<bool>,
     pub resolution: Option<Period>,
+    /// Exact nullable resolution predicate used by a `KeyIdentity` lookup.
+    /// `None` leaves the ordinary list filter's resolution semantics intact.
+    pub(crate) resolution_identity: Option<NullablePeriodIdentity>,
     /// Exact match on a static series' `initial_timestamp`. With `resolution`
     /// and `length` this names a whole grid — see
     /// [`crate::ListFilter::initial_timestamp`], which is where the reasoning
@@ -584,6 +599,9 @@ pub struct MetadataFilter {
     /// Forecast window interval. When set, restricts to rows with exactly this
     /// interval (part of the identity); `None` does not filter on interval.
     pub interval: Option<Period>,
+    /// Exact nullable interval predicate used by a `KeyIdentity` lookup.
+    /// `None` leaves the ordinary list filter's interval semantics intact.
+    pub(crate) interval_identity: Option<NullablePeriodIdentity>,
     /// Subset match: rows must contain at least these key/value pairs.
     pub features: Option<Features>,
     /// Exact features-set match by precomputed hash. When set, this is pushed
@@ -769,7 +787,9 @@ impl MetadataFilter {
         let constrains_later_column = self.name.is_some()
             || self.name_glob.is_some()
             || self.resolution.is_some()
+            || self.resolution_identity.is_some()
             || self.interval.is_some()
+            || self.interval_identity.is_some()
             || self.features_hash.is_some();
         if constrains_later_column {
             SpanForm::In
@@ -838,9 +858,20 @@ impl MetadataFilter {
                 " AND (time_reference IS NULL OR time_reference <> 'zoneless')"
             });
         }
-        if let Some(resolution) = self.resolution {
-            sql.push_str(" AND resolution = ?");
-            params_vec.push(Box::new(resolution.to_iso8601()));
+        match self.resolution_identity {
+            Some(NullablePeriodIdentity::Null) => {
+                sql.push_str(" AND COALESCE(resolution, '') = ''");
+            }
+            Some(NullablePeriodIdentity::Value(resolution)) => {
+                sql.push_str(" AND COALESCE(resolution, '') = ?");
+                params_vec.push(Box::new(resolution.to_iso8601()));
+            }
+            None => {
+                if let Some(resolution) = self.resolution {
+                    sql.push_str(" AND resolution = ?");
+                    params_vec.push(Box::new(resolution.to_iso8601()));
+                }
+            }
         }
         if let Some(initial_timestamp) = self.initial_timestamp {
             // The column is TEXT, written by `to_rfc3339` from a `DateTime<Utc>`
@@ -855,9 +886,20 @@ impl MetadataFilter {
             sql.push_str(" AND length = ?");
             params_vec.push(Box::new(length as i64));
         }
-        if let Some(interval) = self.interval {
-            sql.push_str(" AND interval = ?");
-            params_vec.push(Box::new(interval.to_iso8601()));
+        match self.interval_identity {
+            Some(NullablePeriodIdentity::Null) => {
+                sql.push_str(" AND COALESCE(interval, '') = ''");
+            }
+            Some(NullablePeriodIdentity::Value(interval)) => {
+                sql.push_str(" AND COALESCE(interval, '') = ?");
+                params_vec.push(Box::new(interval.to_iso8601()));
+            }
+            None => {
+                if let Some(interval) = self.interval {
+                    sql.push_str(" AND interval = ?");
+                    params_vec.push(Box::new(interval.to_iso8601()));
+                }
+            }
         }
         if let Some(ref f_hash) = self.features_hash {
             sql.push_str(" AND features_hash = ?");
@@ -1866,7 +1908,7 @@ impl MetadataStore {
     }
 
     /// True iff at least one association matches `filter` — the existence
-    /// probe behind [`crate::Store::has_time_series`] and
+    /// probe behind [`crate::Store::has_exact_time_series`] and
     /// [`crate::Store::has_any_time_series`], both of which consumers call in
     /// hot per-component loops.
     ///
@@ -2220,18 +2262,19 @@ impl MetadataStore {
         Ok(out)
     }
 
-    /// Association counts grouped by owner type/category, stored series type,
-    /// initial instant, its timestamp reference, and resolution. One grouped
-    /// query; names, features, and forecast-only dimensions are aggregated together.
+    /// Association counts grouped by owner kind/category, stored series type,
+    /// and every field that defines the stored temporal axis. Names and
+    /// features are aggregated. This scans and groups the catalog, and a highly
+    /// ragged store can return nearly one summary row per association.
     pub fn time_series_count_summary(&self) -> Result<Vec<TimeSeriesCountSummaryRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT owner_type, owner_category, time_series_type, initial_timestamp,
-                    time_reference, resolution, COUNT(*)
+                    time_reference, resolution, length, timestamps_hash, horizon, interval,
+                    count, COUNT(*)
              FROM time_series_associations
              GROUP BY owner_type, owner_category, time_series_type, initial_timestamp,
-                      time_reference, resolution
-             ORDER BY owner_type, owner_category, time_series_type, initial_timestamp,
-                      time_reference, resolution",
+                      time_reference, resolution, length, timestamps_hash, horizon, interval,
+                      count",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -2241,12 +2284,37 @@ impl MetadataStore {
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
-                r.get::<_, i64>(6)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<Vec<u8>>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<i64>>(10)?,
+                r.get::<_, i64>(11)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (owner_type, owner_category, ts_type, initial, reference, resolution, count) = row?;
+            let (
+                owner_type,
+                owner_category,
+                ts_type,
+                initial,
+                reference,
+                resolution,
+                time_step_count,
+                timestamps_hash,
+                horizon,
+                interval,
+                window_count,
+                count,
+            ) = row?;
+            let timestamps_hash = timestamps_hash
+                .map(|bytes| {
+                    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+                        TimeSeriesError::IntegrityError("timestamps_hash must be 32 bytes".into())
+                    })
+                })
+                .transpose()?;
             out.push(TimeSeriesCountSummaryRow {
                 owner_type,
                 owner_category: decode_category(owner_category)?,
@@ -2256,6 +2324,11 @@ impl MetadataStore {
                     .map(|value| TimeReference::parse(&value))
                     .transpose()?,
                 resolution: resolution.map(|value| iso_to_period(&value)).transpose()?,
+                time_step_count,
+                timestamps_hash,
+                horizon: horizon.map(|value| iso_to_period(&value)).transpose()?,
+                interval: interval.map(|value| iso_to_period(&value)).transpose()?,
+                window_count,
                 count,
             });
         }
@@ -3823,15 +3896,23 @@ mod index_plan_tests {
 
     #[test]
     fn named_existence_probe_uses_an_index() {
-        // The exact-association probe pins owner, category, concrete type,
-        // name, and the whole feature-set hash. The first four predicates seek
-        // the left prefix of the uniqueness index; the feature hash is checked
-        // while scanning only rows with that owner/name identity. No row is
-        // hydrated for the boolean result.
+        // The generic filter existence probe stays index-backed. Keeping this
+        // separate from the exact-key query guards both public query shapes.
         assert_uses_index(
             "SELECT 1 FROM time_series_associations
              WHERE 1=1 AND owner_id = ? AND owner_category = ?
-               AND time_series_type = ? AND name = ? AND features_hash = ? LIMIT 1",
+               AND time_series_type = ? AND name = ? LIMIT 1",
+            "uq_ts_assoc_coalesced",
+        );
+    }
+
+    #[test]
+    fn exact_key_existence_probe_uses_the_unique_index() {
+        assert_uses_index(
+            "SELECT 1 FROM time_series_associations
+             WHERE owner_id = ? AND owner_category = ? AND time_series_type = ?
+               AND name = ? AND COALESCE(resolution, '') = ?
+               AND COALESCE(interval, '') = ? AND features_hash = ? LIMIT 1",
             "uq_ts_assoc_coalesced",
         );
     }

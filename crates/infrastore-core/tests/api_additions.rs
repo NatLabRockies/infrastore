@@ -6,9 +6,10 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    AddRequest, Deterministic, FeatureValue, Features, ListFilter, NonSequentialTimeSeries,
-    OwnerCategory, Period, ReadWindow, SingleTimeSeries, Store, TimeReference, TimeSeriesData,
-    TimeSeriesError, TimeSeriesId, TimeSeriesMetadata, TimeSeriesType, TypedArray, UnitSystem,
+    AddRequest, Deterministic, FeatureValue, Features, KeyIdentity, ListFilter,
+    NonSequentialTimeSeries, OwnerCategory, Period, PersistentTimeSeries, ReadWindow,
+    SingleTimeSeries, Store, TimeReference, TimeSeriesData, TimeSeriesError, TimeSeriesId,
+    TimeSeriesMetadata, TimeSeriesType, TypedArray, UnitSystem,
 };
 
 mod common;
@@ -825,10 +826,19 @@ fn has_any_time_series_answers_owner_level_existence() {
 }
 
 #[test]
-fn has_time_series_matches_exact_type_and_complete_features() {
+fn has_exact_time_series_matches_the_complete_key() {
     let mut store = Store::create(None, true).unwrap();
     add_sts(&mut store, 1, "load", 10.0);
 
+    let five_minute = SingleTimeSeries::new(
+        t0(),
+        Duration::minutes(5),
+        TypedArray::from_f64(
+            vec![12],
+            &(0..12).map(|i| 20.0 + i as f64).collect::<Vec<_>>(),
+        ),
+        "load",
+    );
     let high: Features = [
         ("scenario".into(), FeatureValue::Str("high".into())),
         ("model_year".into(), FeatureValue::Int(2030)),
@@ -840,36 +850,58 @@ fn has_time_series_matches_exact_type_and_complete_features() {
                 1,
                 "Generator",
                 OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(sts("load", 20.0, 4)),
+                TimeSeriesData::SingleTimeSeries(five_minute),
             )
             .with_features(high.clone()),
         )
         .unwrap();
 
-    let probe = |owner_id, owner_category, name, time_series_type, features| {
-        store.has_time_series(owner_id, owner_category, name, time_series_type, &features)
+    let key = |owner_id: i64,
+               owner_category: OwnerCategory,
+               name: &str,
+               time_series_type: TimeSeriesType,
+               resolution: Option<Period>,
+               interval: Option<Period>,
+               features: Features| {
+        KeyIdentity {
+            owner_id,
+            owner_category,
+            time_series_type,
+            name: name.into(),
+            resolution,
+            interval,
+            features,
+        }
     };
+    let hour = Some(Period::from(Duration::hours(1)));
+    let five_minutes = Some(Period::from(Duration::minutes(5)));
 
-    // An empty feature set is a concrete identity, not an omitted filter.
+    // An empty feature set and NULL interval are concrete identity values.
     assert!(
-        probe(
-            1,
-            OwnerCategory::Component,
-            "load",
-            TimeSeriesType::SingleTimeSeries,
-            Features::new(),
-        )
-        .unwrap()
+        store
+            .has_exact_time_series(&key(
+                1,
+                OwnerCategory::Component,
+                "load",
+                TimeSeriesType::SingleTimeSeries,
+                hour,
+                None,
+                Features::new(),
+            ))
+            .unwrap()
     );
     assert!(
-        probe(
-            1,
-            OwnerCategory::Component,
-            "load",
-            TimeSeriesType::SingleTimeSeries,
-            high.clone(),
-        )
-        .unwrap()
+        store
+            .has_exact_time_series(&key(
+                1,
+                OwnerCategory::Component,
+                "load",
+                TimeSeriesType::SingleTimeSeries,
+                five_minutes,
+                None,
+                high.clone(),
+            ))
+            .unwrap()
     );
 
     let partial: Features = [("scenario".into(), FeatureValue::Str("high".into()))].into();
@@ -886,60 +918,132 @@ fn has_time_series_matches_exact_type_and_complete_features() {
             .unwrap()
     );
     assert!(
-        !probe(
-            1,
-            OwnerCategory::Component,
-            "load",
-            TimeSeriesType::SingleTimeSeries,
-            partial,
-        )
-        .unwrap()
+        !store
+            .has_exact_time_series(&key(
+                1,
+                OwnerCategory::Component,
+                "load",
+                TimeSeriesType::SingleTimeSeries,
+                five_minutes,
+                None,
+                partial,
+            ))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_exact_time_series(&key(
+                1,
+                OwnerCategory::Component,
+                "load",
+                TimeSeriesType::SingleTimeSeries,
+                hour,
+                Some(Period::from(Duration::hours(1))),
+                Features::new(),
+            ))
+            .unwrap()
     );
 
+    store
+        .add(AddRequest::new(
+            8,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(det("market", 40.0)),
+        ))
+        .unwrap();
+    store
+        .add(AddRequest::new(
+            8,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(
+                Deterministic::new(
+                    t0(),
+                    Duration::hours(1),
+                    Duration::hours(2),
+                    Duration::hours(2),
+                    2,
+                    TypedArray::from_f64(vec![2, 2], &[50.0, 51.0, 52.0, 53.0]),
+                    "market",
+                )
+                .unwrap(),
+            ),
+        ))
+        .unwrap();
+    for interval in [Duration::hours(1), Duration::hours(2)] {
+        assert!(
+            store
+                .has_exact_time_series(&key(
+                    8,
+                    OwnerCategory::Component,
+                    "market",
+                    TimeSeriesType::Deterministic,
+                    hour,
+                    Some(Period::from(interval)),
+                    Features::new(),
+                ))
+                .unwrap()
+        );
+    }
     assert!(
-        !probe(
+        !store
+            .has_exact_time_series(&key(
+                8,
+                OwnerCategory::Component,
+                "market",
+                TimeSeriesType::Deterministic,
+                hour,
+                Some(Period::from(Duration::hours(3))),
+                Features::new(),
+            ))
+            .unwrap()
+    );
+
+    for absent in [
+        key(
             2,
             OwnerCategory::Component,
             "load",
             TimeSeriesType::SingleTimeSeries,
+            hour,
+            None,
             Features::new(),
-        )
-        .unwrap()
-    );
-    assert!(
-        !probe(
+        ),
+        key(
             1,
             OwnerCategory::SupplementalAttribute,
             "load",
             TimeSeriesType::SingleTimeSeries,
+            hour,
+            None,
             Features::new(),
-        )
-        .unwrap()
-    );
-    assert!(
-        !probe(
+        ),
+        key(
             1,
             OwnerCategory::Component,
             "other",
             TimeSeriesType::SingleTimeSeries,
+            hour,
+            None,
             Features::new(),
-        )
-        .unwrap()
-    );
-    assert!(
-        !probe(
+        ),
+        key(
             1,
             OwnerCategory::Component,
             "load",
             TimeSeriesType::NonSequentialTimeSeries,
+            None,
+            None,
             Features::new(),
-        )
-        .unwrap()
-    );
+        ),
+    ] {
+        assert!(!store.has_exact_time_series(&absent).unwrap(), "{absent:?}");
+    }
 }
 
 #[test]
-fn has_time_series_does_not_widen_deterministic_to_derived_forecasts() {
+fn has_exact_time_series_does_not_widen_deterministic_to_derived_forecasts() {
     let mut store = Store::create(None, true).unwrap();
     store
         .add(
@@ -973,26 +1077,24 @@ fn has_time_series_does_not_widen_deterministic_to_derived_forecasts() {
         .time_series_type(TimeSeriesType::Deterministic)
         .exact_features(Features::new());
     assert!(store.has_any_time_series(family_filter).unwrap());
+
+    let key = |time_series_type| KeyIdentity {
+        owner_id: 1,
+        owner_category: OwnerCategory::Component,
+        time_series_type,
+        name: "forecast".into(),
+        resolution: Some(Period::from(Duration::hours(1))),
+        interval: Some(Period::from(Duration::hours(1))),
+        features: Features::new(),
+    };
     assert!(
         store
-            .has_time_series(
-                1,
-                OwnerCategory::Component,
-                "forecast",
-                TimeSeriesType::DeterministicSingleTimeSeries,
-                &Features::new(),
-            )
+            .has_exact_time_series(&key(TimeSeriesType::DeterministicSingleTimeSeries))
             .unwrap()
     );
     assert!(
         !store
-            .has_time_series(
-                1,
-                OwnerCategory::Component,
-                "forecast",
-                TimeSeriesType::Deterministic,
-                &Features::new(),
-            )
+            .has_exact_time_series(&key(TimeSeriesType::Deterministic))
             .unwrap()
     );
 
@@ -1202,7 +1304,11 @@ fn time_series_count_summary_preserves_timestamp_references() {
                     .unwrap_or_else(|| panic!("{backend}: no {time_series_type:?}/{reference:?}"))
                     .count
             };
-            assert_eq!(rows.len(), 8, "{backend}: one row per distinct count group");
+            assert_eq!(
+                rows.len(),
+                9,
+                "{backend}: one row per distinct temporal grid"
+            );
             assert_eq!(
                 count(
                     OwnerCategory::Component,
@@ -1239,15 +1345,31 @@ fn time_series_count_summary_preserves_timestamp_references() {
                 1,
                 "{backend}: zoneless is preserved"
             );
+            let utc_forecasts: Vec<_> = rows
+                .iter()
+                .filter(|row| {
+                    row.owner_category == OwnerCategory::Component
+                        && row.time_series_type == TimeSeriesType::Deterministic
+                        && row.time_reference == Some(TimeReference::Utc)
+                })
+                .collect();
             assert_eq!(
-                count(
-                    OwnerCategory::Component,
-                    TimeSeriesType::Deterministic,
-                    Some(&TimeReference::Utc)
-                ),
-                3,
-                "{backend}: forecast names, feature maps, and intervals fold into one group"
+                utc_forecasts.len(),
+                2,
+                "{backend}: interval/count grids stay distinct"
             );
+            assert!(utc_forecasts.iter().any(|row| {
+                row.horizon == Some(Period::from(Duration::hours(2)))
+                    && row.interval == Some(Period::from(Duration::hours(1)))
+                    && row.window_count == Some(3)
+                    && row.count == 2
+            }));
+            assert!(utc_forecasts.iter().any(|row| {
+                row.horizon == Some(Period::from(Duration::hours(2)))
+                    && row.interval == Some(Period::from(Duration::hours(2)))
+                    && row.window_count == Some(2)
+                    && row.count == 1
+            }));
             assert_eq!(
                 count(
                     OwnerCategory::Component,
@@ -1272,6 +1394,10 @@ fn time_series_count_summary_preserves_timestamp_references() {
                 .unwrap_or_else(|| panic!("{backend}: irregular group missing"));
             assert_eq!(irregular.initial_timestamp, None, "{backend}");
             assert_eq!(irregular.resolution, None, "{backend}");
+            assert_eq!(irregular.time_step_count, Some(2), "{backend}");
+            assert!(irregular.timestamps_hash.is_some(), "{backend}");
+            assert_eq!(irregular.horizon, None, "{backend}");
+            assert_eq!(irregular.window_count, None, "{backend}");
             assert_eq!(
                 irregular.time_reference,
                 Some(TimeReference::Utc),
@@ -1280,6 +1406,224 @@ fn time_series_count_summary_preserves_timestamp_references() {
             assert_eq!(irregular.count, 1, "{backend}");
         },
     );
+}
+
+#[test]
+fn time_series_count_summary_distinguishes_each_temporal_axis() {
+    for_each_backend(
+        |store| {
+            let mut add = |owner_id, data| {
+                store
+                    .add(AddRequest::new(
+                        owner_id,
+                        "Generator",
+                        OwnerCategory::Component,
+                        data,
+                    ))
+                    .unwrap()
+            };
+            let values = |length: usize, base: f64| {
+                let data: Vec<_> = (0..length).map(|i| base + i as f64).collect();
+                TypedArray::from_f64(vec![length], &data)
+            };
+            let hourly = Duration::hours(1);
+
+            // Names and owners aggregate when the regular grid is identical.
+            add(
+                1,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    t0(),
+                    hourly,
+                    values(4, 0.0),
+                    "load-a",
+                )),
+            );
+            add(
+                2,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    t0(),
+                    hourly,
+                    values(4, 10.0),
+                    "load-b",
+                )),
+            );
+            add(
+                3,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    t0(),
+                    hourly,
+                    values(8, 20.0),
+                    "longer",
+                )),
+            );
+            add(
+                4,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    t0() + hourly,
+                    hourly,
+                    values(4, 30.0),
+                    "shifted",
+                )),
+            );
+
+            let axis_a = vec![t0(), t0() + Duration::minutes(30)];
+            let axis_b = vec![t0(), t0() + Duration::minutes(45)];
+            for (owner_id, name, axis, base) in [
+                (5, "events-a", axis_a.clone(), 40.0),
+                (6, "events-b", axis_a.clone(), 50.0),
+                (7, "events-other-axis", axis_b, 60.0),
+            ] {
+                add(
+                    owner_id,
+                    TimeSeriesData::NonSequentialTimeSeries(
+                        NonSequentialTimeSeries::new(axis, values(2, base), name).unwrap(),
+                    ),
+                );
+            }
+
+            let breakpoints_a = vec![t0(), t0() + hourly];
+            let breakpoints_b = vec![t0(), t0() + Duration::hours(2)];
+            for (owner_id, name, axis, base) in [
+                (8, "persistent-a", breakpoints_a.clone(), 70.0),
+                (9, "persistent-b", breakpoints_a, 80.0),
+                (10, "persistent-other-axis", breakpoints_b, 90.0),
+            ] {
+                add(
+                    owner_id,
+                    TimeSeriesData::PersistentTimeSeries(
+                        PersistentTimeSeries::new(axis, values(2, base), name).unwrap(),
+                    ),
+                );
+            }
+
+            let forecast = |name: &str, horizon: Duration, interval: Duration, count: usize| {
+                let horizon_steps = usize::try_from(horizon.num_hours()).unwrap();
+                let data: Vec<_> = (0..horizon_steps * count).map(|i| i as f64).collect();
+                Deterministic::new(
+                    t0(),
+                    hourly,
+                    horizon,
+                    interval,
+                    count,
+                    TypedArray::from_f64(vec![horizon_steps, count], &data),
+                    name,
+                )
+                .unwrap()
+            };
+            add(
+                11,
+                TimeSeriesData::Deterministic(forecast(
+                    "forecast-a",
+                    Duration::hours(2),
+                    hourly,
+                    3,
+                )),
+            );
+            add(
+                12,
+                TimeSeriesData::Deterministic(forecast(
+                    "forecast-b",
+                    Duration::hours(2),
+                    hourly,
+                    3,
+                )),
+            );
+            add(
+                13,
+                TimeSeriesData::Deterministic(forecast(
+                    "forecast-other-grid",
+                    Duration::hours(4),
+                    Duration::hours(2),
+                    2,
+                )),
+            );
+        },
+        |store, (), backend| {
+            let rows = store.time_series_count_summary().unwrap();
+            assert_eq!(rows.len(), 9, "{backend}: groups retain each distinct grid");
+
+            let regular = rows
+                .iter()
+                .find(|row| {
+                    row.time_series_type == TimeSeriesType::SingleTimeSeries
+                        && row.time_step_count == Some(4)
+                        && row.initial_timestamp == Some(t0())
+                })
+                .unwrap_or_else(|| panic!("{backend}: regular grid group missing"));
+            assert_eq!(
+                regular.count, 2,
+                "{backend}: names and owners still aggregate"
+            );
+            assert_eq!(regular.timestamps_hash, None, "{backend}");
+            assert_eq!(regular.horizon, None, "{backend}");
+            assert_eq!(regular.window_count, None, "{backend}");
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.time_series_type == TimeSeriesType::SingleTimeSeries)
+                    .count(),
+                3,
+                "{backend}: distinct lengths and starts remain separate"
+            );
+
+            for series_type in [
+                TimeSeriesType::NonSequentialTimeSeries,
+                TimeSeriesType::PersistentTimeSeries,
+            ] {
+                let irregular: Vec<_> = rows
+                    .iter()
+                    .filter(|row| row.time_series_type == series_type)
+                    .collect();
+                assert_eq!(
+                    irregular.len(),
+                    2,
+                    "{backend}: {series_type:?} axes stay separate"
+                );
+                assert_ne!(
+                    irregular[0].timestamps_hash, irregular[1].timestamps_hash,
+                    "{backend}: distinct timestamp axes have distinct identities"
+                );
+                assert!(irregular.iter().all(|row| {
+                    row.initial_timestamp.is_none()
+                        && row.resolution.is_none()
+                        && row.time_step_count == Some(2)
+                        && row.horizon.is_none()
+                        && row.window_count.is_none()
+                }));
+                let mut counts: Vec<_> = irregular.iter().map(|row| row.count).collect();
+                counts.sort_unstable();
+                assert_eq!(counts, [1, 2], "{backend}");
+            }
+
+            let forecasts: Vec<_> = rows
+                .iter()
+                .filter(|row| row.time_series_type == TimeSeriesType::Deterministic)
+                .collect();
+            assert_eq!(forecasts.len(), 2, "{backend}: forecast axes stay separate");
+            assert!(
+                forecasts
+                    .iter()
+                    .all(|row| { row.time_step_count.is_some() && row.timestamps_hash.is_none() })
+            );
+            assert!(forecasts.iter().any(|row| {
+                row.horizon == Some(Period::from(Duration::hours(2)))
+                    && row.interval == Some(Period::from(Duration::hours(1)))
+                    && row.window_count == Some(3)
+                    && row.count == 2
+            }));
+            assert!(forecasts.iter().any(|row| {
+                row.horizon == Some(Period::from(Duration::hours(4)))
+                    && row.interval == Some(Period::from(Duration::hours(2)))
+                    && row.window_count == Some(2)
+                    && row.count == 1
+            }));
+        },
+    );
+}
+
+#[test]
+fn time_series_count_summary_is_empty_for_an_empty_store() {
+    let store = Store::create(None, true).unwrap();
+    assert!(store.time_series_count_summary().unwrap().is_empty());
 }
 
 #[test]
