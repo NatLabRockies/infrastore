@@ -1000,6 +1000,48 @@ fn has_exact_time_series_matches_the_complete_key() {
             .unwrap()
     );
 
+    store
+        .add(AddRequest::new(
+            9,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(
+                NonSequentialTimeSeries::new(
+                    vec![t0(), t0() + Duration::hours(1)],
+                    TypedArray::from_f64(vec![2], &[60.0, 61.0]),
+                    "events",
+                )
+                .unwrap(),
+            ),
+        ))
+        .unwrap();
+    assert!(
+        store
+            .has_exact_time_series(&key(
+                9,
+                OwnerCategory::Component,
+                "events",
+                TimeSeriesType::NonSequentialTimeSeries,
+                None,
+                None,
+                Features::new(),
+            ))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_exact_time_series(&key(
+                9,
+                OwnerCategory::Component,
+                "events",
+                TimeSeriesType::NonSequentialTimeSeries,
+                hour,
+                None,
+                Features::new(),
+            ))
+            .unwrap()
+    );
+
     for absent in [
         key(
             2,
