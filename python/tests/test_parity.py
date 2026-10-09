@@ -473,6 +473,31 @@ def test_has_exact_time_series_matches_the_complete_key():
         None,
         {},
     )
+    _add(
+        store,
+        9,
+        NonSequentialTimeSeries(
+            [T0, T0 + RES_1H], np.array([1.0, 2.0]), "events"
+        ),
+    )
+    assert exists(
+        9,
+        OWNER_CAT,
+        "events",
+        TimeSeriesType.NonSequentialTimeSeries,
+        None,
+        None,
+        {},
+    )
+    assert not exists(
+        9,
+        OWNER_CAT,
+        "events",
+        TimeSeriesType.NonSequentialTimeSeries,
+        RES_1H,
+        None,
+        {},
+    )
 
     for interval, count, base in [
         (RES_1H, 3, 100.0),
