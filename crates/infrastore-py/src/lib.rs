@@ -4556,24 +4556,19 @@ impl PyStore {
                 d.set_item("owner_type", &row.owner_type)?;
                 d.set_item("owner_category", row.owner_category.as_str())?;
                 d.set_item("time_series_type", row.time_series_type.as_str())?;
-                d.set_item(
-                    "initial_timestamp",
-                    row.initial_timestamp.map(|timestamp| {
-                        render_catalog_timestamp(timestamp, row.time_reference.as_ref())
-                    }),
-                )?;
-                d.set_item(
-                    "time_reference",
-                    row.time_reference
-                        .as_ref()
-                        .map(core_lib::TimeReference::as_storage_string),
-                )?;
+                let initial_timestamp = row.initial_timestamp.map(|timestamp| {
+                    render_catalog_timestamp(timestamp, row.time_reference.as_ref())
+                });
+                d.set_item("initial_timestamp", initial_timestamp)?;
+                let time_reference = row
+                    .time_reference
+                    .as_ref()
+                    .map(core_lib::TimeReference::as_storage_string);
+                d.set_item("time_reference", time_reference)?;
                 d.set_item("resolution", period_to_iso(row.resolution))?;
                 d.set_item("time_step_count", row.time_step_count)?;
-                d.set_item(
-                    "timestamps_hash",
-                    row.timestamps_hash.as_ref().map(core_lib::hash_hex),
-                )?;
+                let timestamps_hash = row.timestamps_hash.as_ref().map(core_lib::hash_hex);
+                d.set_item("timestamps_hash", timestamps_hash)?;
                 d.set_item("horizon", period_to_iso(row.horizon))?;
                 d.set_item("interval", period_to_iso(row.interval))?;
                 d.set_item("window_count", row.window_count)?;
