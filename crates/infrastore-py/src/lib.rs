@@ -4277,10 +4277,33 @@ impl PyStore {
     /// `NotFoundError` if any id names no row — unlike `association_exists`,
     /// this call is already committed to reading, so a stale reference is a
     /// failure rather than an answer.
-    fn read_by_ids(&self, py: Python<'_>, ids: Vec<i64>) -> PyResult<Vec<Py<PyAny>>> {
+    ///
+    /// `len` (static timesteps) or `count` (forecast windows) applies one
+    /// strict `ReadWindow` to every id. If `start_time` is omitted, each row
+    /// starts at its own first value and keeps its own spelling, so the batch
+    /// may mix zoneless and instant-bearing series. A supplied start must land
+    /// on every row's grid and have one compatible aware/naive spelling across
+    /// the set. A requested extent past any row's end or a mismatched extent
+    /// kind is an error, never a clipped result. With no window arguments this
+    /// reads each series whole.
+    #[pyo3(signature = (ids, *, start_time=None, len=None, count=None))]
+    fn read_by_ids(
+        &self,
+        py: Python<'_>,
+        ids: Vec<i64>,
+        start_time: Option<PyInstant>,
+        len: Option<usize>,
+        count: Option<usize>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
         let ids = to_ids(&ids);
+        let window = core_lib::ReadWindow {
+            start: start_time.as_ref().map(|s| s.instant),
+            zoneless: start_time.as_ref().is_some_and(|s| s.is_zoneless()),
+            len,
+            count,
+        };
         self.store()?
-            .read_by_ids(&ids, core_lib::ReadWindow::full())
+            .read_by_ids(&ids, window)
             .map_err(map_err)?
             .into_iter()
             .map(|d| time_series_data_to_py(py, d))
@@ -4473,7 +4496,6 @@ impl PyStore {
     /// Grouped static-series summary: one dict per distinct owner/name/shape
     /// combination with the association `count`.
     fn static_summary<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let iso = |p: Option<core_lib::Period>| p.map(|x| x.to_iso8601());
         self.store()?
             .static_summary()
             .map_err(map_err)?
@@ -4488,7 +4510,7 @@ impl PyStore {
                     "initial_timestamp",
                     r.initial_timestamp.map(|t| t.to_rfc3339()),
                 )?;
-                d.set_item("resolution", iso(r.resolution))?;
+                d.set_item("resolution", period_to_iso(r.resolution))?;
                 d.set_item("time_step_count", r.time_step_count)?;
                 d.set_item("count", r.count)?;
                 Ok(d)
@@ -4499,7 +4521,6 @@ impl PyStore {
     /// Grouped forecast summary: one dict per distinct owner/name/window
     /// configuration with the association `count`.
     fn forecast_summary<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let iso = |p: Option<core_lib::Period>| p.map(|x| x.to_iso8601());
         self.store()?
             .forecast_summary()
             .map_err(map_err)?
@@ -4514,11 +4535,44 @@ impl PyStore {
                     "initial_timestamp",
                     r.initial_timestamp.map(|t| t.to_rfc3339()),
                 )?;
-                d.set_item("resolution", iso(r.resolution))?;
-                d.set_item("horizon", iso(r.horizon))?;
-                d.set_item("interval", iso(r.interval))?;
+                d.set_item("resolution", period_to_iso(r.resolution))?;
+                d.set_item("horizon", period_to_iso(r.horizon))?;
+                d.set_item("interval", period_to_iso(r.interval))?;
                 d.set_item("window_count", r.window_count)?;
                 d.set_item("count", r.count)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Group association counts by owner kind, stored type, temporal grid,
+    /// and timestamp spelling without materializing each metadata row. Names,
+    /// features, and forecast-only dimensions are folded into each count.
+    fn time_series_count_summary<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = self.store()?.time_series_count_summary().map_err(map_err)?;
+        rows.iter()
+            .map(|row| {
+                let d = PyDict::new(py);
+                d.set_item("owner_type", &row.owner_type)?;
+                d.set_item("owner_category", row.owner_category.as_str())?;
+                d.set_item("time_series_type", row.time_series_type.as_str())?;
+                let initial_timestamp = row.initial_timestamp.map(|timestamp| {
+                    render_catalog_timestamp(timestamp, row.time_reference.as_ref())
+                });
+                d.set_item("initial_timestamp", initial_timestamp)?;
+                let time_reference = row
+                    .time_reference
+                    .as_ref()
+                    .map(core_lib::TimeReference::as_storage_string);
+                d.set_item("time_reference", time_reference)?;
+                d.set_item("resolution", period_to_iso(row.resolution))?;
+                d.set_item("time_step_count", row.time_step_count)?;
+                let timestamps_hash = row.timestamps_hash.as_ref().map(core_lib::hash_hex);
+                d.set_item("timestamps_hash", timestamps_hash)?;
+                d.set_item("horizon", period_to_iso(row.horizon))?;
+                d.set_item("interval", period_to_iso(row.interval))?;
+                d.set_item("window_count", row.window_count)?;
+                d.set_item("count", row.count)?;
                 Ok(d)
             })
             .collect()
@@ -5040,6 +5094,56 @@ filter_pymethods! {
     }
 }
 
+#[pymethods]
+impl PyStore {
+    /// Whether the exact stored identity exists, including its grid and whole
+    /// feature map. `resolution=None` and `interval=None` match SQL NULL, not
+    /// rows at any grid. `features` is required, with `{}` naming no features.
+    ///
+    /// Unlike `has_any_time_series`, a `Deterministic` type does not widen to a
+    /// stored `DeterministicSingleTimeSeries`. The query is an index-backed
+    /// existence probe and does not construct metadata dicts.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The exact-key Python interface requires every identity field."
+    )]
+    #[pyo3(signature = (*, owner_id, owner_category, name, time_series_type, resolution, interval, features))]
+    fn has_exact_time_series(
+        &self,
+        owner_id: i64,
+        owner_category: PyOwnerCategory,
+        name: &str,
+        time_series_type: &Bound<'_, PyAny>,
+        resolution: &Bound<'_, PyAny>,
+        interval: &Bound<'_, PyAny>,
+        features: &Bound<'_, PyDict>,
+    ) -> PyResult<bool> {
+        let time_series_type = pyany_to_time_series_type(time_series_type, "time_series_type")?;
+        let resolution = if resolution.is_none() {
+            None
+        } else {
+            Some(pyany_to_period(resolution)?)
+        };
+        let interval = if interval.is_none() {
+            None
+        } else {
+            Some(pyany_to_period(interval)?)
+        };
+        let identity = core_lib::KeyIdentity {
+            owner_id,
+            owner_category: owner_category.into(),
+            time_series_type,
+            name: name.to_owned(),
+            resolution,
+            interval,
+            features: features_from_dict(Some(features))?,
+        };
+        self.store()?
+            .has_exact_time_series(&identity)
+            .map_err(map_err)
+    }
+}
+
 filter_pymethods! {
     list,
     /// Distinct series names matching the filter, sorted.
@@ -5249,24 +5353,18 @@ fn pyany_to_period(v: &Bound<'_, PyAny>) -> PyResult<core_lib::Period> {
     }
 }
 
-// ---- requested-type helpers -----------------------------------------------
+// ---- time-series-type helpers ---------------------------------------------
 
-/// Accept a requested time series type as a `TimeSeriesType`.
+/// Parse a `TimeSeriesType` enum member or one of its names.
 ///
-/// `TimeSeriesType.Deterministic` also matches a stored
-/// `DeterministicSingleTimeSeries` — the transform is an implementation detail
-/// of how a forecast is stored, and it reads back as a `Deterministic` either
-/// way. `TimeSeriesType.DeterministicSingleTimeSeries` narrows to the
-/// transformed form, which is how a caller inspects what it has.
+/// This converts the spelling only; requested-type family matching is applied
+/// by the filter operation that uses the parsed value. The exact-key probe
+/// keeps the concrete variant as-is.
 ///
-/// `param` names the argument in error messages.
-///
-/// The enum member and its name are both accepted. The name is what the
-/// docstrings and the type stub have always shown
-/// (`time_series_type="NonSequentialTimeSeries"`), and what a value read back
-/// out of a metadata dict already is, so refusing it made the documented call
-/// fail and forced a round trip through the enum for no gain.
-fn pyany_to_requested_type(
+/// `param` names the argument in error messages. The enum member and its name
+/// are both accepted. Names are also what metadata dicts return, so callers do
+/// not need to round-trip through the enum for filters.
+fn pyany_to_time_series_type(
     v: &Bound<'_, PyAny>,
     param: &str,
 ) -> PyResult<core_lib::TimeSeriesType> {
@@ -5285,6 +5383,14 @@ fn pyany_to_requested_type(
         "{param} must be a TimeSeriesType or one of its names ({})",
         TIME_SERIES_TYPE_NAMES.join(", ")
     )))
+}
+
+/// Parse a type name before a filter applies requested-type family semantics.
+fn pyany_to_requested_type(
+    v: &Bound<'_, PyAny>,
+    param: &str,
+) -> PyResult<core_lib::TimeSeriesType> {
+    pyany_to_time_series_type(v, param)
 }
 
 /// Every `TimeSeriesType` spelling, for the messages above. Held here rather
@@ -5559,6 +5665,10 @@ fn metadata_to_dict<'py>(
     d.set_item("component_field", m.component_field.clone())?;
     d.set_item("application_data", m.application_data.clone())?;
     Ok(d)
+}
+
+fn period_to_iso(period: Option<core_lib::Period>) -> Option<String> {
+    period.map(|value| value.to_iso8601())
 }
 
 /// Render a catalog timestamp as a string for the metadata dict.

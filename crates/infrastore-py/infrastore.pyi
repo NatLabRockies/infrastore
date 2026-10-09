@@ -50,6 +50,26 @@ DtypeName: TypeAlias = Literal[
     "f64", "f32", "i64", "i32", "u64", "bool", "i16", "i8", "u32", "u16", "u8"
 ]
 
+class TimeSeriesCountSummaryRow(TypedDict):
+    """One association-count group keyed by owner and complete temporal axis.
+
+    ``time_step_count`` is the horizon length for forecasts. ``window_count``
+    is their forecast count. Fields not applicable to the stored type are None.
+    """
+
+    owner_type: str
+    owner_category: OwnerCategoryName
+    time_series_type: TimeSeriesTypeName
+    initial_timestamp: str | None
+    time_reference: str | None
+    resolution: str | None
+    time_step_count: int | None
+    timestamps_hash: str | None
+    horizon: str | None
+    interval: str | None
+    window_count: int | None
+    count: int
+
 __version__: str
 
 # ---- Exceptions ------------------------------------------------------------
@@ -764,7 +784,25 @@ class Store:
     def get_metadata_by_id(self, id: int) -> TimeSeriesMetadata | None: ...
     def list_metadata_by_ids(self, ids: list[int]) -> list[TimeSeriesMetadata]: ...
     def association_exists(self, id: int) -> bool: ...
-    def read_by_ids(self, ids: list[int]) -> list[TimeSeriesData]: ...
+    def has_exact_time_series(
+        self,
+        *,
+        owner_id: int,
+        owner_category: OwnerCategory,
+        name: str,
+        time_series_type: TimeSeriesType | str,
+        resolution: Period | None,
+        interval: Period | None,
+        features: FeatureMap,
+    ) -> bool: ...
+    def read_by_ids(
+        self,
+        ids: list[int],
+        *,
+        start_time: datetime | None = None,
+        len: int | None = None,
+        count: int | None = None,
+    ) -> list[TimeSeriesData]: ...
     def read_by_ids_range(
         self, ids: list[int], time_range: tuple[datetime, datetime]
     ) -> list[TimeSeriesData]: ...
@@ -993,6 +1031,7 @@ class Store:
     def get_compression(self) -> dict[str, Any]: ...
     def get_time_series_counts(self) -> dict[str, Any]: ...
     def counts_by_type(self) -> dict[str, int]: ...
+    def time_series_count_summary(self) -> list[TimeSeriesCountSummaryRow]: ...
     def num_distinct_arrays(self) -> int: ...
     def time_series_counts_detailed(self) -> dict[str, Any]: ...
     def static_summary(self) -> list[dict[str, Any]]: ...

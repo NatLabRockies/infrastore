@@ -146,10 +146,13 @@ bindings reimplement storage — they all funnel through the one core.
 
 ## Feature Coverage Varies by Binding
 
-The bindings funnel through one core, and the surface is now broadly consistent. Both static series
-types are available everywhere (read+write, except the read-only gRPC server), and
-[forecasts](./time-series-types.md#forecasts) read back across every interface. The remaining
-asymmetry is that the read-only gRPC server does not accept any writes:
+The bindings funnel through one core, and the main read/write surface is broadly consistent. All
+three static series types are available everywhere (read+write, except the read-only gRPC server),
+and [forecasts](./time-series-types.md#forecasts) read back across every interface. Rust and Python
+also expose `has_exact_time_series`, a full-key existence probe that does not widen `Deterministic`
+to derived views, and a grouped temporal-axis count summary. Julia's `has_time_series` remains a
+requested-type filter query; it is not the same operation as the full-key probe. The read-only gRPC
+server does not accept writes:
 
 | Capability                    | Rust core | C ABI | Python          | Julia | CLI          | gRPC        |
 | ----------------------------- | --------- | ----- | --------------- | ----- | ------------ | ----------- |
@@ -160,6 +163,8 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | Create forecasts              | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
 | Read forecast values          | ✅        | ✅    | ✅              | ✅    | ✅           | ✅          |
 | Forecast metadata / counts    | ✅        | ✅    | ✅              | ✅    | ✅           | list/counts |
+| Exact-key existence           | ✅        | ❌    | ✅              | ❌    | ❌           | ❌          |
+| Grid-level count summary      | ✅        | ❌    | ✅              | ❌    | ❌           | ❌          |
 | Readers (columnar sweep)      | ✅        | ✅    | ✅              | ✅    | `grid`       | ❌          |
 | Association catalogs          | ✅        | ✅    | ✅              | ✅    | ✅           | ❌          |
 | Store attributes              | ✅        | ✅    | ✅              | ✅    | `store-attr` | read-only   |
@@ -170,8 +175,8 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
 | Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 
-The only gap is by design: writes (including forecasts added through `add_time_series`) require
-local filesystem access, so the read-only gRPC server serves forecast reads but not writes.
+The gRPC write limitation is by design: writes (including forecasts added through `add_time_series`)
+require local filesystem access, so the read-only server serves forecast reads but not writes.
 
 **`show()`** is Python-only for now: it is a REPL affordance, and the REPL each binding is used from
 already has one of its own — Julia has `Base.show`, and the CLI has `store-info` plus the `list`

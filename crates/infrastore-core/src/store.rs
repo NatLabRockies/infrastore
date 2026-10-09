@@ -10,9 +10,9 @@ use sha2::{Digest, Sha256};
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{
-    AssociationIdentity, Endpoint, MetadataFilter, MetadataStore, PARENT_CHILD_TABLE,
-    ParentChildAssociation, ParentChildFilter, SUPPLEMENTAL_ATTRIBUTE_TABLE, SeriesFamily,
-    SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
+    AssociationIdentity, Endpoint, MetadataFilter, MetadataStore, NullablePeriodIdentity,
+    PARENT_CHILD_TABLE, ParentChildAssociation, ParentChildFilter, SUPPLEMENTAL_ATTRIBUTE_TABLE,
+    SeriesFamily, SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
     SupplementalAttributeSummaryRow, TypeMatch, hash_is_referenced_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
@@ -197,9 +197,11 @@ impl From<ListFilter> for MetadataFilter {
             component_field: value.component_field,
             zoneless: value.zoneless,
             resolution: value.resolution,
+            resolution_identity: None,
             initial_timestamp: value.initial_timestamp,
             length: value.length,
             interval: value.interval,
+            interval_identity: None,
             features_hash: if value.features_exact {
                 Some(crate::hash::features_hash(
                     value.features.as_ref().unwrap_or(&Features::new()),
@@ -290,16 +292,18 @@ impl ReadWindow {
             return Ok(None);
         }
         let range = match meta.time_series_type {
-            TimeSeriesType::SingleTimeSeries => self.resolve_single(meta)?,
+            TimeSeriesType::SingleTimeSeries => self.resolve_single(meta),
             TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
-                self.resolve_non_sequential(meta)?
+                self.resolve_non_sequential(meta)
             }
             TimeSeriesType::Deterministic
             | TimeSeriesType::DeterministicSingleTimeSeries
             | TimeSeriesType::Probabilistic
-            | TimeSeriesType::Scenarios => self.resolve_forecast(meta)?,
+            | TimeSeriesType::Scenarios => self.resolve_forecast(meta),
         };
-        Ok(Some(range))
+        range
+            .map(Some)
+            .map_err(|error| contextualize_read_window_error(error, meta))
     }
 
     /// Reject the extent argument belonging to the other family, naming the one
@@ -508,6 +512,26 @@ impl ReadWindow {
             })?
         };
         Ok(self.range(meta, start, end))
+    }
+}
+
+fn contextualize_read_window_error(
+    error: TimeSeriesError,
+    meta: &TimeSeriesMetadata,
+) -> TimeSeriesError {
+    let association = match meta.id {
+        Some(id) => format!("association {}", id.get()),
+        None => "association with unknown id".into(),
+    };
+    let context = format!("{association} ({:?}, owner {})", meta.name, meta.owner_id);
+    match error {
+        TimeSeriesError::InvalidParameter(message) => {
+            TimeSeriesError::InvalidParameter(format!("{context}: {message}"))
+        }
+        TimeSeriesError::IntegrityError(message) => {
+            TimeSeriesError::IntegrityError(format!("{context}: {message}"))
+        }
+        other => other,
     }
 }
 
@@ -4511,6 +4535,22 @@ impl Store {
         })
     }
 
+    /// Whether the exact [`KeyIdentity`] exists in the catalog.
+    ///
+    /// The key includes owner id/category, name, concrete stored type, nullable
+    /// resolution and interval, and the complete feature set. A `None` period
+    /// matches a stored SQL `NULL`, rather than leaving that dimension
+    /// unconstrained. In particular, `Deterministic` does not match a stored
+    /// `DeterministicSingleTimeSeries`.
+    ///
+    /// [`Self::has_any_time_series`] answers the broader filtered/family
+    /// question. This exact-key query shares its predicate with duplicate
+    /// checks and uses the covering unique index without hydrating a metadata
+    /// row.
+    pub fn has_exact_time_series(&self, identity: &KeyIdentity) -> Result<bool> {
+        self.metadata.exists(&identity_filter(identity))
+    }
+
     /// True iff at least one association matches `filter`, answering "does
     /// this component have any time series (of type T)?" without listing them.
     ///
@@ -4716,6 +4756,16 @@ impl Store {
     /// no binding has to scan and group.
     pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
         self.metadata.counts_by_type()
+    }
+
+    /// Association counts grouped by owner kind, stored type, and complete
+    /// temporal axis, preserving timestamp spelling. Names and features are
+    /// folded into the count. The query scans and groups the catalog, and a
+    /// highly ragged store can return nearly one row per association.
+    pub fn time_series_count_summary(
+        &self,
+    ) -> Result<Vec<crate::metadata::TimeSeriesCountSummaryRow>> {
+        self.metadata.time_series_count_summary()
     }
 
     /// Number of distinct stored arrays (content hashes); shared series count once.
@@ -7194,8 +7244,16 @@ fn identity_filter(key: &KeyIdentity) -> MetadataFilter {
         owner_category: Some(key.owner_category),
         time_series_type: Some(TypeMatch::Exact(key.time_series_type)),
         name: Some(key.name.clone()),
-        resolution: key.resolution,
-        interval: key.interval,
+        resolution: None,
+        resolution_identity: Some(match key.resolution {
+            Some(resolution) => NullablePeriodIdentity::Value(resolution),
+            None => NullablePeriodIdentity::Null,
+        }),
+        interval: None,
+        interval_identity: Some(match key.interval {
+            Some(interval) => NullablePeriodIdentity::Value(interval),
+            None => NullablePeriodIdentity::Null,
+        }),
         features: None,
         features_hash: Some(crate::hash::features_hash(&key.features)),
         owner_type: None,
@@ -7467,6 +7525,61 @@ mod resolve_windows_tests {
         assert!(matches!(
             rw(24, 12),
             Err(TimeSeriesError::InvalidParameter(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod read_window_context_tests {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    #[test]
+    fn window_errors_keep_row_context_and_unrelated_errors_unchanged() {
+        let mut store = Store::create(None, true).unwrap();
+        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let id = store
+            .add(AddRequest::new(
+                4,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    initial,
+                    Duration::hours(1),
+                    TypedArray::from_f64(vec![2], &[1.0, 2.0]),
+                    "short",
+                )),
+            ))
+            .unwrap();
+        let mut metadata = store.get_metadata_by_id(id).unwrap().unwrap();
+        metadata.resolution = None;
+
+        let error = ReadWindow::full()
+            .with_len(1)
+            .resolve(&metadata)
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            TimeSeriesError::IntegrityError(message)
+                if message.contains("association")
+                    && message.contains("short")
+                    && message.contains("owner 4")
+        ));
+
+        metadata.id = None;
+        let error = ReadWindow::full()
+            .with_len(1)
+            .resolve(&metadata)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TimeSeriesError::IntegrityError(message)
+                if message.contains("association with unknown id")
+                    && message.contains("short")
+        ));
+        assert!(matches!(
+            contextualize_read_window_error(TimeSeriesError::NotFound, &metadata),
+            TimeSeriesError::NotFound
         ));
     }
 }
