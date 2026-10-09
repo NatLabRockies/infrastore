@@ -4496,7 +4496,6 @@ impl PyStore {
     /// Grouped static-series summary: one dict per distinct owner/name/shape
     /// combination with the association `count`.
     fn static_summary<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let iso = |p: Option<core_lib::Period>| p.map(|x| x.to_iso8601());
         self.store()?
             .static_summary()
             .map_err(map_err)?
@@ -4511,7 +4510,7 @@ impl PyStore {
                     "initial_timestamp",
                     r.initial_timestamp.map(|t| t.to_rfc3339()),
                 )?;
-                d.set_item("resolution", iso(r.resolution))?;
+                d.set_item("resolution", period_to_iso(r.resolution))?;
                 d.set_item("time_step_count", r.time_step_count)?;
                 d.set_item("count", r.count)?;
                 Ok(d)
@@ -4522,7 +4521,6 @@ impl PyStore {
     /// Grouped forecast summary: one dict per distinct owner/name/window
     /// configuration with the association `count`.
     fn forecast_summary<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let iso = |p: Option<core_lib::Period>| p.map(|x| x.to_iso8601());
         self.store()?
             .forecast_summary()
             .map_err(map_err)?
@@ -4537,9 +4535,9 @@ impl PyStore {
                     "initial_timestamp",
                     r.initial_timestamp.map(|t| t.to_rfc3339()),
                 )?;
-                d.set_item("resolution", iso(r.resolution))?;
-                d.set_item("horizon", iso(r.horizon))?;
-                d.set_item("interval", iso(r.interval))?;
+                d.set_item("resolution", period_to_iso(r.resolution))?;
+                d.set_item("horizon", period_to_iso(r.horizon))?;
+                d.set_item("interval", period_to_iso(r.interval))?;
                 d.set_item("window_count", r.window_count)?;
                 d.set_item("count", r.count)?;
                 Ok(d)
@@ -4560,7 +4558,9 @@ impl PyStore {
                 d.set_item("time_series_type", row.time_series_type.as_str())?;
                 d.set_item(
                     "initial_timestamp",
-                    row.initial_timestamp.map(|t| t.to_rfc3339()),
+                    row.initial_timestamp.map(|timestamp| {
+                        render_catalog_timestamp(timestamp, row.time_reference.as_ref())
+                    }),
                 )?;
                 d.set_item(
                     "time_reference",
@@ -4568,7 +4568,15 @@ impl PyStore {
                         .as_ref()
                         .map(core_lib::TimeReference::as_storage_string),
                 )?;
-                d.set_item("resolution", row.resolution.map(|p| p.to_iso8601()))?;
+                d.set_item("resolution", period_to_iso(row.resolution))?;
+                d.set_item("time_step_count", row.time_step_count)?;
+                d.set_item(
+                    "timestamps_hash",
+                    row.timestamps_hash.as_ref().map(core_lib::hash_hex),
+                )?;
+                d.set_item("horizon", period_to_iso(row.horizon))?;
+                d.set_item("interval", period_to_iso(row.interval))?;
+                d.set_item("window_count", row.window_count)?;
                 d.set_item("count", row.count)?;
                 Ok(d)
             })
@@ -5093,31 +5101,50 @@ filter_pymethods! {
 
 #[pymethods]
 impl PyStore {
-    /// Whether an exact stored type and complete feature set exists for this
-    /// owner and name. `features=None` means the empty feature set.
+    /// Whether the exact stored identity exists, including its grid and whole
+    /// feature map. `resolution=None` and `interval=None` match SQL NULL, not
+    /// rows at any grid. `features` is required, with `{}` naming no features.
     ///
-    /// Unlike `has_any_time_series`, a request for `Deterministic` does not
-    /// include `DeterministicSingleTimeSeries`. The query is an index-backed
+    /// Unlike `has_any_time_series`, a `Deterministic` type does not widen to a
+    /// stored `DeterministicSingleTimeSeries`. The query is an index-backed
     /// existence probe and does not construct metadata dicts.
-    #[pyo3(signature = (*, owner_id, owner_category, name, time_series_type, features=None))]
-    fn has_time_series(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The exact-key Python interface requires every identity field."
+    )]
+    #[pyo3(signature = (*, owner_id, owner_category, name, time_series_type, resolution, interval, features))]
+    fn has_exact_time_series(
         &self,
         owner_id: i64,
         owner_category: PyOwnerCategory,
         name: &str,
         time_series_type: &Bound<'_, PyAny>,
-        features: Option<&Bound<'_, PyDict>>,
+        resolution: &Bound<'_, PyAny>,
+        interval: &Bound<'_, PyAny>,
+        features: &Bound<'_, PyDict>,
     ) -> PyResult<bool> {
-        let time_series_type = pyany_to_requested_type(time_series_type, "time_series_type")?;
-        let features = features_from_dict(features)?;
+        let time_series_type = pyany_to_time_series_type(time_series_type, "time_series_type")?;
+        let resolution = if resolution.is_none() {
+            None
+        } else {
+            Some(pyany_to_period(resolution)?)
+        };
+        let interval = if interval.is_none() {
+            None
+        } else {
+            Some(pyany_to_period(interval)?)
+        };
+        let identity = core_lib::KeyIdentity {
+            owner_id,
+            owner_category: owner_category.into(),
+            time_series_type,
+            name: name.to_owned(),
+            resolution,
+            interval,
+            features: features_from_dict(Some(features))?,
+        };
         self.store()?
-            .has_time_series(
-                owner_id,
-                owner_category.into(),
-                name,
-                time_series_type,
-                &features,
-            )
+            .has_exact_time_series(&identity)
             .map_err(map_err)
     }
 }
@@ -5331,24 +5358,18 @@ fn pyany_to_period(v: &Bound<'_, PyAny>) -> PyResult<core_lib::Period> {
     }
 }
 
-// ---- requested-type helpers -----------------------------------------------
+// ---- time-series-type helpers ---------------------------------------------
 
-/// Accept a requested time series type as a `TimeSeriesType`.
+/// Parse a `TimeSeriesType` enum member or one of its names.
 ///
-/// `TimeSeriesType.Deterministic` also matches a stored
-/// `DeterministicSingleTimeSeries` — the transform is an implementation detail
-/// of how a forecast is stored, and it reads back as a `Deterministic` either
-/// way. `TimeSeriesType.DeterministicSingleTimeSeries` narrows to the
-/// transformed form, which is how a caller inspects what it has.
+/// This converts the spelling only; requested-type family matching is applied
+/// by the filter operation that uses the parsed value. The exact-key probe
+/// keeps the concrete variant as-is.
 ///
-/// `param` names the argument in error messages.
-///
-/// The enum member and its name are both accepted. The name is what the
-/// docstrings and the type stub have always shown
-/// (`time_series_type="NonSequentialTimeSeries"`), and what a value read back
-/// out of a metadata dict already is, so refusing it made the documented call
-/// fail and forced a round trip through the enum for no gain.
-fn pyany_to_requested_type(
+/// `param` names the argument in error messages. The enum member and its name
+/// are both accepted. Names are also what metadata dicts return, so callers do
+/// not need to round-trip through the enum for filters.
+fn pyany_to_time_series_type(
     v: &Bound<'_, PyAny>,
     param: &str,
 ) -> PyResult<core_lib::TimeSeriesType> {
@@ -5367,6 +5388,14 @@ fn pyany_to_requested_type(
         "{param} must be a TimeSeriesType or one of its names ({})",
         TIME_SERIES_TYPE_NAMES.join(", ")
     )))
+}
+
+/// Parse a type name before a filter applies requested-type family semantics.
+fn pyany_to_requested_type(
+    v: &Bound<'_, PyAny>,
+    param: &str,
+) -> PyResult<core_lib::TimeSeriesType> {
+    pyany_to_time_series_type(v, param)
 }
 
 /// Every `TimeSeriesType` spelling, for the messages above. Held here rather
@@ -5641,6 +5670,10 @@ fn metadata_to_dict<'py>(
     d.set_item("component_field", m.component_field.clone())?;
     d.set_item("application_data", m.application_data.clone())?;
     Ok(d)
+}
+
+fn period_to_iso(period: Option<core_lib::Period>) -> Option<String> {
+    period.map(|value| value.to_iso8601())
 }
 
 /// Render a catalog timestamp as a string for the metadata dict.

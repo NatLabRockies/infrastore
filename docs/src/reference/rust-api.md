@@ -125,9 +125,10 @@ impl Store {
         new_name: Option<&str>,   // None keeps the source name
     ) -> Result<TimeSeriesId>;    // the copy's own id
 
-    // Read many series at once with one strict window. Packed `SingleTimeSeries`
-    // are read in one decompress-once pass per dataset. Results follow the order
-    // the ids are given, repeats included; `NotFound` if any id names no row.
+    // Read many series at once with one strict window. Whole-series reads batch
+    // packed `SingleTimeSeries` in one decompress-once pass per dataset. A
+    // sliced window is currently read per entry. Results follow input order,
+    // repeats included; `NotFound` if any id names no row.
     pub fn read_by_ids(
         &self,
         ids: &[TimeSeriesId],
@@ -185,16 +186,10 @@ impl Store {
         &self,
         ids: &[TimeSeriesId],
     ) -> Result<Vec<TimeSeriesMetadata>>;
-    // Existence for one owner/name/type and complete feature set. This type
-    // match is exact, not the Deterministic family match of ListFilter.
-    pub fn has_time_series(
-        &self,
-        owner_id: i64,
-        owner_category: OwnerCategory,
-        name: &str,
-        time_series_type: TimeSeriesType,
-        features: &Features,
-    ) -> Result<bool>;
+    // Existence for a complete catalog identity, including exact nullable
+    // resolution/interval and the full feature set. `Deterministic` is concrete
+    // here, unlike the requested-type family match of `ListFilter`.
+    pub fn has_exact_time_series(&self, identity: &KeyIdentity) -> Result<bool>;
     // Existence over a filter without listing: "does this owner have any time
     // series (of type T)?". This query uses the requested-type family semantics.
     pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool>;
@@ -393,6 +388,7 @@ can be moved between threads, but sharing one requires external synchronization 
   an extent past any selected series' end, is `InvalidParameter` rather than the smaller answer a
   range would clip to. `read_by_ids` applies one window to every id and preserves input order and
   repeated ids. A named start also requires one compatible timestamp spelling across the set.
+  Window-resolution errors identify the offending association id and series name.
 - **`read_by_ids_range`** — The bounds read. `start` is inclusive and `end` is exclusive, and it
   _clips_ to what is there — see [Reading a time range](#reading-a-time-range) for what each type
   applies that to. Both bounds must be spelled the way the series are, and a selection spanning both
@@ -409,11 +405,11 @@ can be moved between threads, but sharing one requires external synchronization 
   `Deterministic` (what a read-then-write copy through the bindings would produce). Only a metadata
   row is written: the array is content-addressed and shared. `new_name = None` keeps the source
   name. Errors with `DuplicateTimeSeries` if the destination identity already exists.
-- **`has_time_series`** — An exact existence probe over
-  `(owner_id, owner_category, name,
-  time_series_type, features)`. The entire feature set is hashed,
-  including the empty set, and the stored type is compared exactly. It returns a boolean from an
-  indexed `SELECT 1` query without hydrating metadata. This is intentionally narrower than
+- **`has_exact_time_series`** — Tests whether a [`KeyIdentity`](#timeseriesid-and-keyidentity)
+  exists, including exact owner id/category, name, concrete stored type, resolution, interval, and
+  the complete feature set. `None` resolution/interval match stored SQL `NULL`; they are not omitted
+  filters. The query reuses the identity predicate used by duplicate checks and returns a boolean
+  from an indexed `SELECT 1` without hydrating metadata. This is intentionally narrower than
   `has_any_time_series`, whose `ListFilter::time_series_type` follows the requested-type rule and
   whose features can be a subset. Neither probe changes duplicate insertion or derived-forecast
   conflict checks.
@@ -518,10 +514,11 @@ caller. All are read-only and hit SQLite once.
   the check to one grid. Returns `IntegrityError` when the series at a single resolution disagree.
 - **`counts_by_type`** — Association count per [`TimeSeriesType`](#timeseriestype).
 - **`time_series_count_summary`** — One [`TimeSeriesCountSummaryRow`](#report-and-count-types) per
-  `(owner_type, owner_category, time_series_type, initial_timestamp, time_reference, resolution)`
-  group. It aggregates names, features, and forecast-only dimensions into `count`, and retains the
-  timestamp reference so consumers can regroup without listing every association. One catalog
-  `GROUP BY` query.
+  owner/type group and complete temporal axis. It aggregates names and features, retaining static
+  lengths, irregular timestamp-axis hashes, and forecast horizon/interval/window-count dimensions.
+  Timestamp reference remains a separate grouping field. The query scans and groups the catalog; a
+  ragged store can produce nearly one result row per association. It avoids materializing and
+  transferring metadata rows, but is not a constant-time aggregate.
 - **`num_distinct_arrays`** — Distinct stored content hashes; series sharing an array count once.
 - **`time_series_counts_detailed`** — [`TimeSeriesCountsDetailed`](#report-and-count-types):
   distinct owners split by category, and distinct _arrays_ (not associations) split into static vs
@@ -580,18 +577,20 @@ the underlying packed array. The low-level pair still works for direct array acc
 ### Readers
 
 `read_by_id` returns a whole series or forecast. To read **many whole series at once** (e.g.
-exploration or plotting), `read_by_ids` takes a slice of ids and reads packed `SingleTimeSeries` in
-one decompress-once pass per dataset — far cheaper than a `read_by_id` per series under the
-timestamp-major chunking, where a single full-series read touches every chunk. Results follow the
-order the ids are given, repeats included, and an id naming no row fails the read with `NotFound`
-rather than being skipped. For the timestamp-oriented access pattern — _walk the timeline and read
-every series' value at each instant_ — build a **reader** instead. A reader is built once over a
-[`ListFilter`](#listfilter), pins one resolution, and holds reusable buffers that each read
-overwrites in place, so a tight loop allocates nothing. The reader is a passive plan: it does not
-borrow the `Store`, so reads go through `Store::static_read` / `Store::forecast_read`, which fill
-the buffers; the caller then walks the groups/entries. There are two:
-[`StaticReader`](#staticreader-and-staticgroup) for the static types and
-[`ForecastReader`](#forecastreader-windowslot-and-forecastentry) for forecasts.
+exploration or plotting), `read_by_ids` takes a slice of ids and, with `ReadWindow::full()`, reads
+packed `SingleTimeSeries` in one decompress-once pass per dataset — far cheaper than a `read_by_id`
+per series under timestamp-major chunking, where a single full-series read touches every chunk.
+Results follow the order the ids are given, repeats included, and an id naming no row fails the read
+with `NotFound` rather than being skipped. A strict sliced window still fetches all metadata in one
+catalog query, but currently reads each requested slice separately; repeated ids repeat that slice
+read. The whole-series decompress-once guarantee does not apply to windowed reads. For the
+timestamp-oriented access pattern — _walk the timeline and read every series' value at each instant_
+— build a **reader** instead. A reader is built once over a [`ListFilter`](#listfilter), pins one
+resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
+nothing. The reader is a passive plan: it does not borrow the `Store`, so reads go through
+`Store::static_read` / `Store::forecast_read`, which fill the buffers; the caller then walks the
+groups/entries. There are two: [`StaticReader`](#staticreader-and-staticgroup) for the static types
+and [`ForecastReader`](#forecastreader-windowslot-and-forecastentry) for forecasts.
 
 ```rust
 // Static: value of every SingleTimeSeries at one timestamp, columnar.
@@ -958,9 +957,10 @@ impl TimeSeriesId {
 it `association_id`) are unchanged by the wrapper, and every binding exchanges a plain integer.
 
 `KeyIdentity` is the tuple the catalog files a row under, matching its uniqueness constraint. It is
-**not an address**: it stays internal to the write path, and nothing takes one. `interval` is part
-of the identity (`Some` for every forecast type, `None` for the static types); `resolution` is
-`Option` because neither `NonSequentialTimeSeries` nor `PersistentTimeSeries` has one.
+**not an address**: `has_exact_time_series` accepts one to test whether the full key exists, while
+every read and removal still takes `TimeSeriesId`. `interval` is part of the identity (`Some` for
+every forecast type, `None` for the static types); `resolution` is `Option` because neither
+`NonSequentialTimeSeries` nor `PersistentTimeSeries` has one.
 
 ```rust
 pub struct KeyIdentity {
@@ -1826,9 +1826,9 @@ pub struct ForecastSummaryRow {
     pub window_count: Option<i64>,
     pub count: i64,
 }
-// One association-count group for `time_series_count_summary`. The UTC
-// instant and its reference are both retained, so equal instants with distinct
-// spellings remain distinguishable.
+// One association-count group for `time_series_count_summary`. Fields not
+// applicable to a stored type are None; for forecasts, `time_step_count` is
+// the number of steps in one horizon and `window_count` is the number of windows.
 pub struct TimeSeriesCountSummaryRow {
     pub owner_type: String,
     pub owner_category: OwnerCategory,
@@ -1836,6 +1836,11 @@ pub struct TimeSeriesCountSummaryRow {
     pub initial_timestamp: Option<DateTime<Utc>>,
     pub time_reference: Option<TimeReference>,
     pub resolution: Option<Period>,
+    pub time_step_count: Option<i64>,
+    pub timestamps_hash: Option<[u8; 32]>,
+    pub horizon: Option<Period>,
+    pub interval: Option<Period>,
+    pub window_count: Option<i64>,
     pub count: i64,
 }
 pub struct CompactionReport {   // on-disk compaction rewrites the .h5; see the file-format reference

@@ -8,11 +8,11 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Result, TimeSeriesError};
-use crate::hash::{array_hash, features_hash};
+use crate::hash::array_hash;
 use crate::metadata::{
-    AssociationIdentity, Endpoint, MetadataFilter, MetadataStore, PARENT_CHILD_TABLE,
-    ParentChildAssociation, ParentChildFilter, SUPPLEMENTAL_ATTRIBUTE_TABLE, SeriesFamily,
-    SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
+    AssociationIdentity, Endpoint, MetadataFilter, MetadataStore, NullablePeriodIdentity,
+    PARENT_CHILD_TABLE, ParentChildAssociation, ParentChildFilter, SUPPLEMENTAL_ATTRIBUTE_TABLE,
+    SeriesFamily, SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
     SupplementalAttributeSummaryRow, TypeMatch, hash_is_referenced_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
@@ -197,9 +197,11 @@ impl From<ListFilter> for MetadataFilter {
             component_field: value.component_field,
             zoneless: value.zoneless,
             resolution: value.resolution,
+            resolution_identity: None,
             initial_timestamp: value.initial_timestamp,
             length: value.length,
             interval: value.interval,
+            interval_identity: None,
             features_hash: if value.features_exact {
                 Some(crate::hash::features_hash(
                     value.features.as_ref().unwrap_or(&Features::new()),
@@ -290,16 +292,18 @@ impl ReadWindow {
             return Ok(None);
         }
         let range = match meta.time_series_type {
-            TimeSeriesType::SingleTimeSeries => self.resolve_single(meta)?,
+            TimeSeriesType::SingleTimeSeries => self.resolve_single(meta),
             TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
-                self.resolve_non_sequential(meta)?
+                self.resolve_non_sequential(meta)
             }
             TimeSeriesType::Deterministic
             | TimeSeriesType::DeterministicSingleTimeSeries
             | TimeSeriesType::Probabilistic
-            | TimeSeriesType::Scenarios => self.resolve_forecast(meta)?,
+            | TimeSeriesType::Scenarios => self.resolve_forecast(meta),
         };
-        Ok(Some(range))
+        range
+            .map(Some)
+            .map_err(|error| contextualize_read_window_error(error, meta))
     }
 
     /// Reject the extent argument belonging to the other family, naming the one
@@ -508,6 +512,26 @@ impl ReadWindow {
             })?
         };
         Ok(self.range(meta, start, end))
+    }
+}
+
+fn contextualize_read_window_error(
+    error: TimeSeriesError,
+    meta: &TimeSeriesMetadata,
+) -> TimeSeriesError {
+    let association = match meta.id {
+        Some(id) => format!("association {}", id.get()),
+        None => "association with unknown id".into(),
+    };
+    let context = format!("{association} ({:?}, owner {})", meta.name, meta.owner_id);
+    match error {
+        TimeSeriesError::InvalidParameter(message) => {
+            TimeSeriesError::InvalidParameter(format!("{context}: {message}"))
+        }
+        TimeSeriesError::IntegrityError(message) => {
+            TimeSeriesError::IntegrityError(format!("{context}: {message}"))
+        }
+        other => other,
     }
 }
 
@@ -4511,35 +4535,20 @@ impl Store {
         })
     }
 
-    /// Whether an association matches this owner, name, stored type, and whole
-    /// feature set.
+    /// Whether the exact [`KeyIdentity`] exists in the catalog.
     ///
-    /// Unlike [`Self::has_any_time_series`], `time_series_type` is exact:
-    /// asking for `Deterministic` does not match a stored
-    /// `DeterministicSingleTimeSeries`. `features` is also exact, including an
-    /// empty map. Resolution and forecast interval are not predicates here, so
-    /// this answers whether any row with the given association descriptors
-    /// exists at any grid.
+    /// The key includes owner id/category, name, concrete stored type, nullable
+    /// resolution and interval, and the complete feature set. A `None` period
+    /// matches a stored SQL `NULL`, rather than leaving that dimension
+    /// unconstrained. In particular, `Deterministic` does not match a stored
+    /// `DeterministicSingleTimeSeries`.
     ///
-    /// A covering-index existence probe (`SELECT 1`), not a metadata listing;
-    /// no matching row is hydrated. The same `has_time_series` call is safe in
-    /// duplicate checks and hot per-owner loops.
-    pub fn has_time_series(
-        &self,
-        owner_id: i64,
-        owner_category: OwnerCategory,
-        name: &str,
-        time_series_type: TimeSeriesType,
-        features: &Features,
-    ) -> Result<bool> {
-        self.metadata.exists(&MetadataFilter {
-            owner_id: Some(owner_id),
-            owner_category: Some(owner_category),
-            time_series_type: Some(TypeMatch::Exact(time_series_type)),
-            name: Some(name.to_owned()),
-            features_hash: Some(features_hash(features)),
-            ..Default::default()
-        })
+    /// [`Self::has_any_time_series`] answers the broader filtered/family
+    /// question. This exact-key query shares its predicate with duplicate
+    /// checks and uses the covering unique index without hydrating a metadata
+    /// row.
+    pub fn has_exact_time_series(&self, identity: &KeyIdentity) -> Result<bool> {
+        self.metadata.exists(&identity_filter(identity))
     }
 
     /// True iff at least one association matches `filter`, answering "does
@@ -4749,11 +4758,10 @@ impl Store {
         self.metadata.counts_by_type()
     }
 
-    /// Association counts grouped by owner kind, stored type, and temporal
-    /// grid, preserving timestamp spelling. This is a compact count surface for
-    /// callers that need grid-level grouping but not one metadata row per
-    /// association; name, features, and forecast-only dimensions are folded
-    /// into the count.
+    /// Association counts grouped by owner kind, stored type, and complete
+    /// temporal axis, preserving timestamp spelling. Names and features are
+    /// folded into the count. The query scans and groups the catalog, and a
+    /// highly ragged store can return nearly one row per association.
     pub fn time_series_count_summary(
         &self,
     ) -> Result<Vec<crate::metadata::TimeSeriesCountSummaryRow>> {
@@ -7236,8 +7244,16 @@ fn identity_filter(key: &KeyIdentity) -> MetadataFilter {
         owner_category: Some(key.owner_category),
         time_series_type: Some(TypeMatch::Exact(key.time_series_type)),
         name: Some(key.name.clone()),
-        resolution: key.resolution,
-        interval: key.interval,
+        resolution: None,
+        resolution_identity: Some(match key.resolution {
+            Some(resolution) => NullablePeriodIdentity::Value(resolution),
+            None => NullablePeriodIdentity::Null,
+        }),
+        interval: None,
+        interval_identity: Some(match key.interval {
+            Some(interval) => NullablePeriodIdentity::Value(interval),
+            None => NullablePeriodIdentity::Null,
+        }),
         features: None,
         features_hash: Some(crate::hash::features_hash(&key.features)),
         owner_type: None,

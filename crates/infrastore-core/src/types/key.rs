@@ -18,8 +18,10 @@ use super::time_series::TimeSeriesType;
 /// This is **not** an address. A caller names a series by its association
 /// [`crate::TimeSeriesId`] — recovered from attributes by
 /// [`crate::Store::list_metadata`] — and every read and removal takes that id.
-/// An identity is how a row is filed and de-duplicated, which is why it stays
-/// internal to the write path.
+/// An identity is how a row is filed and de-duplicated. The write path uses it
+/// to prevent duplicates, and [`crate::Store::has_exact_time_series`] uses it
+/// to ask whether that exact key is present; neither operation makes it a read
+/// handle.
 ///
 /// `interval` is part of the identity (matching InfrastructureSystems.jl): two
 /// forecasts of one variable at the same resolution but different intervals are

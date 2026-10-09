@@ -186,6 +186,17 @@ class TestReading:
         with pytest.raises(InvalidParameterError):
             store.read_by_ids([ids[0]], start_time=_t0() + timedelta(hours=3), len=2)
 
+        short_id = store.add_time_series(
+            4,
+            "Generator",
+            OwnerCategory.Component,
+            SingleTimeSeries(_t0(), timedelta(hours=1), np.array([1.0]), "short"),
+        )
+        with pytest.raises(
+            InvalidParameterError, match=rf"association {short_id}.*short"
+        ):
+            store.read_by_ids([ids[0], short_id], len=2)
+
     def test_read_by_ids_window_rejects_incompatible_timestamp_spellings(self):
         store = Store.create(in_memory=True)
         aware = store.add_time_series(
