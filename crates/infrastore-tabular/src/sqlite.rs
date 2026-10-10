@@ -804,7 +804,11 @@ fn partition_bases(conn: &Connection, prefix: &str, what: &str) -> Result<Vec<St
         let Some(base) = table.strip_suffix(VALUES_SUFFIX) else {
             continue;
         };
-        let Some(rest) = base.strip_prefix(prefix) else {
+        // SQLite names are case-insensitive, so `Run_` and `run_` are one prefix.
+        let Some(rest) = base
+            .split_at_checked(prefix.len())
+            .and_then(|(head, rest)| head.eq_ignore_ascii_case(prefix).then_some(rest))
+        else {
             continue;
         };
         let is_ours = rest

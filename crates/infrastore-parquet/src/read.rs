@@ -210,6 +210,12 @@ pub fn read_partition_with(
         return read_foreign_with(&files.values, &arrays_path, options, sink);
     };
     if !arrays_path.is_file() {
+        // A v1 export never had an arrays file, so refuse it by version before
+        // reporting the file as missing.
+        let file = std::fs::File::open(&files.values)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        let footer = builder.schema().metadata().clone().into_iter().collect();
+        check_format(&footer, &files.values)?;
         return Err(unsupported(format!(
             "{} has no {} beside it: its rows name arrays by an id only that file resolves",
             files.values.display(),

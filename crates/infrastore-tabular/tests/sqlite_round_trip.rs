@@ -463,6 +463,34 @@ fn the_array_key_is_spelled_once_and_named_by_rowid() {
 }
 
 #[test]
+fn prefixes_differing_only_in_case_are_one_prefix() {
+    // SQLite resolves `Run_all_values` and `run_all_values` to one view, so the
+    // second export's rebuild must still span the first one's partition.
+    let stamps: Vec<DateTime<Utc>> = [0, 1].iter().map(|h| t0() + Duration::hours(*h)).collect();
+    let irregular = TimeSeriesData::NonSequentialTimeSeries(
+        NonSequentialTimeSeries::new(stamps, TypedArray::from_f64(vec![2], &[7.0, 8.0]), "irr")
+            .expect("irregular series"),
+    );
+    let series = stored(vec![hourly("load", &[1.0, 2.0]), utc(irregular)]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("out.db");
+    write_sqlite(&db, &series[..1], "Run_").expect("first export");
+    write_sqlite(&db, &series[1..], "run_").expect("second export, other case");
+
+    let conn = rusqlite::Connection::open(&db).expect("open");
+    let partitions: i64 = conn
+        .query_row(
+            "SELECT count(DISTINCT partition_name) FROM run_all_series",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(partitions, 2);
+    drop(conn);
+    assert_eq!(import(&db, "RUN_", &ImportOptions::default()).len(), 2);
+}
+
+#[test]
 fn fixed_name_views_span_every_partition_under_a_prefix() {
     let stamps: Vec<DateTime<Utc>> = [0, 1, 5]
         .iter()

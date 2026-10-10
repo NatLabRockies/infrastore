@@ -732,6 +732,29 @@ fn a_file_from_a_later_format_is_refused_by_version() {
 }
 
 #[test]
+fn a_v1_partition_is_refused_by_version_not_for_its_missing_arrays_file() {
+    // A v1 export is a values and a series file with no arrays file at all.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
+    std::fs::remove_file(&written.arrays_path).expect("remove arrays file");
+    let (schema, batch) = read_one(&written.values_path);
+    let mut metadata = schema.metadata().clone();
+    metadata.insert("infrastore.format".into(), "normalized_v1".into());
+    let v1 = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        schema.fields().clone(),
+        metadata,
+    ));
+    let batch = arrow::array::RecordBatch::try_new(v1, batch.columns().to_vec())
+        .expect("same columns under a v1 marker");
+    write_batch(&written.values_path, &batch);
+
+    let err =
+        read_partition(&pair_of(&written), &ImportOptions::default()).expect_err("a v1 export");
+    assert!(err.to_string().contains("normalized_v1"), "{err}");
+    assert!(err.to_string().contains("export it again"), "{err}");
+}
+
+#[test]
 fn a_deterministic_single_time_series_points_at_transform() {
     // The type is derived rather than added, so a file naming it is a mistake
     // worth explaining.
