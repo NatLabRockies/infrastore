@@ -106,15 +106,19 @@ fn read_file(path: &Path) -> (RecordBatch, std::collections::HashMap<String, Str
     (batch, schema.metadata().clone())
 }
 
-/// The two file names a partition stem produces.
-fn values_and_series(stem: &str) -> [String; 2] {
+/// The three file names a partition stem produces.
+fn values_and_series(stem: &str) -> [String; 3] {
     [
         format!("{stem}.values.parquet"),
         format!("{stem}.series.parquet"),
+        format!("{stem}.arrays.parquet"),
     ]
 }
 
-/// One partition's two halves, read whole.
+/// One partition's values and series files, read whole and **resolved**: each
+/// gains the `data_hash` and `time_axis` its `array_id` stands for in the arrays
+/// file, as two trailing columns, so a test can ask about an array's key without
+/// doing the join itself. [`read_file`] is the files as written.
 fn read_partition(
     partition: &infrastore_parquet::WrittenPartition,
 ) -> (
@@ -122,9 +126,44 @@ fn read_partition(
     RecordBatch,
     std::collections::HashMap<String, String>,
 ) {
+    let (arrays, _) = read_file(&partition.arrays_path);
+    let keys: std::collections::HashMap<i64, (String, String)> = ints(&arrays, "id")
+        .into_iter()
+        .zip(
+            strings(&arrays, "data_hash")
+                .into_iter()
+                .zip(strings(&arrays, "time_axis")),
+        )
+        .collect();
+    let resolved = |batch: RecordBatch| {
+        let (hashes, axes): (Vec<String>, Vec<String>) = ints(&batch, "array_id")
+            .iter()
+            .map(|id| keys[id].clone())
+            .unzip();
+        let mut fields: Vec<arrow::datatypes::Field> = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect();
+        let mut columns = batch.columns().to_vec();
+        for (name, column) in [("data_hash", hashes), ("time_axis", axes)] {
+            fields.push(arrow::datatypes::Field::new(
+                name,
+                arrow::datatypes::DataType::Utf8,
+                false,
+            ));
+            columns.push(std::sync::Arc::new(arrow::array::StringArray::from(column)));
+        }
+        RecordBatch::try_new(
+            std::sync::Arc::new(arrow::datatypes::Schema::new(fields)),
+            columns,
+        )
+        .expect("the resolved batch")
+    };
     let (values, footer) = read_file(&partition.values_path);
     let (series, _) = read_file(&partition.series_path);
-    (values, series, footer)
+    (resolved(values), resolved(series), footer)
 }
 
 /// The `timestamp` column's type. Not field 0 any more: the array key leads.
@@ -248,6 +287,21 @@ fn one_array_shared_by_many_series_is_written_once() {
     assert_eq!(series_rows.num_rows(), 200);
     let distinct: BTreeSet<String> = strings(&values, "data_hash").into_iter().collect();
     assert_eq!(distinct.len(), 1);
+
+    // As written, the key's text is in the arrays file alone, once; the other
+    // two name it by id.
+    let (arrays, _) = read_file(&report.partitions[0].arrays_path);
+    assert_eq!(ints(&arrays, "id"), vec![1]);
+    assert_eq!(strings(&arrays, "data_hash").len(), 1);
+    for path in [
+        &report.partitions[0].values_path,
+        &report.partitions[0].series_path,
+    ] {
+        let (raw, _) = read_file(path);
+        assert!(raw.column_by_name("data_hash").is_none());
+        assert!(raw.column_by_name("time_axis").is_none());
+        assert!(ints(&raw, "array_id").iter().all(|id| *id == 1));
+    }
 }
 
 #[test]
@@ -322,7 +376,7 @@ fn the_catalog_row_becomes_columns() {
         vec!["max_active_power"; 1]
     );
     assert_eq!(strings(&batch, "application_data"), vec![r#"{"k":1}"#; 1]);
-    // `initial_timestamp` and `length` are also inside `time_axis`; they are
+    // `initial_timestamp` and `length` are also inside the array's `time_axis`; they are
     // real columns so a reader need not parse one.
     assert_eq!(ints(&batch, "length"), vec![2]);
     assert_eq!(
@@ -333,7 +387,7 @@ fn the_catalog_row_becomes_columns() {
     assert_eq!(ints(&batch, "id"), vec![1]);
 
     // The footer states the partition exactly, since the filename does not.
-    assert_eq!(footer[table::FORMAT], table::FORMAT_V1);
+    assert_eq!(footer[table::FORMAT], table::FORMAT_V2);
     assert_eq!(footer[table::ROWS_CONTIGUOUS], "true");
     assert_eq!(footer["time_series_type"], "SingleTimeSeries");
     assert_eq!(footer["element_type"], "f64");
@@ -977,14 +1031,13 @@ fn a_forecast_gets_key_columns_a_static_series_does_not() {
         .iter()
         .map(|f| f.name().clone())
         .collect();
-    // The array key leads, then the time columns. `issue_time` is why a forecast
+    // The array leads, then the time columns. `issue_time` is why a forecast
     // cannot share a values file with a static series.
-    assert_eq!(columns[0], "data_hash");
-    assert_eq!(columns[1], "time_axis");
-    assert_eq!(columns[2], "timestamp");
-    assert_eq!(columns[3], "issue_time");
+    assert_eq!(columns[0], "array_id");
+    assert_eq!(columns[1], "timestamp");
+    assert_eq!(columns[2], "issue_time");
     // `interval` and `horizon` describe the series, so they are in the other
-    // half -- but the values file's `time_axis` still carries them, because two
+    // half -- but the array's `time_axis` still carries them, because two
     // forecasts sharing an array and an anchor but not a horizon have different
     // target-time rows.
     assert!(!columns.contains(&"interval".to_string()));
@@ -1277,7 +1330,7 @@ fn the_two_halves_say_which_they_are() {
     let report = write_partitions(dir.path(), &series).expect("export");
     let (_, values_footer) = read_file(&report.partitions[0].values_path);
     let (_, series_footer) = read_file(&report.partitions[0].series_path);
-    assert_eq!(values_footer[table::FORMAT], table::FORMAT_V1);
+    assert_eq!(values_footer[table::FORMAT], table::FORMAT_V2);
     assert_eq!(values_footer[table::ROLE], table::ROLE_VALUES);
     assert_eq!(series_footer[table::ROLE], table::ROLE_SERIES);
     // Both halves state the partition, so either can be opened alone.

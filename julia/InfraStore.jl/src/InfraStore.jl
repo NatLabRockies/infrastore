@@ -94,6 +94,8 @@ export Store,
     import_time_series_associations_openapi!,
     export_supplemental_attribute_associations_openapi,
     import_supplemental_attribute_associations_openapi!,
+    export_sqlite,
+    import_sqlite!,
     ParentChildAssociation,
     add_parent_child_association!,
     add_parent_child_associations!,
@@ -178,6 +180,7 @@ include("operations.jl")
 include("catalog.jl")
 include("associations.jl")
 include("openapi.jl")
+include("sqlite.jl")
 include("forecasts.jl")
 include("batch.jl")
 include("readers.jl")

@@ -8,6 +8,7 @@ members = [
     "crates/infrastore-ffi",
     "crates/infrastore-cli",
     "crates/infrastore-parquet",
+    "crates/infrastore-tabular",
     "crates/infrastore-bench",
 ]
 
@@ -35,6 +36,7 @@ thiserror = "1"
 infrastore-core = { version = "0.14.1", path = "crates/infrastore-core", default-features = false }
 infrastore-proto = { version = "0.14.1", path = "crates/infrastore-proto", default-features = false }
 infrastore-parquet = { version = "0.14.1", path = "crates/infrastore-parquet", default-features = false }
+infrastore-tabular = { version = "0.14.1", path = "crates/infrastore-tabular", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 # `default-features = false` drops the `derive` feature (and its unmaintained
 # `proc-macro-error2` transitive dep); the CLI builds tables via the Builder API.

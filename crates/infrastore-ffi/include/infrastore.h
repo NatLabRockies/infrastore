@@ -1732,7 +1732,9 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
  * `out_added` receives the number inserted and `out_ids` the catalog id of
  * each, in input order — the ids are the durable handles this write creates,
  * so returning only a count would leave a caller re-listing the table to find
- * what it just wrote. Either may be null to skip it.
+ * what it just wrote. Either may be null to skip it: the write is
+ * all-or-nothing with one id per input row, so the count is always the number
+ * of rows passed.
  *
  * # Safety
  *
@@ -1740,8 +1742,9 @@ int32_t infrastore_store_add_supplemental_attribute_association(struct InfraStor
  * terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
  * `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
  * `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
- * release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
- * null there, which needs no release.
+ * release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. A caller that skipped
+ * `out_added` releases with the number of rows it passed, which is the same count. An
+ * empty batch writes null there, which needs no release.
  */
 int32_t infrastore_store_add_supplemental_attribute_associations(struct InfraStore *handle,
                                                                  const char *associations_json,
@@ -1921,8 +1924,9 @@ int32_t infrastore_store_add_parent_child_association(struct InfraStore *handle,
  * terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
  * `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
  * `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
- * release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
- * null there, which needs no release.
+ * release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. A caller that skipped
+ * `out_added` releases with the number of rows it passed, which is the same count. An
+ * empty batch writes null there, which needs no release.
  */
 int32_t infrastore_store_add_parent_child_associations(struct InfraStore *handle,
                                                        const char *associations_json,
@@ -2178,6 +2182,82 @@ int32_t infrastore_store_import_time_series_associations_openapi(struct InfraSto
 int32_t infrastore_store_import_supplemental_attribute_associations_openapi(struct InfraStore *handle,
                                                                             const char *json,
                                                                             uint64_t *out_added);
+
+/**
+ * Export the series `filter` selects as tables in the SQLite database at
+ * `path` -- the normalized layout `infrastore export -f sqlite` writes, one
+ * `<prefix><base>_values` / `<prefix><base>_series` pair per
+ * `(time_series_type, value type, time_reference)` partition.
+ *
+ * A null `filter` exports the whole store. With `has_time_range`, each series
+ * is clipped to `start_ms` / `end_ms` (Unix milliseconds, spelled by
+ * `time_range_zoneless`) as `infrastore_store_read_by_ids_range` clips.
+ * `table_prefix` may be null for none. The database is created if absent, and
+ * tables are only ever added: a name already taken, or an empty series in the
+ * selection, fails before anything is written. The values are streamed, a
+ * bounded batch at a time and each distinct array once, so a store far larger
+ * than memory exports in a few hundred megabytes.
+ *
+ * A `DeterministicSingleTimeSeries` is left out unless `include_derived`: it
+ * repeats its source `SingleTimeSeries`' values, and
+ * `infrastore_store_import_sqlite` refuses a database holding one. A filter
+ * naming the type without the flag is `INFRASTORE_ERR_INVALID_PARAMETER`.
+ *
+ * `*out_json` receives a JSON array with one object per partition written:
+ * `values_table`, `series_table`, `arrays_table`, `time_series_type`,
+ * `value_type`, `time_reference`, `arrays`, `series` and `rows`.
+ *
+ * # Safety
+ *
+ * `handle` must reference a live store. `filter` must be null or point to a
+ * valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+ * duration of the call. `path` must be a valid, null-terminated UTF-8 string
+ * and `table_prefix` null or one.
+ * `out_json` must be valid for writing one pointer and `out_len` for writing
+ * one `u64`; on success `*out_json` must be released exactly once with
+ * `infrastore_string_free`.
+ */
+int32_t infrastore_store_export_sqlite(const struct InfraStore *handle,
+                                       const struct InfraStoreFilter *filter,
+                                       bool has_time_range,
+                                       bool time_range_zoneless,
+                                       int64_t start_ms,
+                                       int64_t end_ms,
+                                       const char *path,
+                                       const char *table_prefix,
+                                       bool include_derived,
+                                       char **out_json,
+                                       uint64_t *out_len);
+
+/**
+ * Add every series in the tables `infrastore_store_export_sqlite` (or
+ * `infrastore export -f sqlite`) wrote to the database at `path` under
+ * `table_prefix` (null for none), in one all-or-nothing transaction across the
+ * whole database.
+ *
+ * Ids are always assigned fresh; the ones the tables recorded are not reused.
+ * Each array is checked against the `data_hash` its rows carry unless
+ * `skip_checksum`, which is for values edited in place. When non-null,
+ * `out_added` receives the number of series added and `out_ids` their catalog
+ * ids in the order read.
+ *
+ * # Safety
+ *
+ * `handle` must be a live read-write store handle, `path` a valid,
+ * null-terminated UTF-8 string and `table_prefix` null or one. `out_added` and
+ * `out_ids` must each be null or valid for writing one value, and a non-null
+ * `out_ids` requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER`
+ * otherwise, with nothing imported), since the count is the only length the
+ * buffer has -- unlike the bulk association adds, whose caller knows how many
+ * rows it passed. On success a non-null `*out_ids` must be released exactly once with
+ * `infrastore_buffer_free_i64(*out_ids, *out_added)`.
+ */
+int32_t infrastore_store_import_sqlite(struct InfraStore *handle,
+                                       const char *path,
+                                       const char *table_prefix,
+                                       bool skip_checksum,
+                                       uint64_t *out_added,
+                                       int64_t **out_ids);
 
 /**
  * Release an `f64` buffer returned by this library.

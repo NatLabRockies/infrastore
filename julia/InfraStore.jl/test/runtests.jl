@@ -5711,3 +5711,53 @@ end
     @test_throws InfraStore.ReadOnlyStoreError remove_store_attribute!(reopened, "creator")
     close!(reopened)
 end
+
+@testset "SQLite tables round-trip a selection" begin
+    source = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    for (owner, name) in [(1, "wind_speed"), (2, "solar_ghi")]
+        add_time_series!(
+            source, owner, "Generator", Component,
+            SingleTimeSeries(t0, Hour(1), collect(1.0:4.0), name),
+        )
+    end
+    db = joinpath(mktempdir(), "out.db")
+
+    written = export_sqlite(
+        source, db;
+        table_prefix="run1_", name_glob="wind_*", time_range=(t0 + Hour(1), t0 + Hour(3)),
+    )
+    @test length(written) == 1
+    @test startswith(written[1].values_table, "run1_SingleTimeSeries_")
+    @test endswith(written[1].arrays_table, "_arrays")
+    @test (written[1].series, written[1].arrays, written[1].rows) == (1, 1, 2)
+    # Tables are only added: the same names a second time are refused.
+    @test_throws InfraStore.InvalidParameterError export_sqlite(
+        source, db; table_prefix="run1_"
+    )
+
+    target = Store(in_memory=true)
+    # The prefix scopes the import: nothing was exported without one.
+    @test_throws InfraStore.InvalidParameterError import_sqlite!(target, db)
+    ids = import_sqlite!(target, db; table_prefix="run1_")
+    @test length(ids) == 1
+    @test list_names(target) == ["wind_speed"]
+    @test read_by_id(target, ids[1]).data == [2.0, 3.0]
+
+    # All or nothing: the series is already there, so nothing more lands.
+    @test_throws InfraStore.DuplicateTimeSeriesError import_sqlite!(
+        target, db; table_prefix="run1_"
+    )
+    @test length(list_metadata(target)) == 1
+
+    # A derived forecast is left out unless asked for.
+    transform_single_time_series!(source, Hour(2), Hour(1))
+    plain = export_sqlite(source, joinpath(mktempdir(), "plain.db"))
+    @test all(p -> p.time_series_type == "SingleTimeSeries", plain)
+    all_types = export_sqlite(
+        source, joinpath(mktempdir(), "all.db"); include_derived=true
+    )
+    @test "DeterministicSingleTimeSeries" in [p.time_series_type for p in all_types]
+    close!(source)
+    close!(target)
+end

@@ -70,11 +70,13 @@
 //! [`Io`][infrastore_core::TimeSeriesError::Io]. Neither library's own error type
 //! leaks, so a caller matching on `TimeSeriesError` needs no new arm.
 
-pub mod partition;
 pub mod read;
-pub mod schema;
 pub mod table;
 pub mod write;
+
+// The container-independent layout, re-exported so `infrastore_parquet::partition`
+// and `::schema` keep naming what they always have.
+pub use infrastore_tabular::{partition, schema};
 
 pub use read::{
     ImportOptions, ImportedSeries, PartitionFiles, SeriesSink, partitions, read_partition_with,

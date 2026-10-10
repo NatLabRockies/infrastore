@@ -844,9 +844,9 @@ int32_t infrastore_store_list_metadata(const struct InfraStore *handle,
 ### The filter record
 
 Every filter-taking export — `infrastore_store_list_metadata`, `list_names`, `list_owner_types`,
-`has_any_by_filter`, `remove_by_filter`, `export_time_series_associations_openapi`, and both reader
-builders — takes the catalog filter as one `const struct InfraStoreFilter *` rather than as
-positional arguments.
+`has_any_by_filter`, `remove_by_filter`, `export_time_series_associations_openapi`, `export_sqlite`,
+and both reader builders — takes the catalog filter as one `const struct InfraStoreFilter *` rather
+than as positional arguments.
 
 **A NULL pointer, and equally an all-zero record, is the empty filter: it matches everything.** So a
 caller writes `InfraStoreFilter f = {0};` and sets only the fields it cares about. The predicates
@@ -1188,6 +1188,35 @@ int32_t infrastore_store_export_supplemental_attribute_associations_openapi(
    *out_added (when non-NULL) receives the number inserted. */
 int32_t infrastore_store_import_supplemental_attribute_associations_openapi(
     struct InfraStore *handle, const char *json, uint64_t *out_added);
+
+/* Export the series the filter selects (NULL: the whole store) as tables in the
+   SQLite database at path -- the layout `infrastore export -f sqlite` writes.
+   With has_time_range each series is clipped as infrastore_store_read_by_ids_range
+   clips. table_prefix may be NULL. Tables are only ever added; a name already
+   taken, or an empty series, fails before anything is written. A
+   DeterministicSingleTimeSeries is left out unless include_derived (it repeats
+   its source's values and no import takes one back); a filter naming the type
+   without it is INFRASTORE_ERR_INVALID_PARAMETER. out_json is an
+   OWNED JSON array, one object per partition written, freed with
+   infrastore_string_free. */
+int32_t infrastore_store_export_sqlite(const struct InfraStore *handle,
+                                       const struct InfraStoreFilter *filter,
+                                       bool has_time_range, bool time_range_zoneless,
+                                       int64_t start_ms, int64_t end_ms,
+                                       const char *path, const char *table_prefix,
+                                       bool include_derived,
+                                       char **out_json, uint64_t *out_len);
+
+/* Add every series in the tables under table_prefix (NULL: none) in one
+   all-or-nothing transaction across the database. Ids are assigned fresh.
+   skip_checksum waives the data_hash check. *out_added and *out_ids (each when
+   non-NULL) receive the count and the new ids; free the ids with
+   infrastore_buffer_free_i64(*out_ids, *out_added). out_ids without out_added
+   is INFRASTORE_ERR_NULL_POINTER, since the count is the buffer's only length
+   (the bulk association adds allow it: their count is the rows passed in). */
+int32_t infrastore_store_import_sqlite(struct InfraStore *handle, const char *path,
+                                       const char *table_prefix, bool skip_checksum,
+                                       uint64_t *out_added, int64_t **out_ids);
 ```
 
 A catalog row's `data_hash` is `NOT NULL`, and infrastore fills a row's `uri`/`data_hash` wire

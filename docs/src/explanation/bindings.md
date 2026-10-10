@@ -167,6 +167,7 @@ asymmetry is that the read-only gRPC server does not accept any writes:
 | `from_timestamps` (verified)  | ✅        | ✅    | ✅              | ✅    | ❌           | ❌          |
 | Arrow tables (`to_arrow`)     | ❌        | ❌    | ✅              | ❌    | ❌           | ❌          |
 | Parquet files                 | crate     | ❌    | ❌              | ❌    | `-f parquet` | ❌          |
+| SQLite tables                 | crate     | ✅    | ✅              | ✅    | `-f sqlite`  | ❌          |
 | Store summary (`show`)        | ❌        | ❌    | ✅              | ❌    | `store-info` | ❌          |
 | Forecast windows as Arrow     | ❌        | ❌    | `Deterministic` | ❌    | ❌           | ❌          |
 
@@ -185,9 +186,10 @@ the CLI. The feature stays switchable (`--no-default-features --features vendore
 binary), and the line it draws is between the binary and the **libraries**: `infrastore-core`,
 `infrastore-py`, and `infrastore-ffi` never link Arrow, which `cargo tree --edges normal` on each is
 the check for. The CLI is the only surface that reads and writes Parquet _files_
-(`export -f parquet`, `add --parquet`): a **normalized, partitioned** layout of two files per
-partition — a values file holding each distinct array once and a series file holding the catalog
-rows that name it, joined on `(data_hash, time_axis)` — specified in the
+(`export -f parquet`, `add --parquet`): a **normalized, partitioned** layout of three files per
+partition — a values file holding each distinct array once, a series file holding the catalog rows
+that name it, and an arrays file spelling each array's key `(data_hash, time_axis)` once under the
+integer `array_id` the other two join on — specified in the
 [Parquet layout](../reference/parquet-format.md) reference. Python's `to_arrow()` / `from_arrow` are
 a different, in-memory thing — one two-column table per series, with the descriptors in the schema
 metadata rather than in columns — and are not a reader or writer for the CLI's files; a Python user
@@ -197,6 +199,17 @@ DuckDB or polars. The relationship between the two is one sentence: a series fil
 the array. Nothing else has it: the C ABI and Julia would need the whole Arrow tree in the cdylib
 for a format their host languages already have readers for, and the gRPC server serves values, not
 files.
+
+**SQLite tables** carry the same layout (`export -f sqlite --db`, `add --sqlite`), one
+`_values`/`_series`/`_arrays` table set per partition, optionally under a `--table-prefix`. The
+container-independent half of the layout lives in `infrastore-tabular`, which is Arrow-free and
+which `infrastore-parquet` builds on, so SQLite is not behind the `parquet` feature: the catalog
+already links SQLite. For the same reason it costs the libraries almost nothing, so the C ABI,
+Julia, and Python carry it too (`export_sqlite` / `import_sqlite`, over
+`infrastore_tabular::sqlite::export_store` / `import_store`) — the way a binding hands an analyst a
+file for DuckDB or polars without Arrow in the wheel or the cdylib. A binding's import is one
+all-or-nothing transaction across the database and takes only a table prefix and the checksum
+waiver; the CLI's per-partition commits and its override flags for foreign tables stay CLI-only.
 
 **Materialized timestamps** and **`from_timestamps`** both run in the core and reach Julia through
 two stateless ABI entry points, `infrastore_grid_timestamps` and `infrastore_infer_period`. That

@@ -728,7 +728,30 @@ fn a_file_from_a_later_format_is_refused_by_version() {
     let err =
         read_partition(&pair(&report), &ImportOptions::default()).expect_err("a later format");
     assert!(err.to_string().contains("normalized_v99"), "{err}");
+    assert!(err.to_string().contains("normalized_v2"), "{err}");
+}
+
+#[test]
+fn a_v1_partition_is_refused_by_version_not_for_its_missing_arrays_file() {
+    // A v1 export is a values and a series file with no arrays file at all.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
+    std::fs::remove_file(&written.arrays_path).expect("remove arrays file");
+    let (schema, batch) = read_one(&written.values_path);
+    let mut metadata = schema.metadata().clone();
+    metadata.insert("infrastore.format".into(), "normalized_v1".into());
+    let v1 = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        schema.fields().clone(),
+        metadata,
+    ));
+    let batch = arrow::array::RecordBatch::try_new(v1, batch.columns().to_vec())
+        .expect("same columns under a v1 marker");
+    write_batch(&written.values_path, &batch);
+
+    let err =
+        read_partition(&pair_of(&written), &ImportOptions::default()).expect_err("a v1 export");
     assert!(err.to_string().contains("normalized_v1"), "{err}");
+    assert!(err.to_string().contains("export it again"), "{err}");
 }
 
 #[test]
@@ -863,13 +886,13 @@ fn a_series_file_missing_a_required_column_is_refused() {
 
 #[test]
 fn a_values_file_missing_a_required_column_is_refused() {
-    // Half the array key, dropped: every row would key on the empty axis and the
-    // whole file would read as one array.
+    // The column naming each row's array, dropped: the whole file would read as
+    // one array.
     let dir = tempfile::tempdir().expect("tempdir");
     let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
     let (schema, batch) = read_one(&written.values_path);
     let keep: Vec<usize> = (0..schema.fields().len())
-        .filter(|i| schema.field(*i).name() != "time_axis")
+        .filter(|i| schema.field(*i).name() != "array_id")
         .collect();
     write_batch(
         &written.values_path,
@@ -878,7 +901,37 @@ fn a_values_file_missing_a_required_column_is_refused() {
 
     let err = read_partition(&pair_of(&written), &ImportOptions::default())
         .expect_err("a required column");
-    assert!(err.to_string().contains("`time_axis`"), "{err}");
+    assert!(err.to_string().contains("`array_id`"), "{err}");
+}
+
+#[test]
+fn a_partition_without_its_arrays_file_is_refused() {
+    // The values and series rows name an array by id only; without the file
+    // that resolves it there is no key and no checksum.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
+    std::fs::remove_file(&written.arrays_path).unwrap();
+
+    let err =
+        read_partition(&pair_of(&written), &ImportOptions::default()).expect_err("no arrays file");
+    assert!(err.to_string().contains(".arrays.parquet"), "{err}");
+}
+
+#[test]
+fn an_array_id_the_arrays_file_does_not_hold_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = export_one(dir.path(), hourly("load", &[1.0, 2.0]));
+    let (schema, batch) = read_one(&written.arrays_path);
+    let mut columns = batch.columns().to_vec();
+    columns[0] = std::sync::Arc::new(arrow::array::Int64Array::from(vec![7i64]));
+    write_batch(
+        &written.arrays_path,
+        &arrow::array::RecordBatch::try_new(schema, columns).unwrap(),
+    );
+
+    let err = read_partition(&pair_of(&written), &ImportOptions::default())
+        .expect_err("a dangling array_id");
+    assert!(err.to_string().contains("`array_id` 1"), "{err}");
 }
 
 // ---- Foreign values files ---------------------------------------------------

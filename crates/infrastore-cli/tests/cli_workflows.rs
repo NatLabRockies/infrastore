@@ -4677,6 +4677,236 @@ fn parquet_is_only_offered_where_it_means_something() {
     assert!(err.contains("--dir"), "{err}");
 }
 
+#[test]
+fn sqlite_export_adds_tables_and_refuses_a_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("sq.h5");
+    seed_one(dir.path(), &store);
+    // A second owner sharing the profile: one array, two series rows.
+    let d = write(
+        dir.path(),
+        "two.json",
+        r#"{"owner_id": 43, "owner_type": "Generator", "name": "load",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    // An existing database the user already keeps other tables in.
+    let db = dir.path().join("out.db");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("CREATE TABLE mine (x INTEGER); INSERT INTO mine VALUES (7);")
+        .unwrap();
+
+    let args = ["-f", "sqlite", "export", "--db", db.to_str().unwrap()];
+    let report = run(&store, &args);
+    assert!(report.contains("1 partitions"), "{report}");
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let names = |conn: &rusqlite::Connection| -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let before = names(&conn);
+    assert_eq!(
+        before,
+        [
+            "SingleTimeSeries_f64_utc_arrays",
+            "SingleTimeSeries_f64_utc_series",
+            "SingleTimeSeries_f64_utc_values",
+            "SingleTimeSeries_f64_utc_values_key",
+            "all_arrays",
+            "all_series",
+            "all_values",
+            "mine",
+        ]
+    );
+    // The shared profile is written once and joins back to both owners.
+    let values: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM SingleTimeSeries_f64_utc_values",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(values, 3);
+    let joined: Vec<(i64, i64, f64)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.owner_id, v.timestamp, v.value
+                 FROM SingleTimeSeries_f64_utc_series s
+                 JOIN SingleTimeSeries_f64_utc_values v USING (array_id)
+                 ORDER BY s.owner_id, v.timestamp",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(joined.len(), 6);
+    assert_eq!(joined[0], (42, 1_704_067_200_000, 1.0));
+    assert_eq!(joined[5], (43, 1_704_067_200_000 + 2 * 3_600_000, 3.0));
+
+    // A second export into the same file collides and writes nothing.
+    let err = run_err(&store, &args);
+    assert!(err.contains("SingleTimeSeries_f64_utc_values"), "{err}");
+    assert_eq!(names(&conn), before);
+    let mine: i64 = conn
+        .query_row("SELECT x FROM mine", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mine, 7);
+
+    // --db and -f sqlite only come together.
+    let err = run_err(&store, &["-f", "sqlite", "export"]);
+    assert!(err.contains("--db"), "{err}");
+}
+
+#[test]
+fn sqlite_round_trips_through_add_under_a_table_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("src.h5");
+    seed_one(dir.path(), &store);
+    let db = dir.path().join("out.db");
+    let db_arg = db.to_str().unwrap();
+
+    // Two exports share the database, one of them under a prefix.
+    run(&store, &["-f", "sqlite", "export", "--db", db_arg]);
+    run(
+        &store,
+        &[
+            "-f",
+            "sqlite",
+            "export",
+            "--db",
+            db_arg,
+            "--table-prefix",
+            "run2_",
+        ],
+    );
+
+    // Each import takes exactly its own export's tables.
+    let plain = dir.path().join("plain.h5");
+    let report = run(&plain, &["add", "--sqlite", db_arg]);
+    assert!(report.contains("Added 1"), "{report}");
+    let prefixed = dir.path().join("prefixed.h5");
+    run(
+        &prefixed,
+        &["add", "--sqlite", db_arg, "--table-prefix", "run2_"],
+    );
+    for target in [&plain, &prefixed] {
+        let csv = run(
+            target,
+            &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
+        );
+        assert_eq!(
+            csv,
+            run(
+                &store,
+                &["-f", "csv", "get", "--owner-id", "42", "--name", "load"]
+            )
+        );
+    }
+
+    let err = run_err(
+        &dir.path().join("none.h5"),
+        &["add", "--sqlite", db_arg, "--table-prefix", "run3_"],
+    );
+    assert!(err.contains("run3_"), "{err}");
+    let err = run_err(&store, &["-f", "csv", "export", "--table-prefix", "x_"]);
+    assert!(err.contains("--db"), "{err}");
+}
+
+#[test]
+fn sqlite_load_flags_behave_as_they_do_for_parquet() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("src.h5");
+    seed_one(dir.path(), &store);
+    let db = dir.path().join("out.db");
+    let db_arg = db.to_str().unwrap();
+
+    // An empty selection writes nothing, not even the file.
+    let report = run(
+        &store,
+        &[
+            "-f", "sqlite", "export", "--db", db_arg, "--name", "nothing",
+        ],
+    );
+    assert!(report.contains("0 time series"), "{report}");
+    assert!(
+        !db.exists(),
+        "an empty selection must not create the database"
+    );
+
+    // --time-range slices what is exported, as it does for every format.
+    run(
+        &store,
+        &[
+            "-f",
+            "sqlite",
+            "export",
+            "--db",
+            db_arg,
+            "--time-range",
+            "2024-01-01T01:00:00Z..2024-01-01T03:00:00Z",
+        ],
+    );
+    let rows: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM SingleTimeSeries_f64_utc_values",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2);
+
+    // --dry-run reports the partition and writes no store.
+    let target = dir.path().join("target.h5");
+    let plan = run(&target, &["add", "--sqlite", db_arg, "--dry-run"]);
+    assert!(plan.contains("SingleTimeSeries_f64_utc"), "{plan}");
+    assert!(plan.contains("Would add 1"), "{plan}");
+    assert!(!target.exists());
+
+    // A second load collides on identity; --replace swaps the series in.
+    run(&target, &["add", "--sqlite", db_arg]);
+    run_err(&target, &["add", "--sqlite", db_arg]);
+    run(&target, &["add", "--sqlite", db_arg, "--replace"]);
+    let listed = run(&target, &["-f", "json", "list"]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&listed).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{listed}"
+    );
+
+    // An edited value fails the checksum unless --no-checksum waives it.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE SingleTimeSeries_f64_utc_values SET value = 9.0 WHERE value = 2.0",
+            [],
+        )
+        .unwrap();
+    let edited = dir.path().join("edited.h5");
+    let err = run_err(&edited, &["add", "--sqlite", db_arg]);
+    assert!(err.contains("data_hash"), "{err}");
+    run(&edited, &["add", "--sqlite", db_arg, "--no-checksum"]);
+    let csv = run(
+        &edited,
+        &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
+    );
+    assert!(csv.contains(",9"), "{csv}");
+}
+
 #[cfg(feature = "parquet")]
 #[test]
 fn export_writes_one_file_pair_per_partition() {
@@ -4696,10 +4926,11 @@ fn export_writes_one_file_pair_per_partition() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     files.sort();
-    // Two files sharing a stem, not one file per series.
+    // Three files sharing a stem, not one file per series.
     assert_eq!(
         files,
         vec![
+            "SingleTimeSeries.f64.utc.arrays.parquet".to_string(),
             "SingleTimeSeries.f64.utc.series.parquet".to_string(),
             "SingleTimeSeries.f64.utc.values.parquet".to_string(),
         ]
@@ -4715,16 +4946,20 @@ fn export_writes_one_file_pair_per_partition() {
             .map(|f| f.name().clone())
             .collect()
     };
-    // The values half is the array and the key that names it, and nothing about
+    // The values half is the array and the id that names it, and nothing about
     // who owns it -- which is what stops a shared profile being written once per
     // component.
     let values = columns("SingleTimeSeries.f64.utc.values.parquet");
-    assert_eq!(values, vec!["data_hash", "time_axis", "timestamp", "value"]);
-    // The series half is the catalog row, joined on the same pair.
+    assert_eq!(values, vec!["array_id", "timestamp", "value"]);
+    // The key that id stands for is spelled once per array, in a file of its own.
+    assert_eq!(
+        columns("SingleTimeSeries.f64.utc.arrays.parquet"),
+        vec!["id", "data_hash", "time_axis"]
+    );
+    // The series half is the catalog row, joined on the same id.
     let series = columns("SingleTimeSeries.f64.utc.series.parquet");
     for expected in [
-        "data_hash",
-        "time_axis",
+        "array_id",
         "id",
         "owner_id",
         "owner_type",
@@ -4739,6 +4974,87 @@ fn export_writes_one_file_pair_per_partition() {
     ] {
         assert!(series.contains(&expected.to_string()), "{series:?}");
     }
+}
+
+#[cfg(feature = "parquet")]
+#[test]
+fn derived_series_are_exported_only_when_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("derived.h5");
+    seed_one(dir.path(), &store);
+    run(
+        &store,
+        &["transform", "--horizon", "PT2H", "--interval", "PT1H"],
+    );
+    let files = |out: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".values.parquet"))
+            .collect();
+        names.sort();
+        names
+    };
+
+    // By default the derived forecast is left out, in both containers.
+    let plain = dir.path().join("plain");
+    run(
+        &store,
+        &["-f", "parquet", "export", "--dir", plain.to_str().unwrap()],
+    );
+    assert_eq!(files(&plain), ["SingleTimeSeries.f64.utc.values.parquet"]);
+    let db = dir.path().join("plain.db");
+    let report = run(
+        &store,
+        &["-f", "sqlite", "export", "--db", db.to_str().unwrap()],
+    );
+    assert!(report.contains("1 partitions"), "{report}");
+
+    // Naming the type without the flag is refused rather than answered empty.
+    let named = dir.path().join("named");
+    let by_type = ["--type", "DeterministicSingleTimeSeries"];
+    let mut args = vec!["-f", "parquet", "export", "--dir", named.to_str().unwrap()];
+    args.extend(by_type);
+    let err = run_err(&store, &args);
+    assert!(err.contains("derived"), "{err}");
+
+    // Asked for, it is a partition of its own.
+    let all = dir.path().join("all");
+    run(
+        &store,
+        &[
+            "-f",
+            "parquet",
+            "export",
+            "--dir",
+            all.to_str().unwrap(),
+            "--include-derived",
+        ],
+    );
+    assert_eq!(
+        files(&all),
+        [
+            "DeterministicSingleTimeSeries.f64.utc.values.parquet",
+            "SingleTimeSeries.f64.utc.values.parquet",
+        ]
+    );
+    let db = dir.path().join("all.db");
+    let report = run(
+        &store,
+        &[
+            "-f",
+            "sqlite",
+            "export",
+            "--db",
+            db.to_str().unwrap(),
+            "--include-derived",
+        ],
+    );
+    assert!(report.contains("2 partitions"), "{report}");
+
+    // The flag means nothing to the per-series formats.
+    let err = run_err(&store, &["-f", "csv", "export", "--include-derived"]);
+    assert!(err.contains("--include-derived"), "{err}");
 }
 
 #[cfg(feature = "parquet")]
@@ -4793,16 +5109,13 @@ fn a_directory_import_commits_partition_by_partition() {
     // Sorted import order: `a_good` is committed before `b_bad` is opened.
     let batch = dir.path().join("batch");
     fs::create_dir(&batch).unwrap();
-    fs::copy(
-        out.join(format!("{stem}.values.parquet")),
-        batch.join("a_good.values.parquet"),
-    )
-    .unwrap();
-    fs::copy(
-        out.join(format!("{stem}.series.parquet")),
-        batch.join("a_good.series.parquet"),
-    )
-    .unwrap();
+    for role in ["values", "series", "arrays"] {
+        fs::copy(
+            out.join(format!("{stem}.{role}.parquet")),
+            batch.join(format!("a_good.{role}.parquet")),
+        )
+        .unwrap();
+    }
     fs::write(batch.join("b_bad.parquet"), b"this is not a parquet file").unwrap();
 
     let err = run_err(&dest, &["add", "--parquet", batch.to_str().unwrap()]);
@@ -5356,6 +5669,7 @@ fn a_dense_forecast_round_trips_through_its_own_partition() {
     assert_eq!(
         files,
         vec![
+            "Deterministic.f64.utc.arrays.parquet".to_string(),
             "Deterministic.f64.utc.series.parquet".to_string(),
             "Deterministic.f64.utc.values.parquet".to_string(),
         ]
@@ -5381,7 +5695,7 @@ fn a_dense_forecast_round_trips_through_its_own_partition() {
     let values = builder("Deterministic.f64.utc.values.parquet");
     assert_eq!(
         columns("Deterministic.f64.utc.values.parquet"),
-        vec!["data_hash", "time_axis", "timestamp", "issue_time", "value"]
+        vec!["array_id", "timestamp", "issue_time", "value"]
     );
     assert!(values.schema().fields().iter().all(|f| !f.is_nullable()));
     // The grid the coordinates belong to is the series half's, once per series.
@@ -5441,7 +5755,7 @@ fn a_whole_directory_of_partitions_re_imports() {
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
     assert!(report.contains("2 partitions"), "{report}");
-    assert_eq!(fs::read_dir(&out).unwrap().count(), 4, "two pairs");
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 6, "two partitions");
 
     // One `--parquet` pointing at the directory takes both partitions.
     run(&dest, &["add", "--parquet", out.to_str().unwrap()]);

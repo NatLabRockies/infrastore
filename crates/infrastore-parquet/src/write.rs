@@ -1,15 +1,17 @@
 //! Writing a selection as partitioned, normalized Parquet.
 //!
-//! Two files per `(time_series_type, value type, time_reference)` triple: a
-//! **values** file holding every distinct array once, one row per value, and a
-//! **series** file holding one catalog row per series naming the array it reads.
+//! Three files per `(time_series_type, value type, time_reference)` triple: a
+//! **values** file holding every distinct array once, one row per value, a
+//! **series** file holding one catalog row per series naming the array it reads,
+//! and an **arrays** file spelling each array's key once.
 //!
 //! Normalized because the store is. A thousand components sharing one profile
 //! hold one array in the store, and a table with the catalog row beside every
 //! value would write that profile a thousand times — Parquet's compression does
 //! not find repeats across pages, so the file really is a thousand times larger.
 //!
-//! Both files are sorted by the array key `(data_hash, time_axis)`, which is what
+//! An array's `id` is its 1-based rank by key `(data_hash, time_axis)`, and the
+//! values and series files are sorted by the `array_id` naming it, which is what
 //! lets the import walk them as a merge join.
 
 use std::collections::BTreeMap;
@@ -23,29 +25,29 @@ use arrow::array::{
     UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{Field, SchemaRef};
-use chrono::{DateTime, Utc};
-use infrastore_core::{
-    Dtype, Period, TimeSeriesData, TimeSeriesMetadata, TimeSeriesType, TypedArray,
-};
+use infrastore_core::{Dtype, TimeSeriesData, TimeSeriesMetadata, TimeSeriesType, TypedArray};
+pub use infrastore_tabular::export::{array_key, partition_of, per_step_shape};
+use infrastore_tabular::export::{descriptor_row, plan, refuse_empty, row_count, series_rows};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
-use crate::partition::{PartitionKey, ValueKind, disambiguate, series_name, values_name};
+use crate::partition::{PartitionKey, arrays_name, disambiguate, series_name, values_name};
 use crate::schema;
 use crate::table::{self, ArrayKey, PartitionSchema, ROW_GROUP_TARGET};
 use crate::{Result, arrow_err, parquet_err, unsupported};
 
-/// One partition the export wrote: its two files and what they hold.
+/// One partition the export wrote: its three files and what they hold.
 #[derive(Debug, Clone)]
 pub struct WrittenPartition {
     pub stem: String,
     pub values_path: PathBuf,
     pub series_path: PathBuf,
+    pub arrays_path: PathBuf,
     pub time_series_type: TimeSeriesType,
     pub value_slug: String,
     pub reference: String,
-    /// Distinct arrays, which is how many groups the values file holds.
+    /// Distinct arrays, which is how many rows the arrays file holds.
     pub arrays: usize,
     /// Series, which is how many rows the series file holds.
     pub series: usize,
@@ -72,11 +74,17 @@ impl ExportReport {
         self.partitions.iter().map(|p| p.arrays).sum()
     }
 
-    /// Every file written, values and series alike.
+    /// Every file written: values, series and arrays alike.
     pub fn files(&self) -> Vec<&Path> {
         self.partitions
             .iter()
-            .flat_map(|p| [p.values_path.as_path(), p.series_path.as_path()])
+            .flat_map(|p| {
+                [
+                    p.values_path.as_path(),
+                    p.series_path.as_path(),
+                    p.arrays_path.as_path(),
+                ]
+            })
             .collect()
     }
 }
@@ -118,7 +126,7 @@ pub fn check_destination(dir: &Path) -> Result<()> {
     )))
 }
 
-/// Write `series` into `dir` as one file pair per partition.
+/// Write `series` into `dir` as three files per partition.
 ///
 /// The pairs are `(catalog row, values)`, as `Store::list_metadata` and
 /// `read_by_ids` hand them back.
@@ -138,34 +146,14 @@ pub fn write_partitions(
 
     // Before anything is written, so a refusal leaves the destination exactly as
     // it was found -- which the check above has just established is empty.
-    let empty: Vec<String> = series
-        .iter()
-        .map(|(row, data)| Ok((row, row_count(row, data)?)))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|(_, n)| *n == 0)
-        .map(|(row, _)| format!("'{}' (owner {})", row.name, row.owner_id))
-        .collect();
-    if !empty.is_empty() {
-        return Err(unsupported(format!(
-            "{} of the selected series hold no values and cannot be exported: {}. A values file \
-             has one row per value, so an empty series would be a series row with no values \
-             group -- which is also what a truncated file looks like. Narrow the selection past \
-             them.",
-            empty.len(),
-            empty.join(", ")
-        )));
-    }
+    refuse_empty(series)?;
 
-    let mut groups: BTreeMap<PartitionKey, Vec<usize>> = BTreeMap::new();
-    for (index, (row, _)) in series.iter().enumerate() {
-        groups.entry(partition_of(row)).or_default().push(index);
-    }
-
+    let groups = plan(series)?;
     std::fs::create_dir_all(dir)?;
     let stems = disambiguate(&groups.keys().cloned().collect::<Vec<_>>());
     let mut report = ExportReport::default();
-    for (key, members) in &groups {
+    for (key, arrays) in &groups {
+        let members: Vec<usize> = arrays.values().flatten().copied().collect();
         // The partition's composite width comes from the catalog rows alone -- a
         // composite `element_shape` is `[w]` -- so no array is read to decide it.
         let composite_width = if key.value_kind.is_composite() {
@@ -182,32 +170,19 @@ pub fn write_partitions(
         };
         let table = PartitionSchema::new(key.clone(), composite_width)?;
 
-        // Group the partition's series by the array each reads. `BTreeMap` is
-        // the sort both files promise.
-        let mut arrays: BTreeMap<ArrayKey, Vec<usize>> = BTreeMap::new();
-        for index in members {
-            let (row, data) = &series[*index];
-            arrays
-                .entry(array_key(row, data)?)
-                .or_default()
-                .push(*index);
-        }
-        // Within a key, by id: the series file's second sort key, so a reader
-        // walking it sees the same order twice.
-        for members in arrays.values_mut() {
-            members.sort_by_key(|i| series[*i].0.id.map_or(0, |id| id.get()));
-        }
-
         let stem = stems.get(key).expect("every partition was named").clone();
         let values_path = dir.join(values_name(&stem));
         let series_path = dir.join(series_name(&stem));
-        let rows = write_values(&values_path, &table, series, &arrays)?;
-        write_series_file(&series_path, &table, series, &arrays)?;
+        let arrays_path = dir.join(arrays_name(&stem));
+        let rows = write_values(&values_path, &table, series, arrays)?;
+        write_series_file(&series_path, &table, series, arrays)?;
+        write_arrays_file(&arrays_path, &table, arrays)?;
 
         report.partitions.push(WrittenPartition {
             stem,
             values_path,
             series_path,
+            arrays_path,
             time_series_type: key.time_series_type,
             value_slug: key.value_kind.slug(),
             reference: table::reference_literal(key.time_reference.as_ref()),
@@ -219,52 +194,13 @@ pub fn write_partitions(
     Ok(report)
 }
 
-/// The array a series reads: its content hash and its time axis.
-///
-/// The hash is the **canonical** one, which for a composite kind is the
-/// minimum-width re-encoding rather than the stored bytes — so two series whose
-/// curves are the same points at different paddings share one values group, which
-/// is the whole point of normalizing.
-pub fn array_key(row: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<ArrayKey> {
-    let array = series_rows(row, data)?.array;
-    let leading = leading_shape(row, array);
-    Ok(ArrayKey {
-        data_hash: table::canonical_hash(array, row.element_type, &leading)?,
-        time_axis: table::time_axis_of(data)?,
-    })
-}
-
-/// The partition a catalog row belongs to.
-pub fn partition_of(row: &TimeSeriesMetadata) -> PartitionKey {
-    PartitionKey {
-        time_series_type: row.time_series_type,
-        value_kind: ValueKind::of(row.element_type, &per_step_shape(row)),
-        time_reference: row.time_reference.clone(),
-    }
-}
-
-/// The **per-step** element shape, which for a forecast is not the catalog's
-/// `element_shape`.
-///
-/// The catalog stores `TypedArray::element_shape` — everything after the leading
-/// axis — which is the per-step shape only for a static series. A forecast's
-/// cube is `[H, count, *E]` or `[lanes, H, count, *E]`, so its per-step shape is
-/// what follows *all* the leading axes. Getting this wrong would put a forecast
-/// in a partition whose `value` column claims the window count is part of one
-/// timestep.
-pub fn per_step_shape(row: &TimeSeriesMetadata) -> Vec<usize> {
-    let skip = row.time_series_type.leading_dims().saturating_sub(1);
-    row.element_shape.get(skip..).unwrap_or_default().to_vec()
-}
-
 fn writer_properties() -> WriterProperties {
     WriterProperties::builder()
         // Archival files: zstd pays for itself several times over against the
         // HDF5 read that produced the values.
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
-        // The array key repeats for every row of a group, and every series
-        // column is constant per series; this is the whole reason the column
-        // sets are affordable.
+        // `array_id` repeats for every row of a group, and many series columns
+        // repeat across series; this is what keeps the column sets affordable.
         .set_dictionary_enabled(true)
         .build()
 }
@@ -287,11 +223,11 @@ fn write_values(
 
     let mut buffer = ValuesBuffer::new(table);
     let mut rows = 0usize;
-    for (key, members) in arrays {
+    for (id, members) in (1i64..).zip(arrays.values()) {
         let (row, data) = &series[members[0]];
         // A group ends on an array boundary whenever it can: if the coming array
         // would carry the buffer past the target, the buffer is cut first, so
-        // row-group statistics on `data_hash` mean something. Only an array
+        // row-group statistics on `array_id` mean something. Only an array
         // larger than the target on its own is split, below.
         let coming = row_count(row, data)?;
         if !buffer.is_empty() && buffer.len() + coming > ROW_GROUP_TARGET {
@@ -300,7 +236,7 @@ fn write_values(
             writer.write(&batch).map_err(parquet_err)?;
             writer.flush().map_err(parquet_err)?;
         }
-        rows += buffer.push_array(key, row, data)?;
+        rows += buffer.push_array(id, row, data)?;
         while buffer.len() >= ROW_GROUP_TARGET {
             let batch = buffer.take(ROW_GROUP_TARGET)?;
             writer.write(&batch).map_err(parquet_err)?;
@@ -317,7 +253,35 @@ fn write_values(
     Ok(rows)
 }
 
-/// Write the series file: one row per series, in `(key, id)` order.
+/// Write the arrays file: one row per distinct array, its `id` and its key.
+///
+/// The id is the array's 1-based rank in key order, so both columns ascend
+/// together -- which the reader checks, since it is what makes a file sorted by
+/// `array_id` also sorted by key.
+fn write_arrays_file(
+    path: &Path,
+    table: &PartitionSchema,
+    arrays: &BTreeMap<ArrayKey, Vec<usize>>,
+) -> Result<()> {
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, table.arrays.clone(), Some(writer_properties()))
+        .map_err(parquet_err)?;
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from_iter_values((1i64..).take(arrays.len()))),
+        Arc::new(StringArray::from_iter_values(
+            arrays.keys().map(|k| &k.data_hash),
+        )),
+        Arc::new(StringArray::from_iter_values(
+            arrays.keys().map(|k| &k.time_axis),
+        )),
+    ];
+    let batch = batch_of(table.arrays.clone(), columns)?;
+    writer.write(&batch).map_err(parquet_err)?;
+    writer.close().map_err(parquet_err)?;
+    Ok(())
+}
+
+/// Write the series file: one row per series, in `(array_id, id)` order.
 ///
 /// One batch, with no row-group policy: this file has one row per series rather
 /// than one per value, so even a store with a million series produces a file a
@@ -333,10 +297,10 @@ fn write_series_file(
         .map_err(parquet_err)?;
 
     let mut builder = SeriesFileBuilder::new(table);
-    for (key, members) in arrays {
+    for (array_id, members) in (1i64..).zip(arrays.values()) {
         for index in members {
             let (row, data) = &series[*index];
-            builder.push(key, row, data)?;
+            builder.push(array_id, row, data)?;
         }
     }
     if !builder.is_empty() {
@@ -350,8 +314,7 @@ fn write_series_file(
 /// The series file's columns, accumulated.
 struct SeriesFileBuilder<'a> {
     table: &'a PartitionSchema,
-    data_hash: Vec<String>,
-    time_axis: Vec<String>,
+    array_id: Vec<i64>,
     id: Vec<i64>,
     owner_id: Vec<i64>,
     initial_timestamp: Vec<i64>,
@@ -393,8 +356,7 @@ impl<'a> SeriesFileBuilder<'a> {
     fn new(table: &'a PartitionSchema) -> Self {
         Self {
             table,
-            data_hash: Vec::new(),
-            time_axis: Vec::new(),
+            array_id: Vec::new(),
             id: Vec::new(),
             owner_id: Vec::new(),
             initial_timestamp: Vec::new(),
@@ -408,7 +370,7 @@ impl<'a> SeriesFileBuilder<'a> {
     }
 
     fn is_empty(&self) -> bool {
-        self.data_hash.is_empty()
+        self.array_id.is_empty()
     }
 
     /// The grid columns come from `data` rather than `row` for the reason
@@ -416,14 +378,13 @@ impl<'a> SeriesFileBuilder<'a> {
     /// the catalog's anchor and length are the unsliced series'.
     fn push(
         &mut self,
-        key: &ArrayKey,
+        array_id: i64,
         row: &TimeSeriesMetadata,
         data: &TimeSeriesData,
     ) -> Result<()> {
         let ts_type = self.table.key.time_series_type;
         let grid = table::grid_of(data);
-        self.data_hash.push(key.data_hash.clone());
-        self.time_axis.push(key.time_axis.clone());
+        self.array_id.push(array_id);
         self.id.push(row.id.map_or(0, |i| i.get()));
         self.owner_id.push(row.owner_id);
         if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
@@ -456,8 +417,7 @@ impl<'a> SeriesFileBuilder<'a> {
 
     fn finish(&mut self) -> Result<RecordBatch> {
         let mut columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(std::mem::take(&mut self.data_hash))),
-            Arc::new(StringArray::from(std::mem::take(&mut self.time_axis))),
+            Arc::new(Int64Array::from(std::mem::take(&mut self.array_id))),
             Arc::new(Int64Array::from(std::mem::take(&mut self.id))),
             Arc::new(Int64Array::from(std::mem::take(&mut self.owner_id))),
         ];
@@ -512,249 +472,6 @@ fn zoned(millis: Vec<i64>, key: &PartitionKey) -> ArrayRef {
     })
 }
 
-/// The per-series text columns, one per name `series_text_columns` lists.
-///
-/// Absent free-form descriptors are the **empty string**, which is what keeps
-/// every column required. A stored empty string therefore reads back as absent;
-/// §2.8 of the plan documents that, and it is the price of not having five
-/// nullable columns.
-fn descriptor_row(
-    ts_type: TimeSeriesType,
-    row: &TimeSeriesMetadata,
-) -> Vec<(&'static str, String)> {
-    let mut out: Vec<(&'static str, String)> = vec![
-        (schema::OWNER_TYPE, row.owner_type.clone()),
-        (
-            schema::OWNER_CATEGORY,
-            row.owner_category.as_str().to_string(),
-        ),
-        (
-            schema::TIME_SERIES_TYPE,
-            row.time_series_type.as_str().to_string(),
-        ),
-        (schema::NAME, row.name.clone()),
-    ];
-    if ts_type == TimeSeriesType::SingleTimeSeries || ts_type.is_forecast() {
-        out.push((
-            schema::RESOLUTION,
-            row.resolution.map(|p| p.to_iso8601()).unwrap_or_default(),
-        ));
-    }
-    if ts_type.is_forecast() {
-        out.push((
-            schema::INTERVAL,
-            row.interval.map(|p| p.to_iso8601()).unwrap_or_default(),
-        ));
-        out.push((
-            schema::HORIZON,
-            row.horizon.map(|p| p.to_iso8601()).unwrap_or_default(),
-        ));
-    }
-    out.extend([
-        (schema::FEATURES, schema::encode_features(&row.features)),
-        (schema::ELEMENT_TYPE, row.element_type.to_string()),
-        (
-            schema::ELEMENT_SHAPE,
-            schema::encode_element_shape(&row.element_shape),
-        ),
-        (
-            schema::TIME_REFERENCE,
-            table::reference_literal(row.time_reference.as_ref()),
-        ),
-        (schema::UNITS, row.units.clone().unwrap_or_default()),
-        (
-            schema::QUANTITY_KIND,
-            row.quantity_kind.clone().unwrap_or_default(),
-        ),
-        (
-            schema::UNIT_SYSTEM,
-            row.unit_system.map_or("", |u| u.as_str()).to_string(),
-        ),
-        (
-            schema::COMPONENT_FIELD,
-            row.component_field.clone().unwrap_or_default(),
-        ),
-        (
-            schema::APPLICATION_DATA,
-            row.application_data.clone().unwrap_or_default(),
-        ),
-    ]);
-    out
-}
-
-/// How many rows a series contributes.
-fn row_count(row: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<usize> {
-    Ok(series_rows(row, data)?.target.len())
-}
-
-/// One array's value rows, before they are columns: where each value sits on the
-/// grids, and where it sits in the stored array.
-struct SeriesRows<'a> {
-    /// Empty for a static series, which has no windows.
-    issue: Vec<i64>,
-    target: Vec<i64>,
-    /// The lane column, whichever the type has. Empty for `Deterministic`.
-    percentile: Vec<f64>,
-    scenario: Vec<i64>,
-    /// The element index in `array` each row draws from, in emission order.
-    ///
-    /// An index rather than a slice because a forecast's rows are a *permutation*
-    /// of the stored cube: the file is window-major and the cube is step-major,
-    /// so nothing can be copied contiguously.
-    offsets: Vec<usize>,
-    array: &'a TypedArray,
-    /// Elements per row.
-    per_step: usize,
-}
-
-/// The rows one series contributes, in the order the file emits them.
-///
-/// Static rows are the array in order. A forecast's are window-major, then step,
-/// then lane — so `GROUP BY issue_time` scans contiguously and one instant's
-/// percentiles sit together, which is how a fan chart reads a row.
-fn series_rows<'a>(row: &TimeSeriesMetadata, data: &'a TimeSeriesData) -> Result<SeriesRows<'a>> {
-    let per_step = per_step_shape(row).iter().product::<usize>().max(1);
-    if !data.time_series_type().is_forecast() {
-        let (timestamps, array) = static_parts(data)?;
-        let n = timestamps.len();
-        return Ok(SeriesRows {
-            issue: Vec::new(),
-            target: timestamps.iter().map(|t| t.timestamp_millis()).collect(),
-            percentile: Vec::new(),
-            scenario: Vec::new(),
-            offsets: (0..n).collect(),
-            array,
-            per_step,
-        });
-    }
-
-    let ForecastParts {
-        array,
-        lanes,
-        percentiles,
-        grid,
-    } = forecast_parts(data)?;
-    let leading = data.time_series_type().leading_dims();
-    let horizon_steps = array.shape[leading - 2];
-    let count = grid.count;
-    let lane_count = lanes.unwrap_or(1);
-
-    let rows = count * horizon_steps * lane_count;
-    let mut out = SeriesRows {
-        issue: Vec::with_capacity(rows),
-        target: Vec::with_capacity(rows),
-        percentile: Vec::new(),
-        scenario: Vec::new(),
-        offsets: Vec::with_capacity(rows),
-        array,
-        per_step,
-    };
-    for window in 0..count {
-        let issued = grid.issue_time(window)?;
-        for step in 0..horizon_steps {
-            let at = grid.target_time(issued, step)?;
-            for lane in 0..lane_count {
-                out.issue.push(issued.timestamp_millis());
-                out.target.push(at.timestamp_millis());
-                if let Some(percentiles) = &percentiles {
-                    out.percentile.push(percentiles[lane]);
-                } else if lanes.is_some() {
-                    out.scenario.push(lane as i64);
-                }
-                out.offsets
-                    .push((lane * horizon_steps + step) * count + window);
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// A forecast's cube, its lane axis, its percentile labels, and its two grids.
-struct ForecastParts<'a> {
-    array: &'a TypedArray,
-    /// How wide the lane axis is; `None` for `Deterministic`, which has none.
-    lanes: Option<usize>,
-    /// The percentile labels, for the one type that has them.
-    percentiles: Option<Vec<f64>>,
-    grid: ForecastGrid,
-}
-
-fn forecast_parts(data: &TimeSeriesData) -> Result<ForecastParts<'_>> {
-    let grid_of = |initial, resolution, interval, count| ForecastGrid {
-        initial_timestamp: initial,
-        resolution,
-        interval,
-        count,
-    };
-    Ok(match data {
-        TimeSeriesData::Deterministic(f) => ForecastParts {
-            array: &f.data,
-            lanes: None,
-            percentiles: None,
-            grid: grid_of(f.initial_timestamp, f.resolution, f.interval, f.count),
-        },
-        TimeSeriesData::Probabilistic(f) => ForecastParts {
-            array: &f.data,
-            lanes: Some(f.percentiles.len()),
-            percentiles: Some(f.percentiles.clone()),
-            grid: grid_of(f.initial_timestamp, f.resolution, f.interval, f.count),
-        },
-        TimeSeriesData::Scenarios(f) => ForecastParts {
-            array: &f.data,
-            lanes: Some(f.scenario_count),
-            percentiles: None,
-            grid: grid_of(f.initial_timestamp, f.resolution, f.interval, f.count),
-        },
-        other => {
-            return Err(unsupported(format!(
-                "{} is not a dense forecast",
-                other.time_series_type().as_str()
-            )));
-        }
-    })
-}
-
-/// The two grids a forecast value sits on: windows step by `interval`, and the
-/// steps inside one window step by `resolution`.
-struct ForecastGrid {
-    initial_timestamp: DateTime<Utc>,
-    resolution: Period,
-    interval: Period,
-    count: usize,
-}
-
-impl ForecastGrid {
-    fn issue_time(&self, window: usize) -> Result<DateTime<Utc>> {
-        self.interval
-            .add_to(self.initial_timestamp, window as i64)
-            .ok_or_else(|| unsupported(format!("forecast window {window} overflows the calendar")))
-    }
-
-    fn target_time(&self, issue: DateTime<Utc>, step: usize) -> Result<DateTime<Utc>> {
-        self.resolution
-            .add_to(issue, step as i64)
-            .ok_or_else(|| unsupported(format!("forecast step {step} overflows the calendar")))
-    }
-}
-
-/// A static series' timestamps and values.
-///
-/// A `SingleTimeSeries` materializes its grid, calendar-aware, which is why this
-/// cannot be `initial + k * resolution`. The two irregular types hand back the
-/// vector they store; for a `PersistentTimeSeries` those are **breakpoints**, so
-/// the table is the sparse step function as stored.
-fn static_parts(data: &TimeSeriesData) -> Result<(Vec<DateTime<Utc>>, &TypedArray)> {
-    match data {
-        TimeSeriesData::SingleTimeSeries(s) => Ok((s.timestamps().collect(), &s.data)),
-        TimeSeriesData::NonSequentialTimeSeries(s) => Ok((s.timestamps.clone(), &s.data)),
-        TimeSeriesData::PersistentTimeSeries(s) => Ok((s.timestamps.clone(), &s.data)),
-        other => Err(unsupported(format!(
-            "{} is not a static series",
-            other.time_series_type().as_str()
-        ))),
-    }
-}
-
 /// Value rows accumulated for the current row group.
 ///
 /// Columns are plain Rust vectors until a flush, which keeps appending cheap and
@@ -765,8 +482,7 @@ struct ValuesBuffer<'a> {
     table: &'a PartitionSchema,
     width: usize,
     element_bytes: usize,
-    data_hash: Vec<String>,
-    time_axis: Vec<String>,
+    array_id: Vec<i64>,
     timestamp: Vec<i64>,
     /// The forecast key columns, left empty for a static partition.
     issue_time: Vec<i64>,
@@ -781,8 +497,7 @@ impl<'a> ValuesBuffer<'a> {
             table,
             width: table.element_width(),
             element_bytes: 0,
-            data_hash: Vec::new(),
-            time_axis: Vec::new(),
+            array_id: Vec::new(),
             timestamp: Vec::new(),
             issue_time: Vec::new(),
             percentile: Vec::new(),
@@ -802,7 +517,7 @@ impl<'a> ValuesBuffer<'a> {
     /// Append every value row of one array, returning how many there were.
     fn push_array(
         &mut self,
-        key: &ArrayKey,
+        array_id: i64,
         row: &TimeSeriesMetadata,
         data: &TimeSeriesData,
     ) -> Result<usize> {
@@ -834,8 +549,7 @@ impl<'a> ValuesBuffer<'a> {
         }
 
         for (k, offset) in rows.offsets.iter().enumerate() {
-            self.data_hash.push(key.data_hash.clone());
-            self.time_axis.push(key.time_axis.clone());
+            self.array_id.push(array_id);
             self.timestamp.push(rows.target[k]);
             if !rows.issue.is_empty() {
                 self.issue_time.push(rows.issue[k]);
@@ -870,11 +584,8 @@ impl<'a> ValuesBuffer<'a> {
         let value_bytes: Vec<u8> = self.value.drain(..n * self.width * stride).collect();
 
         let mut columns: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(
-                self.data_hash.drain(..n).collect::<Vec<_>>(),
-            )),
-            Arc::new(StringArray::from(
-                self.time_axis.drain(..n).collect::<Vec<_>>(),
+            Arc::new(Int64Array::from(
+                self.array_id.drain(..n).collect::<Vec<_>>(),
             )),
             zoned(self.timestamp.drain(..n).collect(), &self.table.key),
         ];
@@ -905,16 +616,6 @@ impl<'a> ValuesBuffer<'a> {
 /// Assemble a batch, mapping Arrow's own error.
 fn batch_of(schema: SchemaRef, columns: Vec<ArrayRef>) -> Result<RecordBatch> {
     RecordBatch::try_new(schema, columns).map_err(arrow_err)
-}
-
-impl ValueKind {
-    /// The dtype of the leaf the `value` column is built from.
-    pub fn leaf_dtype(&self) -> Dtype {
-        match self {
-            ValueKind::Dense { dtype, .. } | ValueKind::Tuple { dtype, .. } => *dtype,
-            ValueKind::Composite(_) => Dtype::F64,
-        }
-    }
 }
 
 /// A `TypedArray` as one Arrow column: a primitive leaf under one
@@ -951,15 +652,4 @@ fn leaf_array(array: &TypedArray) -> Result<ArrayRef> {
         Dtype::U8 => primitive!(u8, UInt8Array),
         Dtype::Bool => primitive!(bool, BooleanArray),
     })
-}
-
-/// The leading axes of a stored array — what precedes the per-step element
-/// shape — as `encode` wants them.
-///
-/// `[length]` for a static series, `[H, count]` for a `Deterministic`,
-/// `[lanes, H, count]` for the two with a third axis. Only the composite
-/// canonicalization uses it, and only to re-encode at minimum width.
-fn leading_shape(row: &TimeSeriesMetadata, array: &TypedArray) -> Vec<usize> {
-    let leading = row.time_series_type.leading_dims().min(array.shape.len());
-    array.shape[..leading].to_vec()
 }

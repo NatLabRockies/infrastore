@@ -755,6 +755,31 @@ class Store:
         new_name: str | None = None,
     ) -> int: ...
     def persist_to(self, path: str) -> None: ...
+    def export_sqlite(
+        self,
+        path: str,
+        *,
+        table_prefix: str = "",
+        time_range: tuple[datetime, datetime] | None = None,
+        include_derived: bool = False,
+        owner_id: int | None = None,
+        owner_category: OwnerCategory | None = None,
+        owner_type: str | None = None,
+        time_series_type: TimeSeriesType | None = None,
+        name: str | None = None,
+        name_glob: str | None = None,
+        component_field: str | None = None,
+        zoneless: bool | None = None,
+        resolution: Period | None = None,
+        interval: Period | None = None,
+        initial_timestamp: datetime | None = None,
+        length: int | None = None,
+        features: dict[str, int | float | bool | str] | None = None,
+        features_exact: bool = False,
+    ) -> list[dict[str, Any]]: ...
+    def import_sqlite(
+        self, path: str, *, table_prefix: str = "", skip_checksum: bool = False
+    ) -> list[int]: ...
     def persist_arrays_to(self, path: str) -> None: ...
     def persist_catalog(self) -> None: ...
     def compact(self) -> dict[str, Any]: ...

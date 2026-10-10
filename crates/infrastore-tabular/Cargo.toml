@@ -1,0 +1,32 @@
+[package]
+name = "infrastore-tabular"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The normalized, partitioned table layout infrastore exports to Parquet and SQLite"
+homepage = "https://natlabrockies.github.io/infrastore/"
+keywords = ["time-series", "sqlite", "energy", "infrastore"]
+categories = ["encoding", "science"]
+
+# The layout's container-independent half -- partitioning, the array key, the
+# column sets, row walking on export and series assembly on import -- plus the
+# SQLite container, which costs nothing here because `infrastore-core`'s catalog
+# already links SQLite. Arrow-free on purpose: `infrastore-parquet` builds on
+# this, and a binary without the `parquet` feature still exports SQLite.
+[features]
+default = ["vendored"]
+vendored = ["infrastore-core/vendored"]
+
+[dependencies]
+chrono = { workspace = true }
+infrastore-core = { workspace = true }
+rusqlite = { workspace = true }
+# `float_roundtrip`: nested f64 values travel as JSON text and `data_hash` is
+# bitwise, so parsing them back must be exact rather than within one ULP.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+
+[dev-dependencies]
+tempfile = "3"
