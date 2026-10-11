@@ -71,10 +71,11 @@ store not found: missing.h5
 `jsonl` is `json` line-delimited: one compact object per line with no enclosing `{"items": [...]}`,
 so a 100 000-row `list` streams into `jq` instead of having to be buffered whole.
 
-`export` has no table form; with `-f table` (the global default) it writes CSV, which is both what
-`--dir` is for and what `add` reads back. Its `--dir` files are named for the format they hold —
-`.csv`, `.json`, or `.jsonl` — and under `-f jsonl` each series is one compact line rather than a
-pretty document.
+`export` has no table form — `get` is the table view of a series. With no `-f` it writes Parquet
+into `--dir`, or SQLite into `--db` (which implies `-f sqlite`); an explicit `-f table` is refused.
+Printing one series to stdout takes `-f csv`, `-f json`, or `-f jsonl`. Its `--dir` files are named
+for the format they hold — `.csv`, `.json`, or `.jsonl` — and under `-f jsonl` each series is one
+compact line rather than a pretty document.
 
 `-y`/`--yes` answers every prompt, so a script no longer has to know which commands prompt or which
 flag each spells it with. The per-command `--force` flags still work and are what a one-off reaches

@@ -640,14 +640,22 @@ fn export_to_dir_and_stdout() {
     let body = fs::read_to_string(out_dir.join(&files[0])).unwrap();
     assert!(body.contains("\"values\""), "export json: {body}");
 
-    // There is no table export, and `table` is the *global default* — so an
-    // `export` with no -f used to fail on a flag the caller never passed. It
-    // now means CSV, which is both what --dir is for and what `add` reads back.
-    let defaulted = run(&store, &["export", "--name", "a_series"]);
+    // There is no table export, and `table` is the *global default* -- so an
+    // `export` with no -f means Parquet (which needs --dir), and a `table`
+    // someone typed is refused rather than reinterpreted.
+    let err = run_err(&store, &["export", "--name", "a_series"]);
+    assert!(err.contains("--dir") && err.contains("-f csv"), "{err}");
+    let pq_dir = dir.path().join("pq");
+    run(&store, &["export", "--dir", pq_dir.to_str().unwrap()]);
     assert!(
-        defaulted.starts_with("timestamp,"),
-        "an unqualified export should write CSV: {defaulted}"
+        fs::read_dir(&pq_dir).unwrap().all(|e| {
+            let name = e.unwrap().file_name().into_string().unwrap();
+            name.ends_with(".parquet")
+        }),
+        "an unqualified export should write Parquet"
     );
+    let err = run_err(&store, &["-f", "table", "export", "--name", "a_series"]);
+    assert!(err.contains("no table form"), "{err}");
 }
 
 #[test]

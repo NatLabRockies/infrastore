@@ -120,8 +120,11 @@ Examples:
   infrastore --store demo.h5 -f csv export --owner-id 42 --name load
   infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
   infrastore --store demo.h5 -f json export --dir out/
-  infrastore --store demo.h5 -f parquet export --dir out/
-  infrastore --store demo.h5 -f sqlite export --db out.db
+  infrastore --store demo.h5 export --dir out/
+  infrastore --store demo.h5 export --db out.db
+
+With no -f, export writes Parquet into --dir, or SQLite into --db. `-f table`
+is refused: `get` is the table view of a series.
 
 -f parquet writes <stem>.values.parquet, <stem>.series.parquet and
 <stem>.arrays.parquet per (type, value type, time reference) partition into

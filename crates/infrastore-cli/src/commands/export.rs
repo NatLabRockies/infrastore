@@ -27,8 +27,34 @@ pub fn run(
     table_prefix: Option<&str>,
     time_range: Option<&str>,
     include_derived: bool,
-    format: Format,
+    format: Option<Format>,
 ) -> Result<(), String> {
+    // `-f` is global and defaults to `table`, which an export has no form of:
+    // `get` is the table view of a series. So an unspecified format means the
+    // container the destination names -- SQLite under --db, Parquet otherwise --
+    // and a `table` someone actually typed is refused rather than reinterpreted.
+    let format = match (format, db) {
+        (Some(Format::Table), _) => {
+            return Err(
+                "export has no table form; use `get` to view a series, or pass \
+                 -f parquet|sqlite|csv|json|jsonl"
+                    .to_string(),
+            );
+        }
+        (Some(Format::Sqlite), None) => {
+            return Err(
+                "-f sqlite writes into a database file; pass --db FILE to name it".to_string(),
+            );
+        }
+        (None | Some(Format::Sqlite), Some(_)) => Format::Sqlite,
+        (Some(other), Some(_)) => {
+            return Err(format!(
+                "--db writes a SQLite database, which -f {other} contradicts; drop one"
+            ));
+        }
+        (Some(other), None) => other,
+        (None, None) => Format::Parquet,
+    };
     // The per-series formats write whatever the selector matched, so the flag
     // would mean nothing there.
     if include_derived && !(format.is_parquet() || format == Format::Sqlite) {
@@ -37,22 +63,11 @@ pub fn run(
                 .to_string(),
         );
     }
-    if (format == Format::Sqlite) != db.is_some() {
-        return Err("--db and -f sqlite go together: pass both or neither".to_string());
-    }
     if table_prefix.is_some() && db.is_none() {
         return Err(
             "--table-prefix names the tables of an -f sqlite export; pass --db".to_string(),
         );
     }
-    // `table` is the global default, so the first `export` anyone ran used to
-    // fail on a flag they never passed. There is no table export to fall back
-    // to, and CSV is both the format `add` reads back and the one `--dir` is
-    // for, so it is what an unspecified format means here.
-    let format = match format {
-        Format::Table => Format::Csv,
-        other => other,
-    };
     let file_ext = match format {
         Format::Csv => "csv",
         Format::Jsonl => "jsonl",
@@ -65,7 +80,8 @@ pub fn run(
     // one.parquet` work for one series and silently mean something else for two.
     if format.is_parquet() && dir.is_none() {
         return Err(
-            "the parquet format writes files, not stdout; pass --dir to name a directory"
+            "the parquet format writes files, not stdout; pass --dir to name a directory, \
+             or -f csv|json|jsonl to print one series"
                 .to_string(),
         );
     }

@@ -4763,9 +4763,18 @@ fn sqlite_export_adds_tables_and_refuses_a_collision() {
         .unwrap();
     assert_eq!(mine, 7);
 
-    // --db and -f sqlite only come together.
+    // -f sqlite needs a file to write into, and says so.
     let err = run_err(&store, &["-f", "sqlite", "export"]);
-    assert!(err.contains("--db"), "{err}");
+    assert!(err.contains("pass --db FILE"), "{err}");
+    // --db alone implies the format; only another format beside it is refused.
+    let implied = dir.path().join("implied.db");
+    let report = run(&store, &["export", "--db", implied.to_str().unwrap()]);
+    assert!(report.contains("Exported 2"), "{report}");
+    let err = run_err(
+        &store,
+        &["-f", "csv", "export", "--db", implied.to_str().unwrap()],
+    );
+    assert!(err.contains("-f csv"), "{err}");
 }
 
 #[test]

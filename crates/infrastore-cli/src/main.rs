@@ -188,6 +188,11 @@ struct Cli {
     #[arg(short = 'f', long, default_value_t = Format::Table, global = true)]
     format: Format,
 
+    /// Whether `-f` was passed rather than defaulted; `export` has a default
+    /// of its own.
+    #[arg(skip)]
+    format_given: bool,
+
     /// Log filter (also read from RUST_LOG); defaults to `warn`.
     #[arg(long, env = "RUST_LOG", global = true)]
     log_level: Option<String>,
@@ -410,7 +415,8 @@ enum Commands {
     },
     /// Write series values to CSV, JSON, Parquet, or SQLite.
     ///
-    /// The read-direction inverse of `add`. CSV and JSON write one file per
+    /// The read-direction inverse of `add`. With no -f the format is Parquet,
+    /// or SQLite under --db; there is no table form. CSV and JSON write one file per
     /// matched series into --dir, or to stdout when the selector matches
     /// exactly one series; Parquet writes one values/series/arrays file set per
     /// partition into --dir, which is then required. Both come back through
@@ -424,6 +430,7 @@ enum Commands {
         #[arg(long, conflicts_with = "db")]
         dir: Option<PathBuf>,
         /// SQLite database to add the -f sqlite tables to, created if absent.
+        /// Implies -f sqlite.
         #[arg(long)]
         db: Option<PathBuf>,
         /// Prefix every -f sqlite table name with this ([A-Za-z0-9_]), so
@@ -694,10 +701,12 @@ fn real_main() {
     // Parsed through `build_command` rather than `Cli::parse` so the grouped
     // help template is the one a user actually sees.
     let matches = build_command().get_matches();
-    let cli = match Cli::from_arg_matches(&matches) {
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    cli.format_given =
+        matches.value_source("format") == Some(clap::parser::ValueSource::CommandLine);
     init_tracing(cli.log_level.as_deref());
     confirm::set_assume_yes(cli.yes);
     // Before anything parses a timestamp, so an unusable zone is reported now
@@ -849,7 +858,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             table_prefix.as_deref(),
             time_range.as_deref(),
             *include_derived,
-            cli.format,
+            cli.format_given.then_some(cli.format),
         ),
         Commands::Completions { shell } => {
             // The same command the binary parses with, so completions can never
