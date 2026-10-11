@@ -279,6 +279,9 @@ fn every_type_and_element_kind_round_trips() {
     assert_eq!(back.len(), series.len());
     for (one, (row, want)) in back.iter().zip(&series) {
         assert_eq!(one.owner_id, row.owner_id);
+        assert_eq!(one.owner_type, row.owner_type);
+        assert_eq!(one.owner_category, row.owner_category);
+        assert_eq!(one.features, row.features);
         assert_eq!(&one.data, want, "{} does not survive the trip", row.name);
         assert_eq!(one.recorded_id, row.id.map(|i| i.get()));
     }
@@ -989,4 +992,129 @@ fn a_derived_forecast_is_left_out_so_the_export_reads_back() {
     let mut target = Store::create(None, true).unwrap();
     let err = import_store(&mut target, &db, "all_", &ImportOptions::default()).unwrap_err();
     assert!(err.to_string().contains("derived"), "{err}");
+}
+
+/// The catalog rows of a store with their ids cleared, in a stable order: an
+/// import assigns fresh ids, and everything else about a row must survive.
+fn rows(store: &Store) -> Vec<TimeSeriesMetadata> {
+    let mut rows = store.list_metadata(ListFilter::new()).unwrap();
+    rows.sort_by(|a, b| (a.owner_id, &a.name).cmp(&(b.owner_id, &b.name)));
+    rows
+}
+
+#[test]
+fn a_whole_store_round_trips_row_for_row() {
+    let mut source = Store::create(None, true).unwrap();
+
+    // Every descriptor set, features of each value kind, and an owner that is
+    // not the default the other fixtures use.
+    let mut described = SingleTimeSeries::new(
+        t0(),
+        Duration::hours(1),
+        TypedArray::from_f64(vec![2], &[1.0, 2.0]),
+        "described",
+    );
+    described.units = Some("MW".into());
+    described.quantity_kind = Some("ActivePower".into());
+    described.unit_system = Some(infrastore_core::UnitSystem::ComponentBase);
+    described.component_field = Some("max_active_power".into());
+    described.application_data = Some(r#"{"k":1}"#.into());
+    described.time_reference = Some(TimeReference::Zone("America/Denver".into()));
+    let mut features = Features::new();
+    features.insert(
+        "model_year".into(),
+        infrastore_core::FeatureValue::Int(2030),
+    );
+    features.insert(
+        "scenario".into(),
+        infrastore_core::FeatureValue::Str("high".into()),
+    );
+    features.insert("weight".into(), infrastore_core::FeatureValue::Float(0.5));
+    features.insert("firm".into(), infrastore_core::FeatureValue::Bool(true));
+    source
+        .add_time_series(
+            1,
+            "Outage",
+            OwnerCategory::SupplementalAttribute,
+            TimeSeriesData::SingleTimeSeries(described),
+            features,
+        )
+        .expect("add");
+
+    // A calendar grid from a month end, which only reads back on the calendar.
+    let monthly = SingleTimeSeries::new(
+        Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+        infrastore_core::Period::Months(1),
+        TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+        "monthly",
+    );
+    add(
+        &mut source,
+        2,
+        utc(TimeSeriesData::SingleTimeSeries(monthly)),
+    );
+
+    let stamps: Vec<DateTime<Utc>> = [0, 1, 5]
+        .iter()
+        .map(|h| t0() + Duration::hours(*h))
+        .collect();
+    add(
+        &mut source,
+        3,
+        utc(TimeSeriesData::NonSequentialTimeSeries(
+            NonSequentialTimeSeries::new(
+                stamps.clone(),
+                TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+                "irregular",
+            )
+            .unwrap(),
+        )),
+    );
+    add(
+        &mut source,
+        4,
+        utc(TimeSeriesData::PersistentTimeSeries(
+            PersistentTimeSeries::new(
+                stamps,
+                TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+                "steps",
+            )
+            .unwrap(),
+        )),
+    );
+    let mut deterministic = infrastore_core::Deterministic::new(
+        t0(),
+        Duration::hours(1),
+        Duration::hours(3),
+        Duration::hours(1),
+        2,
+        TypedArray::from_f64(vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "det",
+    )
+    .unwrap();
+    deterministic.time_reference = Some(TimeReference::Utc);
+    add(&mut source, 5, TimeSeriesData::Deterministic(deterministic));
+    add(&mut source, 6, of::<i64>("status", &[1, 0, 1]));
+    add(&mut source, 7, tuple3(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("out.db");
+    export_store(&source, ListFilter::new(), None, &db, "", false).expect("export");
+    let mut target = Store::create(None, true).unwrap();
+    import_store(&mut target, &db, "", &ImportOptions::default()).expect("import");
+
+    let (want, got) = (rows(&source), rows(&target));
+    assert_eq!(got.len(), want.len());
+    for (got, want) in got.iter().zip(&want) {
+        let name = &want.name;
+        let (got_id, want_id) = (got.id.unwrap(), want.id.unwrap());
+        let (mut got, mut want) = (got.clone(), want.clone());
+        (got.id, want.id) = (None, None);
+        assert_eq!(got, want, "the catalog row of {name} does not survive");
+        assert_eq!(
+            target.read_by_id(got_id, ReadWindow::full()).unwrap(),
+            source.read_by_id(want_id, ReadWindow::full()).unwrap(),
+            "the values of {name} do not survive"
+        );
+    }
 }
