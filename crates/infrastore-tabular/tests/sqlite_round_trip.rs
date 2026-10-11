@@ -396,7 +396,7 @@ fn a_collision_writes_nothing() {
 }
 
 #[test]
-fn a_failed_export_into_a_new_file_leaves_no_file() {
+fn a_failed_export_into_a_new_file_leaves_an_empty_database() {
     let series = stored(vec![utc(TimeSeriesData::SingleTimeSeries(single(
         "big",
         TypedArray::from_slice(vec![1], &[u64::MAX]).unwrap(),
@@ -405,12 +405,9 @@ fn a_failed_export_into_a_new_file_leaves_no_file() {
     let db = dir.path().join("out.db");
     let err = write_sqlite(&db, &series, "").unwrap_err();
     assert!(err.to_string().contains("does not fit"), "{err}");
-    assert!(!db.exists());
-
-    // A file that was already there is never removed, even holding no tables.
-    std::fs::write(&db, b"").expect("create an empty database");
-    write_sqlite(&db, &series, "").unwrap_err();
-    assert!(db.exists(), "a file this call did not create must survive");
+    // Never removed: another exporter may be mid-transaction in the same file.
+    assert!(db.exists());
+    assert!(table_names(&db).is_empty(), "nothing was written");
 }
 
 #[test]
@@ -793,7 +790,7 @@ fn nested_infinities_round_trip_and_a_scalar_negative_zero_is_refused() {
         assert!(err.contains(name), "{name}: {err}");
     }
     assert!(!err.contains("'fine'"), "{err}");
-    assert!(!zero.exists(), "nothing was written");
+    assert!(table_names(&zero).is_empty(), "nothing was written");
 }
 
 #[test]

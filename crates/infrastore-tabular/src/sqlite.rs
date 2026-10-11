@@ -245,8 +245,9 @@ type Values<'a> =
 ///
 /// Fails without writing anything if any table or index it would create is
 /// already in the database (compared case-insensitively, as SQLite does), or if
-/// any selected series is empty. A file this call created is removed again on
-/// failure while it still holds no tables. An empty selection touches nothing,
+/// any selected series is empty. A failure after that point can leave a database
+/// this call created behind, holding no tables; it is never removed, because
+/// another exporter may be writing into it. An empty selection touches nothing,
 /// not even to create the file.
 ///
 /// For values already in memory; [`export_store`] is the same export streamed
@@ -277,43 +278,11 @@ fn write_planned(
     if series.is_empty() {
         return Ok(Vec::new());
     }
-    // Claim an absent destination atomically: an empty file is an empty
-    // database, and only a file this call created is ever removed.
-    let created = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(_) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
-        Err(e) => return Err(e.into()),
-    };
-    let mut conn = match Connection::open(path) {
-        Ok(conn) => conn,
-        Err(e) => {
-            if created {
-                let _ = std::fs::remove_file(path);
-            }
-            return Err(e.into());
-        }
-    };
-    let result = write_all(&mut conn, series, prefix, values);
-    // Another exporter may have opened the file this call created and committed
-    // into it, so remove it only while it still holds no schema at all.
-    // ponytail: a commit landing between this check and the removal is lost;
-    // staging and renaming into place would close that window.
-    let untouched = created
-        && result.is_err()
-        && conn
-            .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .is_ok_and(|n| n == 0);
-    drop(conn);
-    if untouched {
-        let _ = std::fs::remove_file(path);
-    }
-    result
+    // Nothing here ever removes the file, even one this call created: nothing
+    // locks the path, so another exporter may be mid-transaction in it, and an
+    // empty database left behind by a failure is one the next export fills.
+    let mut conn = Connection::open(path)?;
+    write_all(&mut conn, series, prefix, values)
 }
 
 fn write_all(
