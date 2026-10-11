@@ -128,12 +128,12 @@ pub fn run(
                 eprintln!("{}", color::dim_err("No time series matched the selector."));
                 Ok(())
             }
-            // With --dir, stdout carries the status report either way, so the
-            // empty case reports a zero in the same shape as a real one.
+            // With --dir, a JSON format still owes stdout its status document,
+            // so the empty case reports a zero in the same shape as a real one.
             Some(dir) => output::report(
                 format,
                 || json!({ "exported": 0, "dir": dir.display().to_string(), "files": [] }),
-                || println!("{}", color::dim("No time series matched the selector.")),
+                || eprintln!("{}", color::dim_err("No time series matched the selector.")),
             ),
         };
     }
@@ -190,11 +190,11 @@ pub fn run(
                 },
                 || {
                     for path in &written {
-                        println!("exported {path}");
+                        eprintln!("exported {path}");
                     }
-                    println!(
+                    eprintln!(
                         "{}",
-                        color::header(&format!(
+                        color::header_err(&format!(
                             "Exported {} time series to {}.",
                             written.len(),
                             dir.display()
@@ -520,14 +520,14 @@ fn write_parquet(
         },
         || {
             for partition in &report.partitions {
-                println!(
+                eprintln!(
                     "exported {} ({} series over {} arrays, {} rows)",
                     partition.stem, partition.series, partition.arrays, partition.rows
                 );
             }
-            println!(
+            eprintln!(
                 "{}",
-                color::header(&format!(
+                color::header_err(&format!(
                     "Exported {series} time series as {} distinct arrays in {} partitions \
                      under {}.",
                     report.arrays(),
@@ -580,14 +580,14 @@ fn write_sqlite(
         },
         || {
             for t in &written {
-                println!(
+                eprintln!(
                     "exported {} / {} / {} ({} series over {} arrays, {} rows)",
                     t.values_table, t.series_table, t.arrays_table, t.series, t.arrays, t.rows
                 );
             }
-            println!(
+            eprintln!(
                 "{}",
-                color::header(&format!(
+                color::header_err(&format!(
                     "Exported {series} time series in {} partitions into {}.",
                     written.len(),
                     db.display()

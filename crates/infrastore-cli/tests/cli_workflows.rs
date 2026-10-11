@@ -11,6 +11,18 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// [`run`], returning stderr: where `export` writes its status prose, stdout
+/// being kept for output a caller may parse.
+fn run_status(store: &Path, args: &[&str]) -> String {
+    let output = raw(store, args);
+    assert!(
+        output.status.success(),
+        "infrastore {args:?} failed:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8(output.stderr).expect("utf8 stderr")
+}
+
 /// Run `infrastore --store <store> <args...>`, asserting success.
 fn run(store: &Path, args: &[&str]) -> String {
     let output = raw(store, args);
@@ -4700,7 +4712,7 @@ fn sqlite_export_adds_tables_and_refuses_a_collision() {
         .unwrap();
 
     let args = ["-f", "sqlite", "export", "--db", db.to_str().unwrap()];
-    let report = run(&store, &args);
+    let report = run_status(&store, &args);
     assert!(report.contains("1 partitions"), "{report}");
 
     let conn = rusqlite::Connection::open(&db).unwrap();
@@ -4768,8 +4780,10 @@ fn sqlite_export_adds_tables_and_refuses_a_collision() {
     assert!(err.contains("pass --db FILE"), "{err}");
     // --db alone implies the format; only another format beside it is refused.
     let implied = dir.path().join("implied.db");
-    let report = run(&store, &["export", "--db", implied.to_str().unwrap()]);
+    let out = raw(&store, &["export", "--db", implied.to_str().unwrap()]);
+    let report = String::from_utf8_lossy(&out.stderr);
     assert!(report.contains("Exported 2"), "{report}");
+    assert!(out.stdout.is_empty(), "the status prose belongs on stderr");
     let err = run_err(
         &store,
         &["-f", "csv", "export", "--db", implied.to_str().unwrap()],
@@ -4841,7 +4855,7 @@ fn sqlite_load_flags_behave_as_they_do_for_parquet() {
     let db_arg = db.to_str().unwrap();
 
     // An empty selection writes nothing, not even the file.
-    let report = run(
+    let report = run_status(
         &store,
         &[
             "-f", "sqlite", "export", "--db", db_arg, "--name", "nothing",
@@ -4924,7 +4938,7 @@ fn export_writes_one_file_pair_per_partition() {
     seed_one(dir.path(), &store);
     let out = dir.path().join("out");
 
-    let report = run(
+    let report = run_status(
         &store,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );
@@ -5013,7 +5027,7 @@ fn derived_series_are_exported_only_when_asked_for() {
     );
     assert_eq!(files(&plain), ["SingleTimeSeries.f64.utc.values.parquet"]);
     let db = dir.path().join("plain.db");
-    let report = run(
+    let report = run_status(
         &store,
         &["-f", "sqlite", "export", "--db", db.to_str().unwrap()],
     );
@@ -5048,7 +5062,7 @@ fn derived_series_are_exported_only_when_asked_for() {
         ]
     );
     let db = dir.path().join("all.db");
-    let report = run(
+    let report = run_status(
         &store,
         &[
             "-f",
@@ -5759,7 +5773,7 @@ fn a_whole_directory_of_partitions_re_imports() {
     );
     run(&source, &["add", "--descriptor", d.to_str().unwrap()]);
 
-    let report = run(
+    let report = run_status(
         &source,
         &["-f", "parquet", "export", "--dir", out.to_str().unwrap()],
     );

@@ -47,6 +47,11 @@ pub fn header(s: &str) -> String {
     paint(GREEN_BOLD, s)
 }
 
+/// [`header`], for text bound for stderr rather than stdout.
+pub fn header_err(s: &str) -> String {
+    paint_if(enabled_err(), GREEN_BOLD, s)
+}
+
 /// Literals / field labels: cyan.
 pub fn label(s: &str) -> String {
     paint(CYAN, s)
