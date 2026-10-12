@@ -4004,6 +4004,11 @@ cannot afford another machine's choice does not inherit it. Lowering it mid-tran
 whatever the buffer already holds beyond the new figure; zero raises <code>InvalidParameterError</code>, since
 a pool's width floors at one column and a zero budget would mean a dataset per array rather than no
 buffering at all. The chunk-row ceiling above it does not move.</p>
+<p>The same figure bounds a rewrite. <code>persist_to</code>, <code>persist_arrays_to</code> and <code>compact</code> read and write
+each packed pool in blocks of at most this many bytes, so a pool wider than the budget lands as
+several datasets rather than one — including when the store being persisted is in memory. A block is
+never narrower than one column, so a single column larger than the budget is still read and written
+whole.</p>
 <h2 id="read-a-series-1"><a class="header" href="#read-a-series-1">Read a Series</a></h2>
 <pre><code class="language-python">got = store.read_by_id(series_id)
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
@@ -4827,6 +4832,10 @@ writing process, so a machine that cannot afford another machine's choice does n
 Lowering it mid-transaction writes out whatever the buffer already holds beyond the new figure; zero
 throws, since a pool's width floors at one column and a zero budget would mean a dataset per array
 rather than no buffering at all. The chunk-row ceiling above it does not move.</p>
+<p>The same figure bounds a rewrite. <code>persist!</code>, <code>persist_arrays!</code> and <code>compact!</code> read and write each
+packed pool in blocks of at most this many bytes, so a pool wider than the budget lands as several
+datasets rather than one — including when the store being persisted is in memory. A block is never
+narrower than one column, so a single column larger than the budget is still read and written whole.</p>
 <h3 id="values-that-are-not-numbers-1"><a class="header" href="#values-that-are-not-numbers-1">Values that are not numbers</a></h3>
 <p>A timestep's value can be a function rather than a number — a cost curve re-offered every hour, a
 pair of coefficients, a fixed-width tuple. Hand the constructor those values and it does the rest:
@@ -6348,7 +6357,8 @@ adds gets the dataset the bulk add of the same series writes, since a batch hand
 written as one block with no budget applied at all — the caller is already holding it. The chunk-row
 ceiling above it does not move, and neither does the figure travel: it belongs to the handle that
 set it, not to the artifact, because it is a budget for the writing process rather than a property
-of the file.</p>
+of the file. The same figure bounds the blocks a rewrite moves a pool in; see
+<a href="reference/file-format.html#deletion-and-compaction">deletion and compaction</a>.</p>
 <p><strong>A block of one is not a block.</strong> If a span ends up holding a single array for a pool, it fills a
 growth-pool slot rather than claiming a dataset sized to one column — chunked <code>(1, 1)</code>, that would
 give a scalar <code>f64</code> series an eight-byte chunk per timestep, whose per-chunk overhead dwarfs the
@@ -6487,8 +6497,15 @@ the freed space back:</p>
 the catalog is then read for the live set — the catalog, not the file, is what makes an array or
 a time axis live.</li>
 <li>Every live array is written into a fresh file at <code>&lt;store&gt;.h5.repack</code>, sibling to the original so
-the two share a filesystem. Layouts are planned from scratch: packed pools are created at exactly
-their cohort width rather than the growth-sized width an incremental write reserves.</li>
+the two share a filesystem. Layouts are planned from scratch: each packed pool is written as
+whole blocks through the same block writer a bulk add uses, so its datasets are sized to exactly
+the cohort rather than the growth width an incremental write reserves, and every chunk is written
+once. The rewrite reads and writes a pool in blocks of at most the store's write-buffer budget
+(<code>set_write_buffer_bytes</code>, 128 MiB by default), so a pool wider than that lands as several
+datasets. A block is never narrower than one column, so a single column larger than the budget is
+still read and written whole. That is a rewrite-specific spill: a bulk add is handed its whole
+cohort at once and splits only at the 1 MiB chunk budget, while a transaction of single adds
+spills at this same byte budget.</li>
 <li>The store's HDF5 handle is closed, the temp file is renamed over the original, and the store
 reopens on the result. A crash before the rename leaves the original untouched plus a stray
 <code>.repack</code> file, which the next compaction deletes.</li>
@@ -9380,7 +9397,10 @@ it how wide a dataset a run of single adds writes: raise it and the loop produce
 <code>add_time_series_bulk</code> of the same series produces, which applies no budget at all. It belongs to
 this <code>Store</code> object rather than the artifact (nothing is persisted), lowering it mid-transaction
 writes out what the buffer already holds beyond the new figure, and <code>0</code> raises
-<code>InvalidParameterError</code>. See
+<code>InvalidParameterError</code>. The same figure bounds a rewrite: <code>persist_to</code>, <code>persist_arrays_to</code> and
+<code>compact</code> read and write each packed pool in blocks of at most this many bytes, so a pool wider than
+the budget lands as several datasets — or of one whole column, where a single column exceeds the
+budget. See
 <a href="reference/../guides/python.html#how-wide-a-dataset-a-span-writes">how wide a dataset a span writes</a>.</p>
 <h3 id="methods"><a class="header" href="#methods">Methods</a></h3>
 <pre><code class="language-python">def add_time_series(
@@ -11605,6 +11625,10 @@ set_write_buffer_bytes!(store, bytes) -&gt; Nothing
                                   # budget at all. Belongs to the handle, not the artifact (nothing
                                   # is persisted). Lowering it mid-transaction writes out what the
                                   # buffer holds beyond the new figure; 0 throws ArgumentError.
+                                  # The same figure bounds a rewrite: persist!, persist_arrays! and
+                                  # compact! move each packed pool in blocks of at most this many
+                                  # bytes, so a wider pool lands as several datasets. A column
+                                  # larger than the budget is still moved whole.
 clear!(store; owner_id=nothing, owner_category=nothing) -&gt; Nothing
                                   # both `nothing`: remove every series in the store.
                                   # Scope to one owner by passing BOTH keywords — they identify the
