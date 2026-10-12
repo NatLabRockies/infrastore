@@ -536,3 +536,82 @@ fn a_forecast_sharing_a_packed_array_reads_through_the_forecast_reader() {
         assert_eq!(sr.groups()[0].values_to_vec::<f64>().unwrap(), row);
     }
 }
+
+/// A persist decides which irregular pools are cohorts of one before writing
+/// anything. Deciding it while walking the arrays dropped the pool on meeting
+/// a standalone array that merely carried its key, and the one array really
+/// packed there was then never written: the saved store listed it and could
+/// not read it.
+#[test]
+fn the_lone_packed_array_of_an_irregular_pool_survives_a_forecast_sharing_its_key() {
+    use infrastore_core::{Deterministic, ReadWindow};
+    let t0 = t0();
+    let stamps: Vec<_> = (0..24).map(|h| t0 + Duration::hours(h * h + h)).collect();
+    let shared: Vec<f64> = (0..24 * 7).map(|i| i as f64).collect();
+    let other: Vec<f64> = (0..24 * 7).map(|i| -(i as f64) - 1.0).collect();
+    let nsts = |values: &[f64], name: &str| {
+        TimeSeriesData::NonSequentialTimeSeries(
+            NonSequentialTimeSeries::new(
+                stamps.clone(),
+                TypedArray::from_f64(vec![24, 7], values),
+                name,
+            )
+            .unwrap(),
+        )
+    };
+    let det = TimeSeriesData::Deterministic(
+        Deterministic::new(
+            t0,
+            Duration::hours(1),
+            Duration::hours(24),
+            Duration::hours(1),
+            7,
+            TypedArray::from_f64(vec![24, 7], &shared),
+            "det",
+        )
+        .unwrap(),
+    );
+    let mut store = Store::create(None, true).unwrap();
+    let mut add = |data| {
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                data,
+                Features::new(),
+            )
+            .unwrap()
+    };
+    // A's array is shared with a forecast, so it persists standalone, but
+    // added first its plan still carries the irregular pool's key.
+    let a = add(nsts(&shared, "a"));
+    let d = add(det);
+    // B is then the only array packed in that pool: a cohort of one.
+    let b = add(nsts(&other, "b"));
+    let expected_b = store.read_by_id(b, ReadWindow::default()).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    // Which of A and B the planner visits first is `HashMap` order, so one
+    // save proves nothing; B was lost only when A came first.
+    let mut failures = Vec::new();
+    for trial in 0..40 {
+        let path = dir.path().join(format!("out{trial}.h5"));
+        store.persist_to(&path).unwrap();
+        let saved = Store::open(&path, true).unwrap();
+        for id in [a, d] {
+            saved.read_by_id(id, ReadWindow::default()).unwrap();
+        }
+        match saved.read_by_id(b, ReadWindow::default()) {
+            Ok(got) if got == expected_b => {}
+            Ok(_) => failures.push(format!("trial {trial}: wrong values")),
+            Err(e) => failures.push(format!("trial {trial}: {e}")),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of 40 saves lost B:\n{}",
+        failures.len(),
+        failures[..failures.len().min(3)].join("\n")
+    );
+}

@@ -5826,16 +5826,18 @@ impl Store {
         for hash in &axes {
             backend.put_timestamps(hash, &self.backend.get_timestamps(hash)?)?;
         }
+        // An irregular cohort of one is standalone, as the write path would
+        // have made it. Decided here, before any array is written: a plan
+        // that is not packed can still carry a pool's key (a hash shared with
+        // a forecast), so dropping a pool while walking the plans would let
+        // such a plan take it from the one array still packed in it.
+        pools.retain(|key, cohort| !matches!(key.3, PackGroup::Irregular(_)) || cohort.len() > 1);
         for (hash, plan) in &plans {
-            let mut layout = plan.layout;
-            if matches!(plan.pool.3, PackGroup::Irregular(_))
-                && pools.get(&plan.pool).is_some_and(|cohort| cohort.len() < 2)
-            {
-                // An irregular cohort of one is standalone, as the write path
-                // would have made it; its pool entry is dropped below.
-                pools.remove(&plan.pool);
-                layout = ArrayLayout::Standalone;
-            }
+            let layout = if plan.layout.is_packed() && !pools.contains_key(&plan.pool) {
+                ArrayLayout::Standalone
+            } else {
+                plan.layout
+            };
             if layout.is_packed() {
                 continue;
             }
