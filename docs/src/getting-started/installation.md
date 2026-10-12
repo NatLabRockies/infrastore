@@ -74,7 +74,8 @@ cargo install infrastore-cli --no-default-features --features vendored
 
 That binary still accepts the flags and names the feature to rebuild with, rather than reporting
 `parquet` as an unknown format. The Arrow tree reaches only the CLI: `infrastore-core`, the Python
-wheel, and the FFI cdylib never link it.
+wheel, and the FFI cdylib never link it. SQLite export and import (`export -f sqlite`,
+`add --sqlite`) are not part of the feature and stay in the lean binary.
 
 ## Julia
 
@@ -173,6 +174,7 @@ Add it to your shell profile to make it permanent. The Python wheel is built sep
 | `infrastore-py`      | PyO3 bindings, `abi3-py311` wheel                                    |
 | `infrastore-ffi`     | C ABI cdylib (the foundation of the Julia binding)                   |
 | `infrastore-cli`     | `infrastore` CLI binary (CSV add/read, inspect on-disk stores)       |
+| `infrastore-tabular` | The Arrow-free export layout, and its SQLite tables (`-f sqlite`)    |
 | `infrastore-parquet` | Parquet export/import behind the CLI's default-on `parquet` feature  |
 | `infrastore-bench`   | `infrastore-bench` binary (bulk-ingest + simulation-read benchmarks) |
 

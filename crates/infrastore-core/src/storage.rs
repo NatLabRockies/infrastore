@@ -543,6 +543,10 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// Flush any in-memory state to disk (no-op for in-memory backends).
     fn flush(&mut self) -> Result<()>;
 
+    /// Give back whatever reads have cached, without changing what any later
+    /// read returns. A no-op for a backend that caches nothing.
+    fn release_read_caches(&self) {}
+
     /// This file's generation stamp, pairing it with exactly one catalog.
     ///
     /// `None` both for a backend with no file to stamp and for one written

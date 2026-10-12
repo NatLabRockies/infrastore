@@ -1795,6 +1795,13 @@ impl StorageBackend for Hdf5Backend {
         inner.file.flush().map_err(map_h5)
     }
 
+    fn release_read_caches(&self) {
+        // The chunk cache lives per open dataset handle, so closing the handles
+        // is what frees it; the next read of a dataset reopens it.
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.handles.borrow_mut().clear();
+    }
+
     fn generation(&self) -> Option<String> {
         let inner = self.inner.lock().expect("mutex poisoned");
         read_str_attr(&inner.file, GENERATION_ATTR)

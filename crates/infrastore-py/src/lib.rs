@@ -4616,6 +4616,125 @@ impl PyStore {
         self.store_mut()?.persist_to(&path).map_err(map_err)
     }
 
+    /// Export the series the filter selects as tables in the SQLite database at
+    /// `path` — the normalized layout `infrastore export -f sqlite` writes, one
+    /// `<prefix><base>_values` / `<prefix><base>_series` pair per
+    /// `(time_series_type, value type, time_reference)` partition.
+    ///
+    /// The filter keywords are `list_metadata`'s; with none this exports the
+    /// whole store. `time_range` clips each series as `read_by_ids_range` does.
+    /// The database is created if absent, and tables are only ever added: a
+    /// name already taken, or an empty series in the selection, raises before
+    /// anything is written. `table_prefix` scopes the names so several exports
+    /// can share one database. The values are streamed, a bounded batch at a
+    /// time and each distinct array once, so a store far larger than memory
+    /// exports in a few hundred megabytes.
+    ///
+    /// A `DeterministicSingleTimeSeries` is left out unless `include_derived`:
+    /// it repeats its source `SingleTimeSeries`' values, and `import_sqlite`
+    /// refuses a database holding one. A filter naming the type without the
+    /// flag raises.
+    ///
+    /// Returns one dict per partition written: `values_table`, `series_table`,
+    /// `arrays_table`, `time_series_type`, `value_type`, `time_reference`,
+    /// `arrays`, `series` and `rows`.
+    #[pyo3(signature = (path, *, table_prefix="", time_range=None, include_derived=false, owner_id=None, owner_category=None, owner_type=None, time_series_type=None, name=None, name_glob=None, component_field=None, zoneless=None, resolution=None, interval=None, initial_timestamp=None, length=None, features=None, features_exact=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn export_sqlite<'py>(
+        &self,
+        py: Python<'py>,
+        path: PathBuf,
+        table_prefix: &str,
+        time_range: Option<(PyInstant, PyInstant)>,
+        include_derived: bool,
+        owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
+        owner_type: Option<String>,
+        time_series_type: Option<&Bound<'py, PyAny>>,
+        name: Option<String>,
+        name_glob: Option<String>,
+        component_field: Option<String>,
+        zoneless: Option<bool>,
+        resolution: Option<Bound<'py, PyAny>>,
+        interval: Option<Bound<'py, PyAny>>,
+        initial_timestamp: Option<PyInstant>,
+        length: Option<usize>,
+        features: Option<&Bound<'py, PyDict>>,
+        features_exact: bool,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let filter = build_list_filter(
+            owner_id,
+            owner_category,
+            owner_type,
+            time_series_type,
+            name,
+            name_glob,
+            component_field,
+            zoneless,
+            resolution,
+            initial_timestamp,
+            length,
+            interval,
+            features,
+            features_exact,
+        )?;
+        let range = range_to_core(time_range)?;
+        let written = infrastore_tabular::sqlite::export_store(
+            self.store()?,
+            filter,
+            range,
+            &path,
+            table_prefix,
+            include_derived,
+        )
+        .map_err(map_err)?;
+        written
+            .into_iter()
+            .map(|t| {
+                let d = PyDict::new(py);
+                d.set_item("values_table", t.values_table)?;
+                d.set_item("series_table", t.series_table)?;
+                d.set_item("arrays_table", t.arrays_table)?;
+                d.set_item("time_series_type", t.time_series_type.as_str())?;
+                d.set_item("value_type", t.value_slug)?;
+                d.set_item("time_reference", t.reference)?;
+                d.set_item("arrays", t.arrays)?;
+                d.set_item("series", t.series)?;
+                d.set_item("rows", t.rows)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Add every series in the tables `export_sqlite` (or `infrastore export -f
+    /// sqlite`) wrote to the database at `path` under `table_prefix`, returning
+    /// the new catalog ids in the order read.
+    ///
+    /// One all-or-nothing transaction across the whole database. Ids are always
+    /// assigned fresh; the ones the tables recorded are not reused. Each array
+    /// is checked against the `data_hash` its rows carry — pass
+    /// `skip_checksum=True` after editing values in place.
+    #[pyo3(signature = (path, *, table_prefix="", skip_checksum=false))]
+    fn import_sqlite(
+        &mut self,
+        path: PathBuf,
+        table_prefix: &str,
+        skip_checksum: bool,
+    ) -> PyResult<Vec<i64>> {
+        let options = infrastore_tabular::ImportOptions {
+            skip_checksum,
+            ..Default::default()
+        };
+        let ids = infrastore_tabular::sqlite::import_store(
+            self.store_mut()?,
+            &path,
+            table_prefix,
+            &options,
+        )
+        .map_err(map_err)?;
+        Ok(ids.into_iter().map(|id| id.get()).collect())
+    }
+
     /// Write only the **array half** to `path`, leaving no catalog beside it.
     ///
     /// The mirror of `persist_catalog()`, which writes only the other half, and

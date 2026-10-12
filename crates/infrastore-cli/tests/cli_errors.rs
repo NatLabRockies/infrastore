@@ -2342,19 +2342,20 @@ fn export_does_not_overwrite_series_that_share_a_plain_filename() {
     seed_feature_pair(dir.path(), &store);
 
     let out_dir = dir.path().join("exported");
-    let stdout = run(
-        &store,
-        &[
-            "-f",
-            "csv",
-            "export",
-            "--name",
-            "load",
-            "--dir",
-            out_dir.to_str().unwrap(),
-        ],
-    );
-    assert!(stdout.contains("Exported 2"), "got: {stdout}");
+    // The status prose is for a person, so it goes to stderr; stdout is kept
+    // for output a caller may parse.
+    let output = spawn(Command::new(BIN).arg("--store").arg(&store).args([
+        "-f",
+        "csv",
+        "export",
+        "--name",
+        "load",
+        "--dir",
+        out_dir.to_str().unwrap(),
+    ]));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Exported 2"), "got: {stderr}");
+    assert!(output.stdout.is_empty(), "stdout should stay empty");
 
     let files: Vec<_> = fs::read_dir(&out_dir)
         .unwrap()

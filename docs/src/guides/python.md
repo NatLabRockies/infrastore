@@ -375,8 +375,8 @@ timestamps, rows that leave a declared grid, decoded `struct`/`list` value colum
 
 `to_arrow()` and `from_arrow()` are **per-series, in-memory conveniences** -- one series, one table.
 They are not the CLI's file format: `infrastore export -f parquet` writes
-[a values/series file pair per partition](../reference/parquet-format.md), each distinct array once
-and one catalog row per series, which `from_arrow` does not read. To move a whole store through
+[a values/series/arrays file set per partition](../reference/parquet-format.md), each distinct array
+once and one catalog row per series, which `from_arrow` does not read. To move a whole store through
 Parquet, use the CLI at both ends.
 
 ### Datetimes and precision

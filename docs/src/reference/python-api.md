@@ -1557,6 +1557,53 @@ store.add_time_series(
 json_str = store.export_time_series_associations_openapi()
 ```
 
+## SQLite tables
+
+The [normalized table layout](parquet-format.md#sqlite-tables) the CLI's `export -f sqlite` and
+`add --sqlite` exchange, from Python. (The Parquet container of the same layout is CLI-only, so the
+wheel does not link Arrow; DuckDB and polars both read these tables directly.)
+
+```python
+def export_sqlite(
+    self, path: str, *, table_prefix: str = "", time_range=None,
+    include_derived: bool = False,
+    owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+    name=None, name_glob=None, component_field=None, zoneless=None,
+    resolution=None, interval=None, initial_timestamp=None, length=None,
+    features=None, features_exact=False,
+) -> list[dict]: ...
+def import_sqlite(
+    self, path: str, *, table_prefix: str = "", skip_checksum: bool = False
+) -> list[int]: ...
+```
+
+`export_sqlite` takes the same filter keywords as `list_metadata` — none exports the whole store —
+and a `time_range` that clips each series as `read_by_ids_range` does. The database is created if
+absent and tables are only ever added: a name already taken, or an empty series in the selection,
+raises before anything is written, and `table_prefix` lets several exports share one database. It
+returns one dict per partition written (`values_table`, `series_table`, `arrays_table`,
+`time_series_type`, `value_type`, `time_reference`, `arrays`, `series`, `rows`). The values are
+streamed — a bounded batch at a time, each distinct array once — so a store far larger than memory
+exports in a few hundred megabytes.
+
+A `DeterministicSingleTimeSeries` is left out unless `include_derived=True`: it repeats its source
+`SingleTimeSeries`' values, flattened, and `import_sqlite` refuses a database holding one. Naming
+the type in the filter without the flag raises rather than exporting nothing.
+
+The partition tables' names depend on the data, so each export also keeps three views with fixed
+names — `<prefix>all_values`, `<prefix>all_series`, `<prefix>all_arrays` — spanning every partition
+under the prefix; see [fixed-name views](parquet-format.md#fixed-name-views).
+
+`import_sqlite` adds every series under `table_prefix` in one all-or-nothing transaction and returns
+the new ids in the order read. Ids are assigned fresh — the ones the tables recorded are not reused.
+Each array is checked against the `data_hash` its rows carry; `skip_checksum=True` waives that for
+values edited in place.
+
+```python
+store.export_sqlite("run.db", table_prefix="base_", owner_type="Generator")
+ids = Store.create(in_memory=True).import_sqlite("run.db", table_prefix="base_")
+```
+
 ## Exceptions
 
 All inherit from `TimeSeriesError`:

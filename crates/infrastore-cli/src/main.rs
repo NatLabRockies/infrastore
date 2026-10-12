@@ -188,6 +188,11 @@ struct Cli {
     #[arg(short = 'f', long, default_value_t = Format::Table, global = true)]
     format: Format,
 
+    /// Whether `-f` was passed rather than defaulted; `export` has a default
+    /// of its own.
+    #[arg(skip)]
+    format_given: bool,
+
     /// Log filter (also read from RUST_LOG); defaults to `warn`.
     #[arg(long, env = "RUST_LOG", global = true)]
     log_level: Option<String>,
@@ -408,27 +413,42 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Write series values to CSV, JSON, or Parquet files.
+    /// Write series values to CSV, JSON, Parquet, or SQLite.
     ///
-    /// The read-direction inverse of `add`. CSV and JSON write one file per
+    /// The read-direction inverse of `add`. With no -f the format is Parquet,
+    /// or SQLite under --db; there is no table form. CSV and JSON write one file per
     /// matched series into --dir, or to stdout when the selector matches
-    /// exactly one series; Parquet writes one values/series file pair per
+    /// exactly one series; Parquet writes one values/series/arrays file set per
     /// partition into --dir, which is then required. Both come back through
     /// `add`: CSV by detecting the layout from the header, Parquet via
-    /// --parquet.
+    /// --parquet. SQLite writes the Parquet layout as tables into --db.
     #[command(after_help = help::EXPORT)]
     Export {
         #[command(flatten)]
         selector: SelectorArgs,
         /// Directory to write one file per matched series.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "db")]
         dir: Option<PathBuf>,
+        /// SQLite database to add the -f sqlite tables to, created if absent.
+        /// Implies -f sqlite.
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Prefix every -f sqlite table name with this ([A-Za-z0-9_]), so
+        /// several exports can share one database. `add --sqlite` takes the
+        /// same prefix back.
+        #[arg(long, value_name = "PREFIX")]
+        table_prefix: Option<String>,
         /// Restrict to a time range START..END (RFC3339 or epoch-ms; END exclusive). A
         /// regular series' START inside a step selects that step, an irregular series
         /// keeps only timestamps at or after START, and a forecast's START must be a
         /// window boundary (only its END clips).
         #[arg(long)]
         time_range: Option<String>,
+        /// With -f parquet or -f sqlite, also write DeterministicSingleTimeSeries
+        /// partitions. They are left out by default: each repeats its source
+        /// SingleTimeSeries' values, and `add` refuses one on the way back in.
+        #[arg(long)]
+        include_derived: bool,
     },
     /// Generate shell completions to stdout.
     ///
@@ -681,10 +701,12 @@ fn real_main() {
     // Parsed through `build_command` rather than `Cli::parse` so the grouped
     // help template is the one a user actually sees.
     let matches = build_command().get_matches();
-    let cli = match Cli::from_arg_matches(&matches) {
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    cli.format_given =
+        matches.value_source("format") == Some(clap::parser::ValueSource::CommandLine);
     init_tracing(cli.log_level.as_deref());
     confirm::set_assume_yes(cli.yes);
     // Before anything parses a timestamp, so an unusable zone is reported now
@@ -703,8 +725,11 @@ fn run(cli: &Cli) -> Result<(), String> {
     // `-f` is global, but Parquet is not a rendering of a result -- it is a
     // binary container. Refusing it here, once, beats each command's `match`
     // falling through to its `_` arm and quietly printing a table.
-    if cli.format.is_parquet() && !matches!(cli.command, Commands::Export { .. }) {
-        return Err("the parquet format is only available on `export`".to_string());
+    if cli.format.is_export_only() && !matches!(cli.command, Commands::Export { .. }) {
+        return Err(format!(
+            "the {} format is only available on `export`",
+            cli.format
+        ));
     }
     match &cli.command {
         Commands::Add(args) => {
@@ -821,13 +846,19 @@ fn run(cli: &Cli) -> Result<(), String> {
         Commands::Export {
             selector,
             dir,
+            db,
+            table_prefix,
             time_range,
+            include_derived,
         } => commands::export::run(
             &require_store(cli)?,
             selector,
             dir.as_deref(),
+            db.as_deref(),
+            table_prefix.as_deref(),
             time_range.as_deref(),
-            cli.format,
+            *include_derived,
+            cli.format_given.then_some(cli.format),
         ),
         Commands::Completions { shell } => {
             // The same command the binary parses with, so completions can never

@@ -28,6 +28,9 @@ pub enum Format {
     /// reporting `parquet` as an unknown value. `main` rejects it for every
     /// command but `export`, and `export` rejects it when the feature is off.
     Parquet,
+    /// Tables in a SQLite database, on `export` only -- the Parquet layout, one
+    /// table per file. Always available: it is Arrow-free.
+    Sqlite,
 }
 
 impl Format {
@@ -41,6 +44,11 @@ impl Format {
     pub fn is_parquet(self) -> bool {
         matches!(self, Format::Parquet)
     }
+
+    /// Whether this format only means anything to `export`.
+    pub fn is_export_only(self) -> bool {
+        matches!(self, Format::Parquet | Format::Sqlite)
+    }
 }
 
 impl std::fmt::Display for Format {
@@ -51,6 +59,7 @@ impl std::fmt::Display for Format {
             Format::Jsonl => "jsonl",
             Format::Csv => "csv",
             Format::Parquet => "parquet",
+            Format::Sqlite => "sqlite",
         })
     }
 }

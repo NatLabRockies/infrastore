@@ -18,21 +18,56 @@ use crate::store_access;
 
 use super::show;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     store_path: &Path,
     selector: &SelectorArgs,
     dir: Option<&Path>,
+    db: Option<&Path>,
+    table_prefix: Option<&str>,
     time_range: Option<&str>,
-    format: Format,
+    include_derived: bool,
+    format: Option<Format>,
 ) -> Result<(), String> {
-    // `table` is the global default, so the first `export` anyone ran used to
-    // fail on a flag they never passed. There is no table export to fall back
-    // to, and CSV is both the format `add` reads back and the one `--dir` is
-    // for, so it is what an unspecified format means here.
-    let format = match format {
-        Format::Table => Format::Csv,
-        other => other,
+    // `-f` is global and defaults to `table`, which an export has no form of:
+    // `get` is the table view of a series. So an unspecified format means the
+    // container the destination names -- SQLite under --db, Parquet otherwise --
+    // and a `table` someone actually typed is refused rather than reinterpreted.
+    let format = match (format, db) {
+        (Some(Format::Table), _) => {
+            return Err(
+                "export has no table form; use `get` to view a series, or pass \
+                 -f parquet|sqlite|csv|json|jsonl"
+                    .to_string(),
+            );
+        }
+        (Some(Format::Sqlite), None) => {
+            return Err(
+                "-f sqlite writes into a database file; pass --db FILE to name it".to_string(),
+            );
+        }
+        (None | Some(Format::Sqlite), Some(_)) => Format::Sqlite,
+        (Some(other), Some(_)) => {
+            return Err(format!(
+                "--db writes a SQLite database, which -f {other} contradicts; drop one"
+            ));
+        }
+        (Some(other), None) => other,
+        (None, None) => Format::Parquet,
     };
+    // The per-series formats write whatever the selector matched, so the flag
+    // would mean nothing there.
+    if include_derived && !(format.is_parquet() || format == Format::Sqlite) {
+        return Err(
+            "--include-derived applies to the partitioned exports; pass -f parquet or -f sqlite"
+                .to_string(),
+        );
+    }
+    if table_prefix.is_some() && db.is_none() {
+        return Err(
+            "--table-prefix names the tables of an -f sqlite export; pass --db".to_string(),
+        );
+    }
     let file_ext = match format {
         Format::Csv => "csv",
         Format::Jsonl => "jsonl",
@@ -45,7 +80,8 @@ pub fn run(
     // one.parquet` work for one series and silently mean something else for two.
     if format.is_parquet() && dir.is_none() {
         return Err(
-            "the parquet format writes files, not stdout; pass --dir to name a directory"
+            "the parquet format writes files, not stdout; pass --dir to name a directory, \
+             or -f csv|json|jsonl to print one series"
                 .to_string(),
         );
     }
@@ -61,9 +97,28 @@ pub fn run(
 
     let range = crate::parse::parse_time_range(time_range)?;
     let store = store_access::open_readonly(store_path)?;
-    let metas = store
-        .list_metadata(selector.to_filter()?)
-        .map_err(|e| e.to_string())?;
+    // SQLite streams out of the store rather than out of a selection read here:
+    // the values are far larger than memory long before the catalog is.
+    if let Some(db) = db {
+        return write_sqlite(
+            &store,
+            selector.to_filter()?,
+            range,
+            db,
+            table_prefix.unwrap_or(""),
+            include_derived,
+            format,
+        );
+    }
+    let filter = selector.to_filter()?;
+    let filter_type = filter.time_series_type;
+    let mut metas = store.list_metadata(filter).map_err(|e| e.to_string())?;
+    // The partitioned layout leaves derived series out unless asked; the
+    // SQLite path above applies the same rule inside `export_store`.
+    if format.is_parquet() {
+        infrastore_tabular::export::retain_exportable(filter_type, &mut metas, include_derived)
+            .map_err(|e| e.to_string())?;
+    }
     if metas.is_empty() {
         return match dir {
             // Without --dir, stdout *is* the exported series, so a notice
@@ -73,12 +128,12 @@ pub fn run(
                 eprintln!("{}", color::dim_err("No time series matched the selector."));
                 Ok(())
             }
-            // With --dir, stdout carries the status report either way, so the
-            // empty case reports a zero in the same shape as a real one.
+            // With --dir, a JSON format still owes stdout its status document,
+            // so the empty case reports a zero in the same shape as a real one.
             Some(dir) => output::report(
                 format,
                 || json!({ "exported": 0, "dir": dir.display().to_string(), "files": [] }),
-                || println!("{}", color::dim("No time series matched the selector.")),
+                || eprintln!("{}", color::dim_err("No time series matched the selector.")),
             ),
         };
     }
@@ -106,7 +161,7 @@ pub fn run(
             output::write_raw(&content)?;
         }
         // Parquet is not a rendering of one series: the whole selection becomes
-        // a handful of partition file pairs, so it never walks the per-series
+        // a handful of partition files, so it never walks the per-series
         // loop below.
         Some(dir) if format.is_parquet() => {
             let pairs: Vec<(TimeSeriesMetadata, TimeSeriesData)> =
@@ -135,11 +190,11 @@ pub fn run(
                 },
                 || {
                     for path in &written {
-                        println!("exported {path}");
+                        eprintln!("exported {path}");
                     }
-                    println!(
+                    eprintln!(
                         "{}",
-                        color::header(&format!(
+                        color::header_err(&format!(
                             "Exported {} time series to {}.",
                             written.len(),
                             dir.display()
@@ -405,7 +460,7 @@ fn render_json(
     text.map(|s| s + "\n").map_err(|e| e.to_string())
 }
 
-/// Write the whole selection as partition file pairs, or explain that this
+/// Write the whole selection as partition files, or explain that this
 /// binary cannot.
 ///
 /// Two files per `(type, value type, time reference)` triple -- a values file
@@ -452,6 +507,7 @@ fn write_parquet(
                         "stem": p.stem,
                         "values": p.values_path.display().to_string(),
                         "series_file": p.series_path.display().to_string(),
+                        "arrays_file": p.arrays_path.display().to_string(),
                         "time_series_type": p.time_series_type.as_str(),
                         "value_type": p.value_slug,
                         "time_reference": p.reference,
@@ -464,19 +520,77 @@ fn write_parquet(
         },
         || {
             for partition in &report.partitions {
-                println!(
+                eprintln!(
                     "exported {} ({} series over {} arrays, {} rows)",
                     partition.stem, partition.series, partition.arrays, partition.rows
                 );
             }
-            println!(
+            eprintln!(
                 "{}",
-                color::header(&format!(
+                color::header_err(&format!(
                     "Exported {series} time series as {} distinct arrays in {} partitions \
                      under {}.",
                     report.arrays(),
                     report.partitions.len(),
                     dir.display()
+                ))
+            );
+        },
+    )
+}
+
+/// `-f sqlite`: the Parquet layout, one table per file, added to `db` under
+/// `prefix`.
+///
+/// An empty selection writes nothing and does not create the database.
+fn write_sqlite(
+    store: &infrastore_core::Store,
+    filter: infrastore_core::ListFilter,
+    range: Option<infrastore_core::TimeRange>,
+    db: &Path,
+    prefix: &str,
+    include_derived: bool,
+    format: Format,
+) -> Result<(), String> {
+    let written =
+        infrastore_tabular::sqlite::export_store(store, filter, range, db, prefix, include_derived)
+            .map_err(|e| format!("writing to {}: {e}", db.display()))?;
+    let series: usize = written.iter().map(|t| t.series).sum();
+    output::report(
+        format,
+        || {
+            json!({
+                "exported": series,
+                "db": db.display().to_string(),
+                "partitions": written
+                    .iter()
+                    .map(|t| json!({
+                        "values_table": t.values_table,
+                        "series_table": t.series_table,
+                        "arrays_table": t.arrays_table,
+                        "time_series_type": t.time_series_type.as_str(),
+                        "value_type": t.value_slug,
+                        "time_reference": t.reference,
+                        "arrays": t.arrays,
+                        "series": t.series,
+                        "rows": t.rows,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        },
+        || {
+            for t in &written {
+                eprintln!(
+                    "exported {} / {} / {} ({} series over {} arrays, {} rows)",
+                    t.values_table, t.series_table, t.arrays_table, t.series, t.arrays, t.rows
+                );
+            }
+            eprintln!(
+                "{}",
+                color::header_err(&format!(
+                    "Exported {series} time series in {} partitions into {}.",
+                    written.len(),
+                    db.display()
                 ))
             );
         },

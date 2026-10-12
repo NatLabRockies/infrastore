@@ -72,10 +72,13 @@ pub const COMPONENT_FIELD: &str = "component_field";
 /// The opaque package-owned payload, verbatim.
 pub const APPLICATION_DATA: &str = "application_data";
 
-/// The catalog row's id. Written so a file names the row it came from, and
-/// **ignored on import**: no `add_*` accepts an id, because "never reissued" is
+/// In a series table, the catalog row's id. Written so a file names the row it
+/// came from, and **ignored on import**: no `add_*` accepts an id, because "never reissued" is
 /// a guarantee of `AUTOINCREMENT` and a caller free to name one could re-file a
 /// retired id.
+///
+/// In an arrays table the same column name is that table's own key — what
+/// [`ARRAY_ID`][crate::layout::ARRAY_ID] refers to.
 pub const ID: &str = "id";
 /// The owning component's (or attribute's) id.
 pub const OWNER_ID: &str = "owner_id";
@@ -95,7 +98,7 @@ pub const FEATURES: &str = "features";
 // horizon travel as columns of their own.
 
 /// The first instant a regular series or a forecast is anchored at. Also inside
-/// the `time_axis`, and here as a real column so a reader need not parse one.
+/// the array's `time_axis`, and here as a real column so a reader need not parse one.
 pub const INITIAL_TIMESTAMP: &str = "initial_timestamp";
 /// How many steps a `SingleTimeSeries` holds. Likewise.
 pub const LENGTH: &str = "length";

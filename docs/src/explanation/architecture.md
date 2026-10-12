@@ -20,6 +20,7 @@ flowchart TB
     JL["InfraStore.jl<br/>(Julia package)"]
     PROTO["infrastore-proto<br/>protobuf + tonic"]
     PARQ["infrastore-parquet<br/>Parquet export/import"]
+    TAB["infrastore-tabular<br/>export layout + SQLite"]
 
     subgraph core["infrastore-core"]
         STORE["Store"]
@@ -41,7 +42,9 @@ flowchart TB
     JL -->|"ccall"| FFI
     SRV --> PROTO
     CLI --> PARQ
-    PARQ --> STORE
+    CLI --> TAB
+    PARQ --> TAB
+    TAB --> STORE
 
     style STORE fill:#28a745,color:#fff
     style META fill:#28a745,color:#fff
@@ -68,6 +71,7 @@ flowchart TB
 | `infrastore-ffi`     | A `extern "C"` cdylib with an opaque-handle API over `Store`                   |
 | `InfraStore.jl`      | A Julia package that `ccall`s into the FFI cdylib                              |
 | `infrastore-cli`     | The `infrastore` binary: read+write access to an on-disk store from a terminal |
+| `infrastore-tabular` | The Arrow-free normalized export layout, and SQLite tables as its container    |
 | `infrastore-parquet` | Partitioned Parquet export/import, linked only by the CLI (`parquet` feature)  |
 | `infrastore-bench`   | The `infrastore-bench` binary: ingestion and simulation-read benchmarks        |
 

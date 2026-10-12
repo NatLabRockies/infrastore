@@ -4265,7 +4265,9 @@ unsafe fn assoc_rows_from_json<T: serde::de::DeserializeOwned>(
 /// # Safety
 ///
 /// Each of `out_added` and `out_ids` must be null or valid for writing one
-/// value of its type.
+/// value of its type. A caller whose count is not otherwise known to its own
+/// caller must already have refused `out_ids` without `out_added`, which would
+/// hand back a buffer with no length to free it by.
 unsafe fn write_assigned_ids(ids: Vec<i64>, out_added: *mut u64, out_ids: *mut *mut i64) {
     let len = ids.len() as u64;
     if !out_added.is_null() {
@@ -4344,6 +4346,9 @@ unsafe fn assoc_add_many<T: serde::de::DeserializeOwned>(
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
+    // `out_ids` without `out_added` is allowed here: the write is
+    // all-or-nothing with one id per input row, so the caller already knows
+    // the buffer's length.
     let assocs: Vec<T> = ffi_try!(code unsafe { assoc_rows_from_json(associations_json) });
     let ids = ffi_try!(add(&mut store.inner, assocs));
     unsafe { write_assigned_ids(ids, out_added, out_ids) };
@@ -4460,7 +4465,9 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
 /// `out_added` receives the number inserted and `out_ids` the catalog id of
 /// each, in input order — the ids are the durable handles this write creates,
 /// so returning only a count would leave a caller re-listing the table to find
-/// what it just wrote. Either may be null to skip it.
+/// what it just wrote. Either may be null to skip it: the write is
+/// all-or-nothing with one id per input row, so the count is always the number
+/// of rows passed.
 ///
 /// # Safety
 ///
@@ -4468,8 +4475,9 @@ pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_association
 /// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
 /// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
 /// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
-/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
-/// null there, which needs no release.
+/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. A caller that skipped
+/// `out_added` releases with the number of rows it passed, which is the same count. An
+/// empty batch writes null there, which needs no release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_supplemental_attribute_associations(
     handle: *mut InfraStoreHandle,
@@ -4797,8 +4805,9 @@ pub unsafe extern "C" fn infrastore_store_add_parent_child_association(
 /// terminated UTF-8 string. `out_added`, when non-null, must be valid for writing one
 /// `uint64_t`. `out_ids`, when non-null, must be valid for writing one pointer; on
 /// `INFRASTORE_OK` it receives an array of `*out_added` ids that the caller owns and must
-/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. An empty batch writes
-/// null there, which needs no release.
+/// release with `infrastore_buffer_free_i64(*out_ids, *out_added)`. A caller that skipped
+/// `out_added` releases with the number of rows it passed, which is the same count. An
+/// empty batch writes null there, which needs no release.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_store_add_parent_child_associations(
     handle: *mut InfraStoreHandle,
@@ -5241,6 +5250,151 @@ pub unsafe extern "C" fn infrastore_store_import_supplemental_attribute_associat
             .import_supplemental_attribute_associations_openapi(json)
     );
     unsafe { write_opt(out_added, n as u64) };
+    INFRASTORE_OK
+}
+
+// ---- SQLite table export / import ------------------------------------------
+
+/// Export the series `filter` selects as tables in the SQLite database at
+/// `path` -- the normalized layout `infrastore export -f sqlite` writes, one
+/// `<prefix><base>_values` / `<prefix><base>_series` pair per
+/// `(time_series_type, value type, time_reference)` partition.
+///
+/// A null `filter` exports the whole store. With `has_time_range`, each series
+/// is clipped to `start_ms` / `end_ms` (Unix milliseconds, spelled by
+/// `time_range_zoneless`) as `infrastore_store_read_by_ids_range` clips.
+/// `table_prefix` may be null for none. The database is created if absent, and
+/// tables are only ever added: a name already taken, or an empty series in the
+/// selection, fails before anything is written. The values are streamed, a
+/// bounded batch at a time and each distinct array once, so a store far larger
+/// than memory exports in a few hundred megabytes.
+///
+/// A `DeterministicSingleTimeSeries` is left out unless `include_derived`: it
+/// repeats its source `SingleTimeSeries`' values, and
+/// `infrastore_store_import_sqlite` refuses a database holding one. A filter
+/// naming the type without the flag is `INFRASTORE_ERR_INVALID_PARAMETER`.
+///
+/// `*out_json` receives a JSON array with one object per partition written:
+/// `values_table`, `series_table`, `arrays_table`, `time_series_type`,
+/// `value_type`, `time_reference`, `arrays`, `series` and `rows`.
+///
+/// # Safety
+///
+/// `handle` must reference a live store. `filter` must be null or point to a
+/// valid [`InfraStoreFilter`] whose borrowed strings stay readable for the
+/// duration of the call. `path` must be a valid, null-terminated UTF-8 string
+/// and `table_prefix` null or one.
+/// `out_json` must be valid for writing one pointer and `out_len` for writing
+/// one `u64`; on success `*out_json` must be released exactly once with
+/// `infrastore_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_export_sqlite(
+    handle: *const InfraStoreHandle,
+    filter: *const InfraStoreFilter,
+    has_time_range: bool,
+    time_range_zoneless: bool,
+    start_ms: i64,
+    end_ms: i64,
+    path: *const c_char,
+    table_prefix: *const c_char,
+    include_derived: bool,
+    out_json: *mut *mut c_char,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    require_nonnull!(out_json, out_len);
+    let filter = ffi_try!(code unsafe { build_filter(filter) });
+    let range =
+        ffi_try!(code build_time_range(has_time_range, time_range_zoneless, start_ms, end_ms));
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "path is null or not UTF-8") });
+    let prefix =
+        ffi_try!(code unsafe { cstr_to_optional_string(table_prefix) }).unwrap_or_default();
+    let written = ffi_try!(infrastore_tabular::sqlite::export_store(
+        &store.inner,
+        filter,
+        range,
+        &path,
+        &prefix,
+        include_derived
+    ));
+    let rows: Vec<serde_json::Value> = written
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "values_table": t.values_table,
+                "series_table": t.series_table,
+                "arrays_table": t.arrays_table,
+                "time_series_type": t.time_series_type.as_str(),
+                "value_type": t.value_slug,
+                "time_reference": t.reference,
+                "arrays": t.arrays,
+                "series": t.series,
+                "rows": t.rows,
+            })
+        })
+        .collect();
+    unsafe {
+        write_owned_str_out(
+            serde_json::Value::Array(rows).to_string(),
+            out_json,
+            out_len,
+        )
+    }
+}
+
+/// Add every series in the tables `infrastore_store_export_sqlite` (or
+/// `infrastore export -f sqlite`) wrote to the database at `path` under
+/// `table_prefix` (null for none), in one all-or-nothing transaction across the
+/// whole database.
+///
+/// Ids are always assigned fresh; the ones the tables recorded are not reused.
+/// Each array is checked against the `data_hash` its rows carry unless
+/// `skip_checksum`, which is for values edited in place. When non-null,
+/// `out_added` receives the number of series added and `out_ids` their catalog
+/// ids in the order read.
+///
+/// # Safety
+///
+/// `handle` must be a live read-write store handle, `path` a valid,
+/// null-terminated UTF-8 string and `table_prefix` null or one. `out_added` and
+/// `out_ids` must each be null or valid for writing one value, and a non-null
+/// `out_ids` requires a non-null `out_added` (`INFRASTORE_ERR_NULL_POINTER`
+/// otherwise, with nothing imported), since the count is the only length the
+/// buffer has -- unlike the bulk association adds, whose caller knows how many
+/// rows it passed. On success a non-null `*out_ids` must be released exactly once with
+/// `infrastore_buffer_free_i64(*out_ids, *out_added)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_import_sqlite(
+    handle: *mut InfraStoreHandle,
+    path: *const c_char,
+    table_prefix: *const c_char,
+    skip_checksum: bool,
+    out_added: *mut u64,
+    out_ids: *mut *mut i64,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    // The count is the only length the id buffer has, so ids without it
+    // could be neither read nor released. Refused before anything is written.
+    if !out_ids.is_null() {
+        require_nonnull!(out_added);
+    }
+    let path = ffi_try!(code unsafe { cstr_to_path(path, "path is null or not UTF-8") });
+    let prefix =
+        ffi_try!(code unsafe { cstr_to_optional_string(table_prefix) }).unwrap_or_default();
+    let options = infrastore_tabular::ImportOptions {
+        skip_checksum,
+        ..Default::default()
+    };
+    let ids = ffi_try!(infrastore_tabular::sqlite::import_store(
+        &mut store.inner,
+        &path,
+        &prefix,
+        &options
+    ));
+    let ids = ids.into_iter().map(|id| id.get()).collect();
+    unsafe { write_assigned_ids(ids, out_added, out_ids) };
     INFRASTORE_OK
 }
 
@@ -7059,6 +7213,32 @@ mod abi_tests {
         let rows = rows.as_array().expect("a JSON array of rows");
         assert_eq!(rows.len(), 1, "expected one row named {name}: {json}");
         rows[0]["id"].as_i64().expect("a served row carries its id")
+    }
+
+    /// The bulk association adds hand back one id per input row, so a caller
+    /// may take the ids and skip the count: it frees with the count it passed.
+    #[test]
+    fn a_bulk_association_add_returns_ids_without_a_count() {
+        let store = abi_create_in_memory();
+        let attached = c"[{\"component_id\":1,\"component_type\":\"Generator\",\
+                          \"attribute_id\":7,\"attribute_type\":\"Outage\"}]";
+        let linked = c"[{\"parent_id\":1,\"parent_type\":\"Bus\",\
+                        \"child_id\":2,\"child_type\":\"Generator\"}]";
+        for (add, json) in [
+            (
+                infrastore_store_add_supplemental_attribute_associations
+                    as unsafe extern "C" fn(_, _, _, _) -> i32,
+                attached,
+            ),
+            (infrastore_store_add_parent_child_associations, linked),
+        ] {
+            let mut ids: *mut i64 = ptr::null_mut();
+            let rc = unsafe { add(store, json.as_ptr(), ptr::null_mut(), &mut ids) };
+            assert_eq!(rc, INFRASTORE_OK, "{}", last_error());
+            assert!(!ids.is_null());
+            unsafe { infrastore_buffer_free_i64(ids, 1) };
+        }
+        unsafe { infrastore_store_free(store) };
     }
 
     fn abi_create_in_memory() -> *mut InfraStoreHandle {
@@ -9451,6 +9631,102 @@ mod abi_tests {
             infrastore_store_free(source);
             infrastore_store_free(target);
             infrastore_store_free(empty);
+        }
+    }
+
+    #[test]
+    fn sqlite_tables_round_trip_across_the_abi() {
+        let source = abi_create_in_memory();
+        abi_add_f64(source, 7, "load", &[1.0, 2.0, 3.0]);
+        let dir = tempfile::tempdir().unwrap();
+        let db = CString::new(dir.path().join("out.db").to_str().unwrap()).unwrap();
+        let prefix = CString::new("run1_").unwrap();
+
+        let (mut json, mut json_len) = (ptr::null_mut(), 0u64);
+        assert_eq!(
+            unsafe {
+                infrastore_store_export_sqlite(
+                    source,
+                    ptr::null(),
+                    false,
+                    false,
+                    0,
+                    0,
+                    db.as_ptr(),
+                    prefix.as_ptr(),
+                    false,
+                    &mut json,
+                    &mut json_len,
+                )
+            },
+            INFRASTORE_OK,
+            "export failed: {}",
+            last_error()
+        );
+        let report = unsafe { CStr::from_ptr(json) }.to_str().unwrap();
+        assert!(report.contains("\"series\":1"), "{report}");
+        assert!(report.contains("run1_SingleTimeSeries_"), "{report}");
+
+        // The prefix scopes the import: nothing was exported without one.
+        let target = abi_create_in_memory();
+        assert_ne!(
+            unsafe {
+                infrastore_store_import_sqlite(
+                    target,
+                    db.as_ptr(),
+                    ptr::null(),
+                    false,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            INFRASTORE_OK
+        );
+        let (mut added, mut ids) = (0u64, ptr::null_mut());
+        // Ids without a count could not be freed, so that is refused before
+        // anything is imported (the import below would otherwise be a duplicate).
+        assert_eq!(
+            unsafe {
+                infrastore_store_import_sqlite(
+                    target,
+                    db.as_ptr(),
+                    prefix.as_ptr(),
+                    false,
+                    ptr::null_mut(),
+                    &mut ids,
+                )
+            },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        assert!(ids.is_null());
+        assert_eq!(
+            unsafe {
+                infrastore_store_import_sqlite(
+                    target,
+                    db.as_ptr(),
+                    prefix.as_ptr(),
+                    false,
+                    &mut added,
+                    &mut ids,
+                )
+            },
+            INFRASTORE_OK,
+            "import failed: {}",
+            last_error()
+        );
+        assert_eq!(added, 1);
+        let mut present = false;
+        assert_eq!(
+            unsafe { infrastore_store_association_exists(target, *ids, &mut present) },
+            INFRASTORE_OK
+        );
+        assert!(present);
+
+        unsafe {
+            infrastore_buffer_free_i64(ids, added);
+            infrastore_string_free(json);
+            infrastore_store_free(source);
+            infrastore_store_free(target);
         }
     }
 }

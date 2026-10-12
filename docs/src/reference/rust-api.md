@@ -329,6 +329,12 @@ impl Store {
     pub fn verify_integrity(&self) -> Result<IntegrityReport>;
     pub fn flush(&mut self) -> Result<()>;
 
+    // Give back what reads have cached. The HDF5 backend keeps every packed
+    // dataset it has read open with its inflated chunks, which suits a sweep
+    // over the same datasets and not a single pass over a store larger than
+    // memory; a bulk export calls this between batches. Rust-only.
+    pub fn release_read_caches(&self);
+
     // Cross-operation transactions: the operations between a begin and its
     // matching commit either all take effect or none do. Removals are reversible
     // only inside one -- outside, a freed array is gone. Calls nest (SQLite

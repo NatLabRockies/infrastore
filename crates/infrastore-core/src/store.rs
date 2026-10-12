@@ -4256,6 +4256,21 @@ impl Store {
         self.get_array(hash, element_type.physical_dtype())
     }
 
+    /// Give back the memory reads have cached, without changing what any later
+    /// read returns.
+    ///
+    /// The HDF5 backend keeps every packed dataset it has read open, and each
+    /// open dataset holds its decompressed chunks (up to 64 MiB) so a repeated
+    /// read does not inflate them again. That is right for a simulation
+    /// sweeping the same datasets every timestep and wrong for a single pass
+    /// over a store far larger than memory, which would end with most of the
+    /// file resident. A caller making such a pass -- a bulk export -- calls this
+    /// between batches; the cost is that the next read of a dataset reopens it
+    /// and inflates what it touches afresh. A no-op for an in-memory store.
+    pub fn release_read_caches(&self) {
+        self.backend.release_read_caches();
+    }
+
     /// Where a content hash's array physically lives in the backing file.
     ///
     /// Complements [`Self::get_array_by_hash`] for the case where the caller
