@@ -490,8 +490,11 @@ the freed space back:
    the catalog is then read for the live set — the catalog, not the file, is what makes an array or
    a time axis live.
 2. Every live array is written into a fresh file at `<store>.h5.repack`, sibling to the original so
-   the two share a filesystem. Layouts are planned from scratch: packed pools are created at exactly
-   their cohort width rather than the growth-sized width an incremental write reserves.
+   the two share a filesystem. Layouts are planned from scratch: each packed pool is written as
+   whole blocks through the same block writer a bulk add uses, so its datasets are sized to exactly
+   the cohort rather than the growth width an incremental write reserves, and every chunk is written
+   once. A pool wider than the write buffer's byte budget (128 MiB) spills into several datasets, as
+   a bulk add of the same arrays would.
 3. The store's HDF5 handle is closed, the temp file is renamed over the original, and the store
    reopens on the result. A crash before the rename leaves the original untouched plus a stray
    `.repack` file, which the next compaction deletes.

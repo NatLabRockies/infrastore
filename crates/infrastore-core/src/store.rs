@@ -16,6 +16,7 @@ use crate::metadata::{
     SupplementalAttributeSummaryRow, TypeMatch, hash_is_referenced_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
+use crate::storage::common::{MAX_PENDING_BYTES, element_block_bytes};
 use crate::storage::{
     ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
     MemoryBackend, PackGroup, StorageBackend, check_dtype, slice_axis, write_window_block,
@@ -5806,33 +5807,9 @@ impl Store {
         // Same bet as the write path: a pool only pays once several arrays
         // share it, and here the whole store is in hand, so cohort sizes are
         // exact rather than batch-local.
-        let mut cohort: HashMap<PoolKey, usize> = HashMap::new();
-        for plan in plans.values().filter(|p| p.layout.is_packed()) {
-            *cohort.entry(plan.pool.clone()).or_default() += 1;
-        }
-        // Create each pool at exactly its cohort width before writing anything
-        // into it. Left to grow on demand, a pool reserves room for a thousand
-        // columns and pays 64 bytes of hash companion for every unfilled one —
-        // enough that rewriting a bulk-written store would make the file bigger
-        // instead of smaller.
-        for (pool, &count) in &cohort {
-            // An irregular cohort of one is written standalone below, so it
-            // needs no pool at all.
-            if matches!(pool.3, PackGroup::Irregular(_)) && count < 2 {
-                continue;
-            }
-            let mut remaining = count;
-            while remaining > 0 {
-                let created =
-                    backend.reserve_pack_group(pool.0, &pool.1, pool.2, pool.3, remaining)?;
-                // A pool that cannot hold a single column would loop forever;
-                // `resolve_dataset_cols` clamps to at least 1, so this only
-                // guards against a future change to that floor.
-                if created == 0 {
-                    break;
-                }
-                remaining = remaining.saturating_sub(created);
-            }
+        let mut pools: HashMap<PoolKey, Vec<[u8; 32]>> = HashMap::new();
+        for (hash, plan) in plans.iter().filter(|(_, p)| p.layout.is_packed()) {
+            pools.entry(plan.pool.clone()).or_default().push(*hash);
         }
         // The time axes travel with the rows that sit on them: they are
         // content-addressed data in this same file, and a rewrite that dropped
@@ -5845,14 +5822,47 @@ impl Store {
         for (hash, plan) in &plans {
             let mut layout = plan.layout;
             if matches!(plan.pool.3, PackGroup::Irregular(_))
-                && cohort.get(&plan.pool).copied().unwrap_or(0) < 2
+                && pools.get(&plan.pool).is_some_and(|cohort| cohort.len() < 2)
             {
+                // An irregular cohort of one is standalone, as the write path
+                // would have made it; its pool entry is dropped below.
+                pools.remove(&plan.pool);
                 layout = ArrayLayout::Standalone;
+            }
+            if layout.is_packed() {
+                continue;
             }
             let element_type = self.metadata.element_type_for_hash(hash)?;
             let array = self.get_array(hash, element_type.physical_dtype())?;
-            // Every pool was already reserved at its exact cohort width above.
             backend.put_array(hash, &array, plan.pool.3, layout)?;
+        }
+        // Each pool is written in whole blocks through the block writer every
+        // bulk add uses, which sizes a fresh dataset to each block and fills
+        // every chunk with one interleaved write. Filling a pre-reserved pool
+        // one column at a time instead touches every timestamp-row chunk per
+        // column, and once the pool outgrows the chunk cache each column
+        // evicts and re-reads all of them: a 96 MiB pool took minutes where a
+        // 48 MiB one took a second. A block is capped at the same byte budget
+        // an open transaction's buffer is held to, so a save holds a bounded
+        // slice of the store in memory, not the whole of it.
+        for ((dtype, element_shape, length, group), mut hashes) in pools {
+            // In source-column order, so a block of an on-disk source is one
+            // dense hyperslab read and each source chunk is read once per
+            // block instead of once per column. An in-memory source has no
+            // order to keep and sorts as it was.
+            hashes.sort_by_cached_key(|hash| match self.backend.locate(hash) {
+                Ok(ArrayLocation::Packed { dataset, column }) => (dataset, column),
+                _ => (String::new(), 0),
+            });
+            let per_column = length
+                .saturating_mul(element_block_bytes(dtype, &element_shape))
+                .max(1);
+            let width = (MAX_PENDING_BYTES / per_column).max(1);
+            for block in hashes.chunks(width) {
+                let arrays = self.read_arrays(block, &vec![dtype; block.len()])?;
+                let refs: Vec<&TypedArray> = arrays.iter().collect();
+                backend.put_packed_block(block, &refs, group)?;
+            }
         }
         Ok(())
     }

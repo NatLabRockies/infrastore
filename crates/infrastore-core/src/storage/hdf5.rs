@@ -652,38 +652,6 @@ impl Hdf5Backend {
         self.inner.lock().expect("mutex poisoned").compression
     }
 
-    /// Pre-create a packed pool wide enough for up to `cols` columns, returning
-    /// the width it actually got (the per-chunk byte budget caps it, so a large
-    /// request may need several calls).
-    ///
-    /// A pool created on demand by the single-array write path is sized for
-    /// growth — it reserves [`DEFAULT_COLS_PER_DATASET`](super::common::DEFAULT_COLS_PER_DATASET)
-    /// columns, and its hash companion costs 64 bytes per column whether or not
-    /// the slot is ever filled. A caller that knows the whole cohort up front
-    /// (rewriting a store: [`crate::Store::compact`] and
-    /// [`crate::Store::persist_to`]) uses this to size each pool exactly, the
-    /// same bet the bulk-add path makes. Otherwise a rewrite of a
-    /// bulk-written store would *grow* the file.
-    pub(crate) fn reserve_pack_group(
-        &mut self,
-        dtype: Dtype,
-        element_shape: &[usize],
-        length: usize,
-        group: PackGroup,
-        cols: usize,
-    ) -> Result<usize> {
-        let inner = self.inner.get_mut().expect("mutex poisoned");
-        let key = (dtype, element_shape.to_vec(), length, group);
-        let spill_count = inner.dataset_groups.get(&key).map_or(0, Vec::len);
-        let base = dataset_base_name(dtype, element_shape, length, group);
-        let name = spill_name(&base, spill_count);
-        inner.create_packed_dataset(&name, dtype, element_shape, length, group, Some(cols))?;
-        Ok(inner
-            .datasets
-            .get(&name)
-            .map_or(0, |state| state.columns.len()))
-    }
-
     #[tracing::instrument(skip(self))]
     fn rebuild_index(&mut self) -> Result<()> {
         let inner = self.inner.get_mut().expect("mutex poisoned");
