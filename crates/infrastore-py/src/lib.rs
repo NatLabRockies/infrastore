@@ -3611,8 +3611,16 @@ impl PyStore {
     /// default. A per-group block still stops at the width one chunk row holds,
     /// which no budget raises. Setting it below what an open transaction has
     /// already buffered writes those blocks out immediately. Zero raises
-    /// `InvalidParameterError`. An in-memory store records it without acting on
-    /// it, having no datasets to size.
+    /// `InvalidParameterError`. On an in-memory store it still bounds what the
+    /// buffer holds but shapes nothing, that backend having no datasets to size.
+    ///
+    /// The same figure bounds a rewrite -- `persist_to`, `persist_arrays_to`,
+    /// `compact` -- which reads and writes each packed pool in blocks of at most
+    /// this many bytes, so a pool wider than the budget lands as several
+    /// datasets rather than one. A block is never narrower than one column, so
+    /// a single column larger than the budget is still read and written whole.
+    /// All of this holds for an in-memory store too: its `persist_to` is where
+    /// the budget first sizes a dataset.
     #[getter]
     fn write_buffer_bytes(&self) -> PyResult<u64> {
         Ok(self.store()?.write_buffer_bytes() as u64)

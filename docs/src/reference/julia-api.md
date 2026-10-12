@@ -1049,6 +1049,10 @@ set_write_buffer_bytes!(store, bytes) -> Nothing
                                   # budget at all. Belongs to the handle, not the artifact (nothing
                                   # is persisted). Lowering it mid-transaction writes out what the
                                   # buffer holds beyond the new figure; 0 throws ArgumentError.
+                                  # The same figure bounds a rewrite: persist!, persist_arrays! and
+                                  # compact! move each packed pool in blocks of at most this many
+                                  # bytes, so a wider pool lands as several datasets. A column
+                                  # larger than the budget is still moved whole.
 clear!(store; owner_id=nothing, owner_category=nothing) -> Nothing
                                   # both `nothing`: remove every series in the store.
                                   # Scope to one owner by passing BOTH keywords — they identify the

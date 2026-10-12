@@ -160,7 +160,10 @@ it how wide a dataset a run of single adds writes: raise it and the loop produce
 `add_time_series_bulk` of the same series produces, which applies no budget at all. It belongs to
 this `Store` object rather than the artifact (nothing is persisted), lowering it mid-transaction
 writes out what the buffer already holds beyond the new figure, and `0` raises
-`InvalidParameterError`. See
+`InvalidParameterError`. The same figure bounds a rewrite: `persist_to`, `persist_arrays_to` and
+`compact` read and write each packed pool in blocks of at most this many bytes, so a pool wider than
+the budget lands as several datasets — or of one whole column, where a single column exceeds the
+budget. See
 [how wide a dataset a span writes](../guides/python.md#how-wide-a-dataset-a-span-writes).
 
 ### Methods

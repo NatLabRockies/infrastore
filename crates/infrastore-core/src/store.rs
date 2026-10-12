@@ -16,6 +16,7 @@ use crate::metadata::{
     SupplementalAttributeSummaryRow, TypeMatch, hash_is_referenced_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
+use crate::storage::common::element_block_bytes;
 use crate::storage::{
     ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
     MemoryBackend, PackGroup, StorageBackend, check_dtype, slice_axis, write_window_block,
@@ -2375,6 +2376,13 @@ impl Store {
     /// On an in-memory store the budget still bounds what the buffer holds, but
     /// it shapes nothing: that backend has no datasets to size.
     ///
+    /// The same figure bounds a rewrite — [`Self::persist_to`],
+    /// [`Self::persist_arrays_to`], [`Self::compact`] — which reads and writes
+    /// each packed pool in blocks of at most this many bytes, so a pool wider
+    /// than the budget lands as several datasets rather than one. A block is
+    /// never narrower than one column, so a single column larger than the
+    /// budget is still read and written whole.
+    ///
     /// # Errors
     ///
     /// [`TimeSeriesError::InvalidParameter`] if `bytes` is zero — a pool's
@@ -4284,13 +4292,15 @@ impl Store {
     /// read returns.
     ///
     /// The HDF5 backend keeps every packed dataset it has read open, and each
-    /// open dataset holds its decompressed chunks (up to 64 MiB) so a repeated
-    /// read does not inflate them again. That is right for a simulation
-    /// sweeping the same datasets every timestep and wrong for a single pass
-    /// over a store far larger than memory, which would end with most of the
-    /// file resident. A caller making such a pass -- a bulk export -- calls this
-    /// between batches; the cost is that the next read of a dataset reopens it
-    /// and inflates what it touches afresh. A no-op for an in-memory store.
+    /// open dataset holds the decompressed chunks it last touched (a few
+    /// MiB, sized for a sweep's working set of one chunk per dataset) so a
+    /// repeated read does not inflate them again. That is right for a
+    /// simulation sweeping the same datasets every timestep and wrong for a
+    /// single pass over a store with far more datasets than memory, which
+    /// would end with a cache per dataset resident. A caller making such a
+    /// pass -- a bulk export -- calls this between batches; the cost is that
+    /// the next read of a dataset reopens it and inflates what it touches
+    /// afresh. A no-op for an in-memory store.
     pub fn release_read_caches(&self) {
         self.backend.release_read_caches();
     }
@@ -5856,33 +5866,9 @@ impl Store {
         // Same bet as the write path: a pool only pays once several arrays
         // share it, and here the whole store is in hand, so cohort sizes are
         // exact rather than batch-local.
-        let mut cohort: HashMap<PoolKey, usize> = HashMap::new();
-        for plan in plans.values().filter(|p| p.layout.is_packed()) {
-            *cohort.entry(plan.pool.clone()).or_default() += 1;
-        }
-        // Create each pool at exactly its cohort width before writing anything
-        // into it. Left to grow on demand, a pool reserves room for a thousand
-        // columns and pays 64 bytes of hash companion for every unfilled one —
-        // enough that rewriting a bulk-written store would make the file bigger
-        // instead of smaller.
-        for (pool, &count) in &cohort {
-            // An irregular cohort of one is written standalone below, so it
-            // needs no pool at all.
-            if matches!(pool.3, PackGroup::Irregular(_)) && count < 2 {
-                continue;
-            }
-            let mut remaining = count;
-            while remaining > 0 {
-                let created =
-                    backend.reserve_pack_group(pool.0, &pool.1, pool.2, pool.3, remaining)?;
-                // A pool that cannot hold a single column would loop forever;
-                // `resolve_dataset_cols` clamps to at least 1, so this only
-                // guards against a future change to that floor.
-                if created == 0 {
-                    break;
-                }
-                remaining = remaining.saturating_sub(created);
-            }
+        let mut pools: HashMap<PoolKey, Vec<[u8; 32]>> = HashMap::new();
+        for (hash, plan) in plans.iter().filter(|(_, p)| p.layout.is_packed()) {
+            pools.entry(plan.pool.clone()).or_default().push(*hash);
         }
         // The time axes travel with the rows that sit on them: they are
         // content-addressed data in this same file, and a rewrite that dropped
@@ -5892,17 +5878,62 @@ impl Store {
         for hash in &axes {
             backend.put_timestamps(hash, &self.backend.get_timestamps(hash)?)?;
         }
+        // An irregular cohort of one is standalone, as the write path would
+        // have made it. Decided here, before any array is written: a plan
+        // that is not packed can still carry a pool's key (a hash shared with
+        // a forecast), so dropping a pool while walking the plans would let
+        // such a plan take it from the one array still packed in it.
+        pools.retain(|key, cohort| !matches!(key.3, PackGroup::Irregular(_)) || cohort.len() > 1);
         for (hash, plan) in &plans {
-            let mut layout = plan.layout;
-            if matches!(plan.pool.3, PackGroup::Irregular(_))
-                && cohort.get(&plan.pool).copied().unwrap_or(0) < 2
-            {
-                layout = ArrayLayout::Standalone;
+            let layout = if plan.layout.is_packed() && !pools.contains_key(&plan.pool) {
+                ArrayLayout::Standalone
+            } else {
+                plan.layout
+            };
+            if layout.is_packed() {
+                continue;
             }
             let element_type = self.metadata.element_type_for_hash(hash)?;
             let array = self.get_array(hash, element_type.physical_dtype())?;
-            // Every pool was already reserved at its exact cohort width above.
             backend.put_array(hash, &array, plan.pool.3, layout)?;
+        }
+        // Each pool is written in whole blocks through the block writer every
+        // bulk add uses, which sizes a fresh dataset to each block and fills
+        // every chunk with one interleaved write. Filling a pre-reserved pool
+        // one column at a time instead touches every timestamp-row chunk per
+        // column, and once the pool outgrows the chunk cache each column
+        // evicts and re-reads all of them: a 96 MiB pool took minutes where a
+        // 48 MiB one took a second. A block is capped at the write buffer's
+        // byte budget — the one ceiling this handle already has on how much
+        // of the store it holds in memory at once — so a save holds a bounded
+        // slice of the store, not the whole of it. The bound floors at one
+        // column: a single column larger than the budget is moved whole,
+        // since a block cannot be narrower. A pool wider than the
+        // budget therefore lands as several datasets, where a bulk add, which
+        // is handed its whole cohort at once, splits only at the chunk budget.
+        let budget = self.write_buffer.max_bytes();
+        for ((dtype, element_shape, length, group), mut hashes) in pools {
+            // In source-column order, so a block of an on-disk source is one
+            // dense hyperslab read and each source chunk is read once per
+            // block instead of once per column. An in-memory source has no
+            // order to keep and sorts as it was.
+            hashes.sort_by_cached_key(|hash| match self.backend.locate(hash) {
+                Ok(ArrayLocation::Packed { dataset, column }) => (dataset, column),
+                _ => (String::new(), 0),
+            });
+            let per_column = length
+                .saturating_mul(element_block_bytes(dtype, &element_shape))
+                .max(1);
+            let width = (budget / per_column).max(1);
+            for block in hashes.chunks(width) {
+                let arrays = self.read_arrays(block, &vec![dtype; block.len()])?;
+                let refs: Vec<&TypedArray> = arrays.iter().collect();
+                backend.put_packed_block(block, &refs, group)?;
+            }
+            // An on-disk source keeps every dataset it read open, and with it
+            // that dataset's chunk cache, until the store closes; over many
+            // pools that is many caches, which the budget above never counted.
+            self.backend.release_read_caches();
         }
         Ok(())
     }

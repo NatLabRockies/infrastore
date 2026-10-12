@@ -74,14 +74,28 @@ pub(crate) const GENERATION_ATTR: &str = "catalog_generation";
 const COMPACT_MAX_BYTES: usize = 56 * 1024;
 
 /// Raw-data chunk cache applied file-wide (every dataset opened through the
-/// handle inherits it unless overridden). HDF5's default is 1 MiB / 521 slots
-/// — far too small for the packed layout, whose timestamp-major chunks run up
-/// to the 1 MiB budget × the series length per dataset: a repeated
-/// single-column read then evicts and re-inflates every chunk on each call.
-/// 64 MiB keeps a whole packed dataset's chunks resident. Slot count is a
-/// prime well above the chunks a dataset can hold.
+/// handle inherits it unless overridden), sized for the access pattern the
+/// packed layout is built for: a sweep by timestamp. A packed dataset is
+/// chunked one timestamp row (or a few, see `packed_chunk_rows`) across every
+/// column, so a `StaticReader` step or a per-step `read_by_ids_range` touches
+/// one chunk per dataset and the next step touches the same one until it
+/// crosses a chunk boundary. The working set is therefore one chunk per open
+/// dataset, and a chunk is at most [`MAX_CHUNK_BYTES`]. Four of those is the
+/// headroom: a chunk the cache could not hold (HDF5 refuses one larger than
+/// the cache) would be re-read and re-inflated on every step, so the cache has
+/// to clear the ceiling with slack, and it never needs much more.
+///
+/// The cache is per open dataset handle, and handles are kept for the file's
+/// lifetime (see `Inner::handles`), so this is also the resident footprint
+/// each touched dataset can reach. It is deliberately *not* sized to hold a
+/// whole pool: reading one column of a pool touches every chunk in it, and a
+/// loop of such reads only stays fast while the pool fits — a cliff, not a
+/// policy. A consumer sweeping a cohort uses the readers, which never need
+/// more than this.
+///
+/// Slot count is a prime well above the chunks a dataset can hold.
 const CHUNK_CACHE_NSLOTS: usize = 8209;
-const CHUNK_CACHE_NBYTES: usize = 64 << 20;
+const CHUNK_CACHE_NBYTES: usize = 4 * MAX_CHUNK_BYTES;
 const CHUNK_CACHE_W0: f64 = 0.75;
 
 /// How much a bulk packed read may over-fetch before it stops reading the
@@ -650,38 +664,6 @@ impl Hdf5Backend {
 
     pub fn compression(&self) -> Compression {
         self.inner.lock().expect("mutex poisoned").compression
-    }
-
-    /// Pre-create a packed pool wide enough for up to `cols` columns, returning
-    /// the width it actually got (the per-chunk byte budget caps it, so a large
-    /// request may need several calls).
-    ///
-    /// A pool created on demand by the single-array write path is sized for
-    /// growth — it reserves [`DEFAULT_COLS_PER_DATASET`](super::common::DEFAULT_COLS_PER_DATASET)
-    /// columns, and its hash companion costs 64 bytes per column whether or not
-    /// the slot is ever filled. A caller that knows the whole cohort up front
-    /// (rewriting a store: [`crate::Store::compact`] and
-    /// [`crate::Store::persist_to`]) uses this to size each pool exactly, the
-    /// same bet the bulk-add path makes. Otherwise a rewrite of a
-    /// bulk-written store would *grow* the file.
-    pub(crate) fn reserve_pack_group(
-        &mut self,
-        dtype: Dtype,
-        element_shape: &[usize],
-        length: usize,
-        group: PackGroup,
-        cols: usize,
-    ) -> Result<usize> {
-        let inner = self.inner.get_mut().expect("mutex poisoned");
-        let key = (dtype, element_shape.to_vec(), length, group);
-        let spill_count = inner.dataset_groups.get(&key).map_or(0, Vec::len);
-        let base = dataset_base_name(dtype, element_shape, length, group);
-        let name = spill_name(&base, spill_count);
-        inner.create_packed_dataset(&name, dtype, element_shape, length, group, Some(cols))?;
-        Ok(inner
-            .datasets
-            .get(&name)
-            .map_or(0, |state| state.columns.len()))
     }
 
     #[tracing::instrument(skip(self))]
