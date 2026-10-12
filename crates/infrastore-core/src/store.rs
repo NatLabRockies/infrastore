@@ -16,7 +16,7 @@ use crate::metadata::{
     SupplementalAttributeSummaryRow, TypeMatch, hash_is_referenced_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
-use crate::storage::common::{MAX_PENDING_BYTES, element_block_bytes};
+use crate::storage::common::element_block_bytes;
 use crate::storage::{
     ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
     MemoryBackend, PackGroup, StorageBackend, check_dtype, slice_axis, write_window_block,
@@ -2351,6 +2351,11 @@ impl Store {
     ///
     /// On an in-memory store the budget still bounds what the buffer holds, but
     /// it shapes nothing: that backend has no datasets to size.
+    ///
+    /// The same figure bounds a rewrite — [`Self::persist_to`],
+    /// [`Self::persist_arrays_to`], [`Self::compact`] — which reads and writes
+    /// each packed pool in blocks of at most this many bytes, so a pool wider
+    /// than the budget lands as several datasets rather than one.
     ///
     /// # Errors
     ///
@@ -5842,9 +5847,13 @@ impl Store {
         // one column at a time instead touches every timestamp-row chunk per
         // column, and once the pool outgrows the chunk cache each column
         // evicts and re-reads all of them: a 96 MiB pool took minutes where a
-        // 48 MiB one took a second. A block is capped at the same byte budget
-        // an open transaction's buffer is held to, so a save holds a bounded
-        // slice of the store in memory, not the whole of it.
+        // 48 MiB one took a second. A block is capped at the write buffer's
+        // byte budget — the one ceiling this handle already has on how much
+        // of the store it holds in memory at once — so a save holds a bounded
+        // slice of the store, not the whole of it. A pool wider than the
+        // budget therefore lands as several datasets, where a bulk add, which
+        // is handed its whole cohort at once, splits only at the chunk budget.
+        let budget = self.write_buffer.max_bytes();
         for ((dtype, element_shape, length, group), mut hashes) in pools {
             // In source-column order, so a block of an on-disk source is one
             // dense hyperslab read and each source chunk is read once per
@@ -5857,12 +5866,16 @@ impl Store {
             let per_column = length
                 .saturating_mul(element_block_bytes(dtype, &element_shape))
                 .max(1);
-            let width = (MAX_PENDING_BYTES / per_column).max(1);
+            let width = (budget / per_column).max(1);
             for block in hashes.chunks(width) {
                 let arrays = self.read_arrays(block, &vec![dtype; block.len()])?;
                 let refs: Vec<&TypedArray> = arrays.iter().collect();
                 backend.put_packed_block(block, &refs, group)?;
             }
+            // An on-disk source keeps every dataset it read open, and with it
+            // that dataset's chunk cache, until the store closes; over many
+            // pools that is many caches, which the budget above never counted.
+            self.backend.release_read_caches();
         }
         Ok(())
     }
