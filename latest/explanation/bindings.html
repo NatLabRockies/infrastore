@@ -311,10 +311,13 @@ mode can be added without touching the command handlers; today there is no remot
 <p>A file written by Python reads identically from Julia, Rust, or the server, because none of the
 bindings reimplement storage — they all funnel through the one core.</p>
 <h2 id="feature-coverage-varies-by-binding"><a class="header" href="#feature-coverage-varies-by-binding">Feature Coverage Varies by Binding</a></h2>
-<p>The bindings funnel through one core, and the surface is now broadly consistent. Both static series
-types are available everywhere (read+write, except the read-only gRPC server), and
-<a href="./time-series-types.html#forecasts">forecasts</a> read back across every interface. The remaining
-asymmetry is that the read-only gRPC server does not accept any writes:</p>
+<p>The bindings funnel through one core, and the main read/write surface is broadly consistent. All
+three static series types are available everywhere (read+write, except the read-only gRPC server),
+and <a href="./time-series-types.html#forecasts">forecasts</a> read back across every interface. Rust and Python
+also expose <code>has_exact_time_series</code>, a full-key existence probe that does not widen <code>Deterministic</code>
+to derived views, and a grouped temporal-axis count summary. Julia's <code>has_time_series</code> remains a
+requested-type filter query; it is not the same operation as the full-key probe. The read-only gRPC
+server does not accept writes:</p>
 <div class="table-wrapper"><table><thead><tr><th>Capability</th><th>Rust core</th><th>C ABI</th><th>Python</th><th>Julia</th><th>CLI</th><th>gRPC</th></tr></thead><tbody>
 <tr><td><code>SingleTimeSeries</code> r/w</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>read-only</td></tr>
 <tr><td><code>NonSequentialTimeSeries</code> r/w</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>read-only</td></tr>
@@ -323,6 +326,8 @@ asymmetry is that the read-only gRPC server does not accept any writes:</p>
 <tr><td>Create forecasts</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td></tr>
 <tr><td>Read forecast values</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
 <tr><td>Forecast metadata / counts</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>list/counts</td></tr>
+<tr><td>Exact-key existence</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td></tr>
+<tr><td>Grid-level count summary</td><td>✅</td><td>❌</td><td>✅</td><td>❌</td><td>❌</td><td>❌</td></tr>
 <tr><td>Readers (columnar sweep)</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td><code>grid</code></td><td>❌</td></tr>
 <tr><td>Association catalogs</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td>❌</td></tr>
 <tr><td>Store attributes</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td><td><code>store-attr</code></td><td>read-only</td></tr>
@@ -335,8 +340,8 @@ asymmetry is that the read-only gRPC server does not accept any writes:</p>
 <tr><td>Forecast windows as Arrow</td><td>❌</td><td>❌</td><td><code>Deterministic</code></td><td>❌</td><td>❌</td><td>❌</td></tr>
 </tbody></table>
 </div>
-<p>The only gap is by design: writes (including forecasts added through <code>add_time_series</code>) require
-local filesystem access, so the read-only gRPC server serves forecast reads but not writes.</p>
+<p>The gRPC write limitation is by design: writes (including forecasts added through <code>add_time_series</code>)
+require local filesystem access, so the read-only server serves forecast reads but not writes.</p>
 <p><strong><code>show()</code></strong> is Python-only for now: it is a REPL affordance, and the REPL each binding is used from
 already has one of its own — Julia has <code>Base.show</code>, and the CLI has <code>store-info</code> plus the <code>list</code>
 family. It composes existing catalog aggregate queries and adds no core API, so any binding that

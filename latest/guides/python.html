@@ -418,14 +418,23 @@ to what is there:</p>
     ),
 )
 </code></pre>
-<p><code>read_by_id</code> takes the other kind of slice: <code>start_time</code> plus a <code>len</code> of timesteps or a <code>count</code> of
-windows, <strong>checked</strong> rather than clipped, so an over-long request raises rather than quietly
-returning less.</p>
+<p><code>read_by_id</code> and <code>read_by_ids</code> also take a strict window rather than clipped bounds. <code>len</code> counts
+static timesteps and <code>count</code> counts forecast windows. The batch form applies that window to every id
+and preserves order and repeats. <code>start_time</code> is optional. Without it, each row starts at its own
+beginning, so mixed zoneless and aware series are allowed. A named off-grid start, a spelling
+mismatch, or a window longer than any selected series raises instead of quietly returning less.</p>
 <p>To read <strong>many whole series at once</strong> — e.g. loading everything for a plot — <code>read_by_ids</code> takes a
-list of ids and returns the typed series objects in the same order. Packed <code>SingleTimeSeries</code> are
-read in one decompress-once pass per dataset, which is much faster than a <code>read_by_id</code> each:</p>
-<pre><code class="language-python">series = store.read_by_ids(ids)
-window = store.read_by_ids_range(ids, (start, end))   # the same clip on every series
+list of ids and returns the typed series objects in the same order. Whole-series calls batch packed
+<code>SingleTimeSeries</code> in one decompress-once pass per dataset, which is much faster than a <code>read_by_id</code>
+each. A strict window still fetches metadata in one query, but currently reads each requested slice
+separately, including repeated ids. The whole-series performance guarantee does not apply to a
+windowed call:</p>
+<pre><code class="language-python">ids = [series_id]
+start = datetime(2024, 1, 1, 6, tzinfo=timezone.utc)
+end = datetime(2024, 1, 1, 12, tzinfo=timezone.utc)
+series = store.read_by_ids(ids)
+window = store.read_by_ids_range(ids, (start, end))
+strict = store.read_by_ids(ids, start_time=start, len=6)  # exactly six steps from start
 </code></pre>
 <h3 id="as-a-table"><a class="header" href="#as-a-table">As a table</a></h3>
 <p>A read hands back the values as a numpy array with the timeline beside it, not fused into it. When

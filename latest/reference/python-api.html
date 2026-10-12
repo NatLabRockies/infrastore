@@ -363,6 +363,22 @@ def list_metadata_by_ids(self, ids: list[int]) -&gt; list[dict]: ...
 # The listing addressed by id, in the order given; NotFoundError if any is stale.
 def association_exists(self, id: int) -&gt; bool: ...          # no row fetched
 
+def has_exact_time_series(
+    self,
+    *,
+    owner_id: int,
+    owner_category: OwnerCategory,
+    name: str,
+    time_series_type: TimeSeriesType | str,
+    resolution: timedelta | str | None,
+    interval: timedelta | str | None,
+    features: dict[str, int | float | bool | str],
+) -&gt; bool: ...
+# Tests the complete identity, including exact nullable resolution/interval and
+# the full feature map (`{}` means no features). None periods match catalog NULLs.
+# Unlike has_any_time_series, Deterministic does not include
+# DeterministicSingleTimeSeries.
+
 def transform_single_time_series(
     self,
     horizon: timedelta | str,
@@ -401,10 +417,19 @@ def read_by_ids_range(
 # clips on its own terms: the result begins at the breakpoint in force at `start`.
 
 def read_by_ids(
-    self, ids: list[int]
-) -&gt; list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
+    self,
+    ids: list[int],
+    *,
+    start_time: datetime | None = None,
+    len: int | None = None,
+    count: int | None = None,
+) -&gt; list[SingleTimeSeries | NonSequentialTimeSeries | PersistentTimeSeries
+          | Deterministic | Probabilistic | Scenarios]: ...
 # The same read addressed by catalog association id. Results follow the order the
-# ids are given, repeats included; NotFoundError if any id names no row.
+# ids are given, repeats included; NotFoundError if any id names no row. `len` or
+# `count` can be used without `start_time`, starting each row at its own first
+# value and spelling. A supplied start must be on every grid and share one
+# compatible zoned/zoneless spelling across the set.
 
 def read_by_id(
     self,
@@ -479,9 +504,9 @@ def list_owner_types(self, *, ...) -&gt; list[str]: ...   # distinct owner types
 # is remove_by_filter's.
 # `time_series_type` is a TimeSeriesType (or its member name as a str).
 # TimeSeriesType.Deterministic matches both Deterministic and
-# DeterministicSingleTimeSeries rows. Every filter surface takes it, including
+# DeterministicSingleTimeSeries rows in filter surfaces, including
 # has_any_time_series, get_resolutions, get_intervals, list_owner_ids, and
-# build_forecast_reader.
+# build_forecast_reader. `has_exact_time_series` checks one full stored key instead.
 def list_owner_ids(
     self,
     owner_category: OwnerCategory,
@@ -493,7 +518,8 @@ def list_owner_ids(
 
 def has_any_time_series(self, *, ...) -&gt; bool: ...
 # Existence without listing ("does this owner have any time series?"); same
-# keyword-only filter arguments as list_metadata. Index-probe fast.
+# keyword-only filter arguments as list_metadata. Type matching follows the
+# requested-type family rule, and features are a subset unless features_exact.
 def is_empty(self) -&gt; bool: ...
 # Whether the store holds nothing at all — no time series, no associations in
 # any catalog. One index probe per catalog table, so its cost does not grow with
@@ -505,6 +531,11 @@ def get_intervals(self, time_series_type: TimeSeriesType | None = None) -&gt; li
 def get_time_series_counts(self) -&gt; dict: ...
 def time_series_counts_detailed(self) -&gt; dict: ...
 def counts_by_type(self) -&gt; dict[str, int]: ...       # {time_series_type name: count}
+def time_series_count_summary(self) -&gt; list[TimeSeriesCountSummaryRow]: ...
+# One grouped query, with fields `owner_type`, `owner_category`,
+# `time_series_type`, `initial_timestamp`, `time_reference`, `resolution`, and
+# `count`. Names, features, and forecast-only dimensions are aggregated into
+# the count. Timestamp references stay separate even for equal UTC instants.
 def num_distinct_arrays(self) -&gt; int: ...
 def show(self, *, file=None) -&gt; None: ...
 # Prints the above as a summary — see below. `file` is any writable object,
@@ -570,10 +601,17 @@ own <code>time_series_type</code> decides, with no requested type to disagree wi
 </li>
 <li>
 <p><strong><code>read_by_ids</code></strong> returns one typed object per id, in the order the ids are given, repeats
-included (an empty id list returns an empty list). It is the bulk counterpart to <code>read_by_id</code>:
-packed <code>SingleTimeSeries</code> are read in one decompress-once pass per dataset instead of one read
-each. An id naming no row raises <code>NotFoundError</code> and fails the whole call, unlike
-<code>association_exists</code>, which asks the question rather than committing to a read.</p>
+included (an empty id list returns an empty list). Whole-series reads are the bulk counterpart to
+<code>read_by_id</code>: packed <code>SingleTimeSeries</code> are read in one decompress-once pass per dataset instead
+of one read each. Optional <code>len</code> or <code>count</code> applies one strict window to every id. Windowed reads
+fetch metadata in one query but currently read each requested slice separately, including repeated
+ids. The decompress-once guarantee does not apply to strict windows. Without <code>start_time</code>, each
+row starts at its own first value and spelling. A supplied start must be on every selected series'
+grid and share a compatible aware/naive spelling. Missing IDs, off-grid starts, extents past any
+series, or using <code>len</code> for forecasts / <code>count</code> for static types raises rather than clipping. An id
+naming no row raises <code>NotFoundError</code> and fails the whole call, unlike <code>association_exists</code>, which
+asks the question rather than committing to a read. Window-resolution errors identify the
+offending association id and series name.</p>
 </li>
 <li>
 <p><strong><code>read_by_ids_range</code></strong> is the bounds read: it <em>clips</em> every series to what falls between the two
@@ -635,6 +673,20 @@ full of recorded references: one catalog query for the whole set rather than one
 other two <code>static_time_series_count</code> / <code>forecast_count</code>.</p>
 </li>
 <li>
+<p><strong><code>time_series_count_summary</code></strong> returns one row per
+<code>(owner_type, owner_category, time_series_type, initial_timestamp, time_reference, resolution, time_step_count, timestamps_hash, horizon, interval, window_count)</code>
+group, with <code>count</code> for the number of associations. Names and features are aggregated. The
+applicable axis fields are retained: regular series use <code>initial_timestamp</code>, <code>resolution</code>, and
+<code>time_step_count</code>; irregular series use <code>timestamps_hash</code> and <code>time_step_count</code>; forecasts use
+<code>initial_timestamp</code>, <code>resolution</code>, <code>time_step_count</code> (steps per forecast horizon), <code>horizon</code>,
+<code>interval</code>, and <code>window_count</code>. Fields not used by a type are <code>None</code>. <code>timestamps_hash</code> is a
+64-character hex string. <code>initial_timestamp</code> is RFC 3339 for instant-bearing rows and a naive ISO
+timestamp for <code>time_reference="zoneless"</code>; the reference remains a separate key. This query scans
+and groups the catalog, and a highly ragged store can return nearly one summary row per
+association. It avoids materializing and transferring full metadata rows but is not a
+constant-time aggregate.</p>
+</li>
+<li>
 <p><strong><code>show</code></strong> prints those same counts as a block of text and returns <code>None</code>. It is the
 hand-inspection surface — what a store holds, at a glance, without composing four calls and
 formatting the result. See <a href="#show"><code>show()</code></a>.</p>
@@ -643,7 +695,8 @@ formatting the result. See <a href="#show"><code>show()</code></a>.</p>
 <p><strong><code>static_summary</code></strong> returns one dict per distinct
 <code>(owner_type, owner_category, time_series_type, name, initial_timestamp, resolution, time_step_count)</code>
 with its <code>count</code>; <strong><code>forecast_summary</code></strong> does the same for forecasts, adding <code>horizon</code>,
-<code>interval</code>, and <code>window_count</code>.</p>
+<code>interval</code>, and <code>window_count</code>. For compact counts by grid while preserving the original timestamp
+reference, use <code>time_series_count_summary</code>.</p>
 </li>
 <li>
 <p><strong><code>get_forecast_parameters</code></strong> returns
@@ -672,8 +725,10 @@ SQLite catalog, so <code>ok</code> is not a statement about the store as a whole
 <a href="../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</p>
 </li>
 <li>
-<p><strong><code>read_by_ids_range</code></strong> with <code>time_range=(start, end)</code> slices on the time axis; <code>end</code> is
-exclusive.</p>
+<p><strong><code>read_by_ids_range</code></strong> with <code>time_range=(start, end)</code> slices on the time axis; <code>end</code> is exclusive
+and clips to each series' available data. <code>read_by_ids</code> takes the checked alternative: <code>len</code> or
+<code>count</code> must fit every selected series. Without <code>start_time</code>, each row starts at its own
+beginning; a supplied start must be on every grid and use a compatible timestamp spelling.</p>
 </li>
 </ul>
 <h3 id="show"><a class="header" href="#show"><code>show()</code></a></h3>

@@ -422,10 +422,11 @@ let window = store.read_by_ids_range(&amp;[id], TimeRange::new(start, end))?.rem
 timesteps or a <code>count</code> of windows) and is <strong>checked</strong>, so an over-long request is an error rather
 than the smaller answer a range would clip to.</p>
 <p>To read <strong>many whole series at once</strong> — say, loading everything for an interactive plot —
-<code>read_by_ids</code> takes a slice of ids and returns a <code>TimeSeriesData</code> per id in order. It reads packed
-<code>SingleTimeSeries</code> in one decompress-once pass per dataset, which is much cheaper than a
-<code>read_by_id</code> each (a single full-series read otherwise touches every chunk under the timestamp-major
-layout):</p>
+<code>read_by_ids</code> takes a slice of ids and returns a <code>TimeSeriesData</code> per id in order. With
+<code>ReadWindow::full()</code>, it reads packed <code>SingleTimeSeries</code> in one decompress-once pass per dataset,
+which is much cheaper than a <code>read_by_id</code> each (a single full-series read otherwise touches every
+chunk under the timestamp-major layout). A strict window still fetches metadata in one query, but
+currently reads each requested slice separately, including repeated ids:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>let series = store.read_by_ids(&amp;ids, ReadWindow::full())?;
