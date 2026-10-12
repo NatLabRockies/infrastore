@@ -2355,7 +2355,9 @@ impl Store {
     /// The same figure bounds a rewrite — [`Self::persist_to`],
     /// [`Self::persist_arrays_to`], [`Self::compact`] — which reads and writes
     /// each packed pool in blocks of at most this many bytes, so a pool wider
-    /// than the budget lands as several datasets rather than one.
+    /// than the budget lands as several datasets rather than one. A block is
+    /// never narrower than one column, so a single column larger than the
+    /// budget is still read and written whole.
     ///
     /// # Errors
     ///
@@ -5854,7 +5856,9 @@ impl Store {
         // 48 MiB one took a second. A block is capped at the write buffer's
         // byte budget — the one ceiling this handle already has on how much
         // of the store it holds in memory at once — so a save holds a bounded
-        // slice of the store, not the whole of it. A pool wider than the
+        // slice of the store, not the whole of it. The bound floors at one
+        // column: a single column larger than the budget is moved whole,
+        // since a block cannot be narrower. A pool wider than the
         // budget therefore lands as several datasets, where a bulk add, which
         // is handed its whole cohort at once, splits only at the chunk budget.
         let budget = self.write_buffer.max_bytes();

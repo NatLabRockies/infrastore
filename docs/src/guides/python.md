@@ -278,6 +278,12 @@ whatever the buffer already holds beyond the new figure; zero raises `InvalidPar
 a pool's width floors at one column and a zero budget would mean a dataset per array rather than no
 buffering at all. The chunk-row ceiling above it does not move.
 
+The same figure bounds a rewrite. `persist_to`, `persist_arrays_to` and `compact` read and write
+each packed pool in blocks of at most this many bytes, so a pool wider than the budget lands as
+several datasets rather than one — including when the store being persisted is in memory. A block is
+never narrower than one column, so a single column larger than the budget is still read and written
+whole.
+
 ## Read a Series
 
 ```python
