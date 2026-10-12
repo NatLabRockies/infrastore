@@ -22,7 +22,6 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
-
 from infrastore import (
     Deterministic,
     DuplicateTimeSeriesError,
@@ -31,6 +30,7 @@ from infrastore import (
     NonSequentialTimeSeries,
     NotFoundError,
     OwnerCategory,
+    PersistentTimeSeries,
     Probabilistic,
     Scenarios,
     SingleTimeSeries,
@@ -318,7 +318,7 @@ def test_non_finite_forecast_round_trips_through_disk(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_has_time_series():
+def test_association_exists():
     store = Store.create(in_memory=True)
     key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64)))
     assert store.association_exists(key) is True
@@ -378,6 +378,209 @@ def test_has_any_time_series():
     )
     # With no features named, the exact form selects the feature-less rows.
     assert store.list_metadata(owner_id=3, features_exact=True) == []
+
+
+def test_has_exact_time_series_matches_the_complete_key():
+    store = Store.create(in_memory=True)
+    high = {"scenario": "high", "year": 2030}
+    _add(store, 1, _sts("load", np.arange(4, dtype=np.float64)))
+    _add(
+        store,
+        1,
+        SingleTimeSeries(
+            T0,
+            timedelta(minutes=5),
+            np.arange(12, dtype=np.float64) + 10,
+            "load",
+        ),
+        features=high,
+    )
+
+    def exists(owner, category, name, series_type, resolution, interval, features):
+        return store.has_exact_time_series(
+            owner_id=owner,
+            owner_category=category,
+            name=name,
+            time_series_type=series_type,
+            resolution=resolution,
+            interval=interval,
+            features=features,
+        )
+
+    assert exists(
+        1, OWNER_CAT, "load", TimeSeriesType.SingleTimeSeries, RES_1H, None, {}
+    )
+    assert exists(
+        1,
+        OWNER_CAT,
+        "load",
+        "SingleTimeSeries",
+        timedelta(minutes=5),
+        None,
+        high,
+    )
+    assert not exists(
+        1, OWNER_CAT, "load", TimeSeriesType.SingleTimeSeries, None, None, {}
+    )
+    assert not exists(
+        1,
+        OWNER_CAT,
+        "load",
+        TimeSeriesType.SingleTimeSeries,
+        RES_1H,
+        RES_1H,
+        {},
+    )
+    assert not exists(
+        1,
+        OWNER_CAT,
+        "load",
+        TimeSeriesType.SingleTimeSeries,
+        timedelta(minutes=5),
+        None,
+        {"scenario": "high"},
+    )
+    assert not exists(
+        1,
+        OWNER_CAT,
+        "load",
+        TimeSeriesType.SingleTimeSeries,
+        RES_1H,
+        None,
+        {"scenario": "low"},
+    )
+    assert not exists(
+        2, OWNER_CAT, "load", TimeSeriesType.SingleTimeSeries, RES_1H, None, {}
+    )
+    assert not exists(
+        1,
+        OwnerCategory.SupplementalAttribute,
+        "load",
+        TimeSeriesType.SingleTimeSeries,
+        RES_1H,
+        None,
+        {},
+    )
+    assert not exists(
+        1, OWNER_CAT, "other", TimeSeriesType.SingleTimeSeries, RES_1H, None, {}
+    )
+    assert not exists(
+        1,
+        OWNER_CAT,
+        "load",
+        TimeSeriesType.NonSequentialTimeSeries,
+        None,
+        None,
+        {},
+    )
+    _add(
+        store,
+        9,
+        NonSequentialTimeSeries(
+            [T0, T0 + RES_1H], np.array([1.0, 2.0]), "events"
+        ),
+    )
+    assert exists(
+        9,
+        OWNER_CAT,
+        "events",
+        TimeSeriesType.NonSequentialTimeSeries,
+        None,
+        None,
+        {},
+    )
+    assert not exists(
+        9,
+        OWNER_CAT,
+        "events",
+        TimeSeriesType.NonSequentialTimeSeries,
+        RES_1H,
+        None,
+        {},
+    )
+
+    for interval, count, base in [
+        (RES_1H, 3, 100.0),
+        (timedelta(hours=2), 2, 200.0),
+    ]:
+        values = np.arange(2 * count, dtype=np.float64).reshape(2, count) + base
+        _add(
+            store,
+            8,
+            Deterministic(
+                T0, RES_1H, timedelta(hours=2), interval, count, values, "market"
+            ),
+        )
+    for interval in (RES_1H, timedelta(hours=2)):
+        assert exists(
+            8, OWNER_CAT, "market", TimeSeriesType.Deterministic,
+            RES_1H, interval, {}
+        )
+    assert not exists(
+        8, OWNER_CAT, "market", TimeSeriesType.Deterministic,
+        RES_1H, timedelta(hours=3), {}
+    )
+
+    # The listing-style existence API remains a subset and family query.
+    assert store.has_any_time_series(
+        owner_id=1,
+        owner_category=OWNER_CAT,
+        name="load",
+        time_series_type=TimeSeriesType.SingleTimeSeries,
+        features={"scenario": "high"},
+    )
+
+
+def test_has_exact_time_series_does_not_widen_deterministic_to_derived_forecasts():
+    store = Store.create(in_memory=True)
+    features = {"scenario": "high"}
+    _add(
+        store,
+        1,
+        _sts("forecast", np.arange(4, dtype=np.float64)),
+        features=features,
+    )
+    assert store.transform_single_time_series(timedelta(hours=2), RES_1H) == 1
+
+    assert store.has_any_time_series(
+        owner_id=1,
+        owner_category=OWNER_CAT,
+        name="forecast",
+        time_series_type=TimeSeriesType.Deterministic,
+        features=features,
+        features_exact=True,
+    )
+    assert not store.has_exact_time_series(
+        owner_id=1,
+        owner_category=OWNER_CAT,
+        name="forecast",
+        time_series_type=TimeSeriesType.Deterministic,
+        resolution=RES_1H,
+        interval=RES_1H,
+        features=features,
+    )
+    assert store.has_exact_time_series(
+        owner_id=1,
+        owner_category=OWNER_CAT,
+        name="forecast",
+        time_series_type=TimeSeriesType.DeterministicSingleTimeSeries,
+        resolution=RES_1H,
+        interval=RES_1H,
+        features=features,
+    )
+
+    # The probe is read-only and does not weaken add-time family conflicts.
+    explicit = Deterministic(
+        T0,
+        RES_1H,
+        timedelta(hours=2),
+        RES_1H,
+        3,
+        np.arange(6, dtype=np.float64).reshape(2, 3),
+        "forecast",
+    )
+    with pytest.raises(InvalidParameterError, match="mutually exclusive"):
+        _add(store, 1, explicit, features=features)
 
 
 def test_remove_time_series_bulk():
@@ -467,6 +670,174 @@ def test_list_owner_ids():
         store.list_owner_ids(OwnerCategory.Component, resolution=timedelta(minutes=5))
         == []
     )
+
+
+def test_time_series_count_summary_is_empty_for_an_empty_store():
+    assert Store.create(in_memory=True).time_series_count_summary() == []
+
+
+def test_time_series_count_summary_keeps_timestamp_reference_groups():
+    store = Store.create(in_memory=True)
+    values = np.arange(4, dtype=np.float64)
+    fixed = timezone(timedelta(hours=-7))
+    instant = T0
+    wall_clock = T0.replace(tzinfo=None)
+    fixed_offset = T0.astimezone(fixed)
+
+    # Names deliberately differ inside one count group. The generic summary
+    # counts by owner/type/grid, not by series name.
+    _add(store, 1, _sts("load", values, instant))
+    _add(
+        store,
+        2,
+        _sts("wind", values + 10, instant),
+        features={"scenario": "high"},
+    )
+    wall_id = _add(store, 3, _sts("load", values + 20, wall_clock))
+    _add(store, 4, _sts("load", values + 30, fixed_offset))
+    store.add_time_series(
+        1,
+        OWNER_TYPE,
+        OwnerCategory.SupplementalAttribute,
+        _sts("load", values + 40, instant),
+    )
+    store.add_time_series(
+        7,
+        OWNER_TYPE,
+        OWNER_CAT,
+        NonSequentialTimeSeries([instant, instant + RES_1H], values[:2], "events"),
+    )
+
+    def forecast(initial, name, base, *, interval=RES_1H, count=3):
+        data = np.arange(2 * count, dtype=np.float64).reshape(2, count) + base
+        return Deterministic(
+            initial, RES_1H, timedelta(hours=2), interval, count, data, name
+        )
+
+    _add(store, 5, forecast(instant, "forecast", 0.0))
+    _add(store, 6, forecast(wall_clock, "forecast", 10.0))
+    _add(
+        store,
+        8,
+        forecast(
+            instant, "different_window", 20.0, interval=timedelta(hours=2), count=2
+        ),
+        features={"scenario": "other"},
+    )
+
+    rows = store.time_series_count_summary()
+    static = {
+        (row["owner_category"], row["time_reference"]): row
+        for row in rows
+        if row["time_series_type"] == "SingleTimeSeries"
+    }
+    forecasts = [
+        row for row in rows if row["time_series_type"] == "Deterministic"
+    ]
+
+    assert len(rows) == 8
+    assert set(static) == {
+        ("Component", "utc"),
+        ("Component", "zoneless"),
+        ("Component", "-07:00"),
+        ("SupplementalAttribute", "utc"),
+    }
+    assert static[("Component", "utc")]["count"] == 2
+    assert static[("Component", "zoneless")]["count"] == 1
+    assert static[("Component", "-07:00")]["count"] == 1
+    assert static[("SupplementalAttribute", "utc")]["count"] == 1
+    assert static[("Component", "utc")]["initial_timestamp"] == T0.isoformat()
+    wall_summary = static[("Component", "zoneless")]
+    assert wall_summary["initial_timestamp"] == "2024-01-01T00:00:00"
+    wall_bound = datetime.fromisoformat(wall_summary["initial_timestamp"])
+    assert wall_bound.tzinfo is None
+    wall_window, = store.read_by_ids([wall_id], start_time=wall_bound, len=2)
+    np.testing.assert_array_equal(wall_window.data, values[0:2] + 20)
+
+    assert len(forecasts) == 3
+    utc_forecasts = [row for row in forecasts if row["time_reference"] == "utc"]
+    assert {
+        (row["interval"], row["window_count"], row["count"])
+        for row in utc_forecasts
+    } == {("PT1H", 3, 1), ("PT2H", 2, 1)}
+    wall_forecast, = [row for row in forecasts if row["time_reference"] == "zoneless"]
+    assert wall_forecast["count"] == 1
+    irregular, = [
+        row for row in rows if row["time_series_type"] == "NonSequentialTimeSeries"
+    ]
+    assert irregular["initial_timestamp"] is None
+    assert irregular["time_reference"] == "utc"
+    assert irregular["resolution"] is None
+    assert irregular["time_step_count"] == 2
+    assert len(irregular["timestamps_hash"]) == 64
+    assert irregular["horizon"] is None
+    assert irregular["window_count"] is None
+
+
+def test_time_series_count_summary_distinguishes_static_and_irregular_axes():
+    store = Store.create(in_memory=True)
+    hourly = timedelta(hours=1)
+    def values(length, base):
+        return np.arange(length, dtype=np.float64) + base
+
+    for owner, name, length, initial in [
+        (1, "load-a", 4, T0),
+        (2, "load-b", 4, T0),
+        (3, "longer", 8, T0),
+        (4, "shifted", 4, T0 + hourly),
+    ]:
+        _add(
+            store,
+            owner,
+            SingleTimeSeries(initial, hourly, values(length, owner), name),
+        )
+
+    axis_a = [T0, T0 + timedelta(minutes=30)]
+    axis_b = [T0, T0 + timedelta(minutes=45)]
+    for owner, name, axis in [
+        (5, "events-a", axis_a),
+        (6, "events-b", axis_a),
+        (7, "events-other-axis", axis_b),
+    ]:
+        _add(
+            store,
+            owner,
+            NonSequentialTimeSeries(axis, values(2, owner), name),
+        )
+
+    breakpoints_a = [T0, T0 + hourly]
+    breakpoints_b = [T0, T0 + timedelta(hours=2)]
+    for owner, name, breakpoints in [
+        (8, "persistent-a", breakpoints_a),
+        (9, "persistent-b", breakpoints_a),
+        (10, "persistent-other-axis", breakpoints_b),
+    ]:
+        _add(
+            store,
+            owner,
+            PersistentTimeSeries(breakpoints, values(2, owner), name),
+        )
+
+    rows = store.time_series_count_summary()
+    regular = [
+        row for row in rows if row["time_series_type"] == "SingleTimeSeries"
+    ]
+    assert len(regular) == 3
+    assert {
+        (row["initial_timestamp"], row["time_step_count"], row["count"])
+        for row in regular
+    } == {
+        (T0.isoformat(), 4, 2),
+        (T0.isoformat(), 8, 1),
+        ((T0 + hourly).isoformat(), 4, 1),
+    }
+    for series_type in ("NonSequentialTimeSeries", "PersistentTimeSeries"):
+        irregular = [row for row in rows if row["time_series_type"] == series_type]
+        assert len(irregular) == 2
+        assert len({row["timestamps_hash"] for row in irregular}) == 2
+        assert {row["time_step_count"] for row in irregular} == {2}
+        assert {row["count"] for row in irregular} == {1, 2}
+        assert all(row["initial_timestamp"] is None for row in irregular)
 
 
 def test_static_summary():

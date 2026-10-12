@@ -40,6 +40,7 @@ pub use hash::{array_hash, hash_from_hex, hash_hex, timestamps_hash};
 pub use metadata::{
     ForecastSummaryRow, ParentChildAssociation, ParentChildFilter, StaticSummaryRow,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
+    TimeSeriesCountSummaryRow,
 };
 pub use openapi::{features_from_plain, features_to_plain};
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};

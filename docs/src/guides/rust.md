@@ -275,10 +275,11 @@ timesteps or a `count` of windows) and is **checked**, so an over-long request i
 than the smaller answer a range would clip to.
 
 To read **many whole series at once** — say, loading everything for an interactive plot —
-`read_by_ids` takes a slice of ids and returns a `TimeSeriesData` per id in order. It reads packed
-`SingleTimeSeries` in one decompress-once pass per dataset, which is much cheaper than a
-`read_by_id` each (a single full-series read otherwise touches every chunk under the timestamp-major
-layout):
+`read_by_ids` takes a slice of ids and returns a `TimeSeriesData` per id in order. With
+`ReadWindow::full()`, it reads packed `SingleTimeSeries` in one decompress-once pass per dataset,
+which is much cheaper than a `read_by_id` each (a single full-series read otherwise touches every
+chunk under the timestamp-major layout). A strict window still fetches metadata in one query, but
+currently reads each requested slice separately, including repeated ids:
 
 ```rust
 let series = store.read_by_ids(&ids, ReadWindow::full())?;
