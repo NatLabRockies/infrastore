@@ -208,13 +208,13 @@ or else from the <code>libinfrastore_ffi</code> artifact that <code>Pkg</code> d
 <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>commit_transaction!</code>, <code>compact!</code>,
 <code>copy_time_series!</code>, <code>count_array_references</code>, <code>count_components_with_attributes</code>,
 <code>count_parent_child_associations</code>, <code>count_supplemental_attribute_associations</code>,
-<code>count_supplemental_attributes</code>, <code>counts_by_type</code>,
+<code>count_supplemental_attributes</code>, <code>counts_by_type</code>, <code>export_sqlite</code>,
 <code>export_supplemental_attribute_associations_openapi</code>, <code>export_time_series_associations_openapi</code>,
 <code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
 <code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
 <code>get_forecast_parameters</code>, <code>get_intervals</code>, <code>get_metadata_by_id</code>, <code>get_path</code>, <code>get_resolutions</code>,
 <code>has_any_time_series</code>, <code>has_for_owner</code>, <code>has_parent_child_association</code>,
-<code>has_supplemental_attribute_association</code>, <code>has_time_series</code>,
+<code>has_supplemental_attribute_association</code>, <code>has_time_series</code>, <code>import_sqlite!</code>,
 <code>import_supplemental_attribute_associations_openapi!</code>, <code>import_time_series_associations_openapi!</code>,
 <code>in_transaction</code>, <code>index_at</code>, <code>init_logging</code>, <code>is_empty</code>, <code>is_zoneless</code>, <code>list_children</code>,
 <code>list_components_with_attributes</code>, <code>list_metadata</code>, <code>list_metadata_by_ids</code>, <code>list_names</code>,
@@ -1321,6 +1321,32 @@ the array file's own stamp, so every later <code>open_store</code> behaves norma
 <code>StoreExistsError</code> when a catalog is already there; a store that has one wants <code>open_store</code>.</p>
 <p>A bundle carrying <code>NonSequentialTimeSeries</code> still needs its <code>.sqlite</code>: those rows cannot be
 replayed, for the reason above.</p>
+<h2 id="sqlite-tables"><a class="header" href="#sqlite-tables">SQLite tables</a></h2>
+<p>The <a href="parquet-format.html#sqlite-tables">normalized table layout</a> the CLI's <code>export -f sqlite</code> and
+<code>add --sqlite</code> exchange. (The Parquet container of the same layout is CLI-only, so the library does
+not link Arrow.)</p>
+<pre><code class="language-julia">export_sqlite(store, path; table_prefix="", time_range=nothing, include_derived=false,
+              filters...) -&gt; Vector{NamedTuple}
+import_sqlite!(store, path; table_prefix="", skip_checksum=false) -&gt; Vector{Int64}
+</code></pre>
+<p><code>export_sqlite</code> takes the same filter keywords as <code>list_metadata</code> — none exports the whole store —
+and a <code>time_range</code> that clips each series as <code>read_by_ids</code>' does. The database is created if absent
+and tables are only ever added: a name already taken, or an empty series in the selection, throws
+before anything is written, and <code>table_prefix</code> lets several exports share one database. It returns
+one named tuple per partition written (<code>values_table</code>, <code>series_table</code>, <code>arrays_table</code>,
+<code>time_series_type</code>, <code>value_type</code>, <code>time_reference</code>, <code>arrays</code>, <code>series</code>, <code>rows</code>). The values are
+streamed — a bounded batch at a time, each distinct array once — so a store far larger than memory
+exports in a few hundred megabytes.</p>
+<p>A <code>DeterministicSingleTimeSeries</code> is left out unless <code>include_derived=true</code>: it repeats its source
+<code>SingleTimeSeries</code>' values, flattened, and <code>import_sqlite!</code> refuses a database holding one. Naming
+the type in the filter without the flag throws rather than exporting nothing.</p>
+<p>The partition tables' names depend on the data, so each export also keeps three views with fixed
+names — <code>&lt;prefix&gt;all_values</code>, <code>&lt;prefix&gt;all_series</code>, <code>&lt;prefix&gt;all_arrays</code> — spanning every partition
+under the prefix; see <a href="parquet-format.html#fixed-name-views">fixed-name views</a>.</p>
+<p><code>import_sqlite!</code> adds every series under <code>table_prefix</code> in one all-or-nothing transaction and
+returns the new ids in the order read. Ids are assigned fresh — the ones the tables recorded are not
+reused. Each array is checked against the <code>data_hash</code> its rows carry; <code>skip_checksum=true</code> waives
+that for values edited in place.</p>
 <h2 id="errors"><a class="header" href="#errors">Errors</a></h2>
 <p>All subtype <code>TimeSeriesException</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>

@@ -472,8 +472,8 @@ timestamps, rows that leave a declared grid, decoded <code>struct</code>/<code>l
 <a href="../reference/python-api.html#from_arrow">reference</a>.</p>
 <p><code>to_arrow()</code> and <code>from_arrow()</code> are <strong>per-series, in-memory conveniences</strong> -- one series, one table.
 They are not the CLI's file format: <code>infrastore export -f parquet</code> writes
-<a href="../reference/parquet-format.html">a values/series file pair per partition</a>, each distinct array once
-and one catalog row per series, which <code>from_arrow</code> does not read. To move a whole store through
+<a href="../reference/parquet-format.html">a values/series/arrays file set per partition</a>, each distinct array
+once and one catalog row per series, which <code>from_arrow</code> does not read. To move a whole store through
 Parquet, use the CLI at both ends.</p>
 <h3 id="datetimes-and-precision"><a class="header" href="#datetimes-and-precision">Datetimes and precision</a></h3>
 <p>Every <code>datetime</code> must be timezone-aware (any zone; converted to UTC on the way in, UTC on the way

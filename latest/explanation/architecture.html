@@ -202,6 +202,7 @@ on-disk format.</p>
     JL[&quot;InfraStore.jl&lt;br/&gt;(Julia package)&quot;]
     PROTO[&quot;infrastore-proto&lt;br/&gt;protobuf + tonic&quot;]
     PARQ[&quot;infrastore-parquet&lt;br/&gt;Parquet export/import&quot;]
+    TAB[&quot;infrastore-tabular&lt;br/&gt;export layout + SQLite&quot;]
 
     subgraph core[&quot;infrastore-core&quot;]
         STORE[&quot;Store&quot;]
@@ -223,7 +224,9 @@ on-disk format.</p>
     JL --&gt;|&quot;ccall&quot;| FFI
     SRV --&gt; PROTO
     CLI --&gt; PARQ
-    PARQ --&gt; STORE
+    CLI --&gt; TAB
+    PARQ --&gt; TAB
+    TAB --&gt; STORE
 
     style STORE fill:#28a745,color:#fff
     style META fill:#28a745,color:#fff
@@ -248,6 +251,7 @@ on-disk format.</p>
 <tr><td><code>infrastore-ffi</code></td><td>A <code>extern "C"</code> cdylib with an opaque-handle API over <code>Store</code></td></tr>
 <tr><td><code>InfraStore.jl</code></td><td>A Julia package that <code>ccall</code>s into the FFI cdylib</td></tr>
 <tr><td><code>infrastore-cli</code></td><td>The <code>infrastore</code> binary: read+write access to an on-disk store from a terminal</td></tr>
+<tr><td><code>infrastore-tabular</code></td><td>The Arrow-free normalized export layout, and SQLite tables as its container</td></tr>
 <tr><td><code>infrastore-parquet</code></td><td>Partitioned Parquet export/import, linked only by the CLI (<code>parquet</code> feature)</td></tr>
 <tr><td><code>infrastore-bench</code></td><td>The <code>infrastore-bench</code> binary: ingestion and simulation-read benchmarks</td></tr>
 </tbody></table>

@@ -1546,6 +1546,43 @@ store.add_time_series(
 
 json_str = store.export_time_series_associations_openapi()
 </code></pre>
+<h2 id="sqlite-tables"><a class="header" href="#sqlite-tables">SQLite tables</a></h2>
+<p>The <a href="parquet-format.html#sqlite-tables">normalized table layout</a> the CLI's <code>export -f sqlite</code> and
+<code>add --sqlite</code> exchange, from Python. (The Parquet container of the same layout is CLI-only, so the
+wheel does not link Arrow; DuckDB and polars both read these tables directly.)</p>
+<pre><code class="language-python">def export_sqlite(
+    self, path: str, *, table_prefix: str = "", time_range=None,
+    include_derived: bool = False,
+    owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+    name=None, name_glob=None, component_field=None, zoneless=None,
+    resolution=None, interval=None, initial_timestamp=None, length=None,
+    features=None, features_exact=False,
+) -&gt; list[dict]: ...
+def import_sqlite(
+    self, path: str, *, table_prefix: str = "", skip_checksum: bool = False
+) -&gt; list[int]: ...
+</code></pre>
+<p><code>export_sqlite</code> takes the same filter keywords as <code>list_metadata</code> — none exports the whole store —
+and a <code>time_range</code> that clips each series as <code>read_by_ids_range</code> does. The database is created if
+absent and tables are only ever added: a name already taken, or an empty series in the selection,
+raises before anything is written, and <code>table_prefix</code> lets several exports share one database. It
+returns one dict per partition written (<code>values_table</code>, <code>series_table</code>, <code>arrays_table</code>,
+<code>time_series_type</code>, <code>value_type</code>, <code>time_reference</code>, <code>arrays</code>, <code>series</code>, <code>rows</code>). The values are
+streamed — a bounded batch at a time, each distinct array once — so a store far larger than memory
+exports in a few hundred megabytes.</p>
+<p>A <code>DeterministicSingleTimeSeries</code> is left out unless <code>include_derived=True</code>: it repeats its source
+<code>SingleTimeSeries</code>' values, flattened, and <code>import_sqlite</code> refuses a database holding one. Naming
+the type in the filter without the flag raises rather than exporting nothing.</p>
+<p>The partition tables' names depend on the data, so each export also keeps three views with fixed
+names — <code>&lt;prefix&gt;all_values</code>, <code>&lt;prefix&gt;all_series</code>, <code>&lt;prefix&gt;all_arrays</code> — spanning every partition
+under the prefix; see <a href="parquet-format.html#fixed-name-views">fixed-name views</a>.</p>
+<p><code>import_sqlite</code> adds every series under <code>table_prefix</code> in one all-or-nothing transaction and returns
+the new ids in the order read. Ids are assigned fresh — the ones the tables recorded are not reused.
+Each array is checked against the <code>data_hash</code> its rows carry; <code>skip_checksum=True</code> waives that for
+values edited in place.</p>
+<pre><code class="language-python">store.export_sqlite("run.db", table_prefix="base_", owner_type="Generator")
+ids = Store.create(in_memory=True).import_sqlite("run.db", table_prefix="base_")
+</code></pre>
 <h2 id="exceptions"><a class="header" href="#exceptions">Exceptions</a></h2>
 <p>All inherit from <code>TimeSeriesError</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Exception</th><th>Raised when</th></tr></thead><tbody>
