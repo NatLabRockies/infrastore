@@ -81,6 +81,11 @@ build-frontend = "build"
 # datetime64 semantics only if the platform is the one both were built for.
 test-requires = ["pytest>=7", "netCDF4", "h5py", "tzdata", "pyarrow>=14"]
 test-command = "pytest -q {project}/python/tests"
+# Never build netCDF4 from source: no runner has the netCDF headers its sdist
+# needs. Binary-only makes pip fall back to the newest release with a wheel for
+# the platform -- netCDF4 1.7.5 ships macOS arm64 wheels for 15.0+ only, which
+# the macos-14 runner cannot install, so there it resolves to 1.7.4.
+test-environment = { PIP_ONLY_BINARY = "netCDF4" }
 
 # Install the Rust toolchain before building. The `$HOME/.cargo/bin` PATH override
 # is only meaningful where rustup is installed by before-all (Linux/macOS), so it
