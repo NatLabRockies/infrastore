@@ -190,6 +190,34 @@ end
     @test_throws InfraStore.InvalidParameterError encode_element_values([
         Incremental(InfraStore.QuadraticFunction(1.0, 2.0, 3.0))
     ])
+
+    # The documented two-argument forms set `initial_input` alone.
+    lf = InfraStore.LinearFunction(1.0, 2.0)
+    @test Incremental(lf, 3.0) == Incremental(lf, 3.0, nothing)
+    @test AverageRate(lf, 3.0) == AverageRate(lf, 3.0, nothing)
+
+    # `NaN` is the absent sentinel, so a present NaN would read back as `nothing`.
+    @test_throws InfraStore.InvalidParameterError encode_element_values([
+        InputOutput(lf, NaN)
+    ])
+
+    # A curve over values with no encoding of their own is not element values,
+    # so a write refuses it up front rather than failing inside the encoder.
+    @test !InfraStore.is_element_values([Incremental(1.0)])
+    @test_throws InfraStore.InvalidParameterError encode_element_values([
+        Incremental(1.0)
+    ])
+
+    # An empty series still decodes to the consumer's type, not `Vector{Any}`.
+    empty_array, empty_tag = encode_element_values(curves[1:0])
+    @test empty_tag == "incremental(piecewise_step)"
+    empty = decode_element_values(
+        empty_array, empty_tag;
+        types=merge(
+            DEFAULT_ELEMENT_TYPES, (incremental=MyIncremental, piecewise_step=MyStep)
+        ),
+    )
+    @test empty isa Vector{MyIncremental}
 end
 
 @testset "the codec rejects rows it cannot describe" begin

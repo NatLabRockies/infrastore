@@ -165,7 +165,9 @@ struct Incremental{F}
     initial_input::Union{Nothing, Float64}
     input_at_zero::Union{Nothing, Float64}
 end
-Incremental(function_data) = Incremental(function_data, nothing, nothing)
+function Incremental(function_data, initial_input=nothing)
+    return Incremental(function_data, initial_input, nothing)
+end
 
 """
     AverageRate(function_data, initial_input=nothing, input_at_zero=nothing)
@@ -178,7 +180,9 @@ struct AverageRate{F}
     initial_input::Union{Nothing, Float64}
     input_at_zero::Union{Nothing, Float64}
 end
-AverageRate(function_data) = AverageRate(function_data, nothing, nothing)
+function AverageRate(function_data, initial_input=nothing)
+    return AverageRate(function_data, initial_input, nothing)
+end
 
 const _ValueCurve = Union{InputOutput, Incremental, AverageRate}
 
@@ -275,8 +279,13 @@ end
 
 # A value curve is its function's row with the curve's scalars in front, `NaN`
 # for an absent one. Only some pairings are curves; the core refuses the rest.
-const _CURVE_NAMES = (
-    input_output=InputOutput, incremental=Incremental, average_rate=AverageRate
+#
+# `_CURVE_HEADERS` is the one statement of each curve's scalars and their slot
+# order; `_curve_header` reads them off a value in that order.
+const _CURVE_HEADERS = (
+    input_output=(:input_at_zero,),
+    incremental=(:initial_input, :input_at_zero),
+    average_rate=(:initial_input, :input_at_zero),
 )
 const _CURVE_FUNCTIONS = (
     input_output=("linear_function", "quadratic_function", "piecewise_linear"),
@@ -299,12 +308,26 @@ function element_type_tag(values::AbstractVector{<:_ValueCurve})
     return "$name($inner)"
 end
 function element_row_width(values::AbstractVector{<:_ValueCurve})
-    header = _curve_name(values) === :input_output ? 1 : 2
+    header = length(_CURVE_HEADERS[_curve_name(values)])
     return header + element_row_width(_curve_functions(values))
+end
+# A curve is only element values if its functions are: otherwise the methods
+# above apply to any curve, and a write would fail inside them.
+function is_element_values(values::AbstractVector{<:_ValueCurve})
+    return is_element_values(_curve_functions(values))
 end
 function write_element_row!(row, v::_ValueCurve)
     header = _curve_header(v)
     for (j, x) in enumerate(header)
+        # `NaN` is how an absent scalar is stored, so a present one would read
+        # back as `nothing`.
+        x !== nothing && isnan(x) &&
+            throw(
+                InvalidParameterError(
+                    "a $(nameof(typeof(v))) curve's scalar is NaN, which is how an " *
+                    "absent scalar is stored: pass `nothing` for an absent one",
+                ),
+            )
         row[j] = something(x, NaN)
     end
     write_element_row!(@view(row[(length(header) + 1):end]), v.function_data)
@@ -582,7 +605,7 @@ end
 # build one curve per row.
 function _decode_curve_rows(kind::Symbol, rows, types::NamedTuple, tag::AbstractString)
     inner = String(match(_CURVE_TAG, tag).captures[2])
-    header = kind === :input_output ? 1 : 2
+    header = length(_CURVE_HEADERS[kind])
     size(rows, 2) > header || throw(
         InvalidParameterError(
             "element_type $tag requires a row wider than its $header header slot(s), " *
@@ -598,13 +621,19 @@ end
 
 _curve_scalar(x) = isnan(x) ? nothing : Float64(x)
 
-function _decode_curves_typed(::Type{T}, functions, rows, ::Val{1}) where {T}
-    return map(i -> T(functions[i], _curve_scalar(rows[i, 1])), axes(rows, 1))
-end
-function _decode_curves_typed(::Type{T}, functions, rows, ::Val{2}) where {T}
-    return map(axes(rows, 1)) do i
-        return T(functions[i], _curve_scalar(rows[i, 1]), _curve_scalar(rows[i, 2]))
+# `map` takes a concrete eltype off the curves it builds, but an empty series
+# builds none, and inference alone can leave a consumer's type as `Vector{Any}`,
+# which no longer round-trips into a write. Declare `T` then, unless inference
+# names something narrower.
+function _decode_curves_typed(::Type{T}, functions, rows, ::Val{H}) where {T, H}
+    scalars(i) = ntuple(j -> _curve_scalar(rows[i, j]), Val(H))
+    if isempty(axes(rows, 1))
+        S = Base.promote_op(
+            T, eltype(functions), ntuple(_ -> Union{Nothing, Float64}, Val(H))...
+        )
+        return (S !== Union{} && S <: T ? S : T)[]
     end
+    return map(i -> T(functions[i], scalars(i)...), axes(rows, 1))
 end
 
 # The trailing axis width a kind requires, mirroring the core's

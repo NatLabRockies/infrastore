@@ -334,7 +334,23 @@ pub fn canonical_array(
         // Nothing to canonicalize: the values are already the stored elements.
         return Ok(array.clone());
     }
-    infrastore_core::encode(&decoded, leading_dims)
+    let mut canonical = infrastore_core::encode(&decoded, leading_dims)?;
+    // A value curve's header decodes to `Option`, which folds every NaN bit
+    // pattern into one `None`. The header is never padding, so copy its bytes
+    // back verbatim rather than let the re-encode change them, and the hash.
+    let header = element_type.header_len() * 8;
+    let row_bytes = |a: &TypedArray| a.shape.last().copied().unwrap_or(0) * 8;
+    if header > 0 {
+        let (from, to) = (row_bytes(array), row_bytes(&canonical));
+        for (src, dst) in array
+            .bytes
+            .chunks_exact(from)
+            .zip(canonical.bytes.chunks_exact_mut(to))
+        {
+            dst[..header].copy_from_slice(&src[..header]);
+        }
+    }
+    Ok(canonical)
 }
 
 /// Whether an element type is one of the four function-data kinds.
@@ -348,6 +364,22 @@ pub fn is_composite(element_type: ElementType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `-NaN` absent scalar reads back as `None`, and a re-encode writes `+NaN`;
+    /// the canonical array must keep the stored bits, or the hash moves.
+    #[test]
+    fn canonicalizing_a_value_curve_keeps_its_header_bits() {
+        let element_type = ElementType::parse("incremental(piecewise_step)").unwrap();
+        let negative_nan = -f64::NAN;
+        // Padded two slots wider than its single timestep needs.
+        let padded = TypedArray::from_f64(
+            vec![1, 8],
+            &[negative_nan, 1.0, 2.0, 0.0, 10.0, 7.0, 0.0, 0.0],
+        );
+        let canonical = canonical_array(&padded, element_type, &[1]).unwrap();
+        assert_eq!(canonical.shape, vec![1, 6]);
+        assert_eq!(canonical.bytes[..16], padded.bytes[..16]);
+    }
 
     /// A view across partitions selects [`all_columns`]; a column a type's own
     /// table carries and the view does not would silently vanish from it.

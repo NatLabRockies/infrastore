@@ -69,9 +69,9 @@ A value curve is one complete cost or rate curve per timestep, so a time-varying
 series** rather than a function-data series plus a scalar series per optional field. Its row is the
 curve's optional scalars followed by its function's row, laid out exactly as that function's own
 element type. A scalar that is absent (`nothing` in Julia, `None` in Python and Rust) is stored as
-`NaN`, so a `NaN` written as a value reads back as absent. The scalars come first because a ragged
-function row leaves no fixed slot after it; for a ragged `F`, the leading count `n` is the first
-slot after the scalars.
+`NaN`, so the codecs refuse a present `NaN` scalar rather than let it read back as absent. The
+scalars come first because a ragged function row leaves no fixed slot after it; for a ragged `F`,
+the leading count `n` is the first slot after the scalars.
 
 Only the pairings the grammar lists are curves — `input_output` over a step function, say, is
 refused. Every scalar and every function coefficient varies together: if only `initial_input`

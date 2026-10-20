@@ -351,3 +351,53 @@ def test_a_value_curve_over_a_function_it_cannot_hold_is_refused():
             [{"curve": "incremental", "function": [{"x": 0.0, "y": 1.0}]}],
             "bad",
         )
+
+
+def test_a_present_nan_scalar_is_refused_rather_than_read_back_as_absent():
+    with pytest.raises(InvalidParameterError, match="input_at_zero is NaN"):
+        SingleTimeSeries.from_values(
+            T0,
+            HOUR,
+            [
+                {
+                    "curve": "input_output",
+                    "input_at_zero": float("nan"),
+                    "function": {"proportional": 2.0, "constant": 1.0},
+                }
+            ],
+            "cost",
+        )
+
+
+@pytest.mark.parametrize(
+    "second, message",
+    [
+        ({"curve": "incremental"}, 'row 1 is a value curve with no "function"'),
+        ({"function": {"x": [0.0, 1.0], "y": [2.0]}}, "row 1's \"curve\" is not \"incremental\""),
+        (
+            {"curve": "average_rate", "function": {"x": [0.0, 1.0], "y": [2.0]}},
+            "row 1's \"curve\" is not \"incremental\"",
+        ),
+    ],
+)
+def test_every_value_curve_row_names_its_curve_and_function(second, message):
+    first = {"curve": "incremental", "function": {"x": [0.0, 1.0], "y": [2.0]}}
+    with pytest.raises(InvalidParameterError, match=message):
+        SingleTimeSeries.from_values(T0, HOUR, [first, second], "offer")
+
+
+def test_a_quadratic_row_after_a_linear_one_is_not_read_as_linear():
+    linear = {"proportional": 2.0, "constant": 1.0}
+    quadratic = {"quadratic": 0.5, "proportional": 2.0, "constant": 1.0}
+    with pytest.raises(InvalidParameterError, match="row 1 is a quadratic function"):
+        SingleTimeSeries.from_values(T0, HOUR, [linear, quadratic], "cost")
+    with pytest.raises(InvalidParameterError, match="row 1 is a quadratic function"):
+        SingleTimeSeries.from_values(
+            T0,
+            HOUR,
+            [
+                {"curve": "incremental", "function": linear},
+                {"curve": "incremental", "function": quadratic},
+            ],
+            "offer",
+        )

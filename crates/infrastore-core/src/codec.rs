@@ -63,6 +63,21 @@ pub struct ValueCurves {
     pub function: Box<DecodedValues>,
 }
 
+impl ValueCurves {
+    /// Each header scalar's name and column, in the slot order the encoding
+    /// puts them in front of the function row.
+    pub fn header_columns(&self) -> impl Iterator<Item = (&'static str, &[Option<f64>])> {
+        self.curve.header_names().iter().map(|&name| {
+            let column = if name == "initial_input" {
+                &self.initial_input
+            } else {
+                &self.input_at_zero
+            };
+            (name, column.as_slice())
+        })
+    }
+}
+
 /// The per-timestep values of one array, decoded according to its
 /// [`ElementType`]. Every variant except [`Self::Raw`] holds one entry per
 /// timestep, in row-major order over the array's leading dims.
@@ -124,47 +139,13 @@ pub fn decode(
     leading_dims: usize,
 ) -> Result<DecodedValues> {
     element_type.validate_array(array, leading_dims)?;
-    if array.dtype != Dtype::F64 {
+    if array.dtype != Dtype::F64 || matches!(element_type, ElementType::Scalar(_)) {
         return Ok(DecodedValues::Raw);
     }
     let values = array
         .to_f64_vec()
         .map_err(TimeSeriesError::IntegrityError)?;
-    if let ElementType::ValueCurve { kind, function } = element_type {
-        // Peel the header columns off and decode what is left as the function.
-        let width = array.shape[leading_dims];
-        let header = element_type.header_len();
-        let mut columns = vec![Vec::new(); header];
-        let mut body = Vec::with_capacity(values.len() / width * (width - header));
-        for row in values.chunks_exact(width) {
-            for (column, &v) in columns.iter_mut().zip(row) {
-                column.push((!v.is_nan()).then_some(v));
-            }
-            body.extend_from_slice(&row[header..]);
-        }
-        let mut shape = array.shape[..leading_dims].to_vec();
-        shape.push(width - header);
-        let body = TypedArray::from_f64(shape, &body);
-        let function = decode(&body, function.element_type(), leading_dims)?;
-        let input_at_zero = columns.pop().expect("every curve has input_at_zero");
-        let initial_input = columns
-            .pop()
-            .unwrap_or_else(|| vec![None; input_at_zero.len()]);
-        return Ok(DecodedValues::ValueCurve(ValueCurves {
-            curve: kind,
-            initial_input,
-            input_at_zero,
-            function: Box::new(function),
-        }));
-    }
-    let width = match element_type {
-        ElementType::Scalar(_) => return Ok(DecodedValues::Raw),
-        ElementType::Tuple { arity, .. } => arity,
-        ElementType::LinearFunction => 2,
-        ElementType::QuadraticFunction => 3,
-        ElementType::PiecewiseLinear | ElementType::PiecewiseStep => array.shape[leading_dims],
-        ElementType::ValueCurve { .. } => unreachable!("returned above"),
-    };
+    let width = array.shape[leading_dims];
     // `chunks_exact` panics on a zero width, and `element_type_of` manufactures
     // exactly that for an empty `Tuple` — which `validate_array` then accepts,
     // since arity 0 expects element dims `[0]`. `ElementType::parse` refuses the
@@ -177,8 +158,41 @@ pub fn decode(
         )));
     }
     let rows = values.chunks_exact(width);
-    Ok(match element_type {
-        ElementType::Scalar(_) | ElementType::ValueCurve { .. } => unreachable!("returned above"),
+    let ElementType::ValueCurve { kind, function } = element_type else {
+        return Ok(decode_rows(element_type, rows));
+    };
+    // The header slots become the scalar columns, and the function decodes from
+    // the rest of each row in place.
+    let header = element_type.header_len();
+    let column = |name: &str| {
+        let slot = kind.header_names().iter().position(|&h| h == name)?;
+        Some(
+            rows.clone()
+                .map(|r| (!r[slot].is_nan()).then_some(r[slot]))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let input_at_zero = column("input_at_zero").expect("every curve has input_at_zero");
+    let initial_input = column("initial_input").unwrap_or_else(|| vec![None; rows.len()]);
+    let function = decode_rows(function.element_type(), rows.map(|r| &r[header..]));
+    Ok(DecodedValues::ValueCurve(ValueCurves {
+        curve: kind,
+        initial_input,
+        input_at_zero,
+        function: Box::new(function),
+    }))
+}
+
+/// Decode rows already checked by `validate_array`, one per timestep, as the
+/// non-scalar, non-curve `element_type`.
+fn decode_rows<'a>(
+    element_type: ElementType,
+    rows: impl Iterator<Item = &'a [f64]>,
+) -> DecodedValues {
+    match element_type {
+        ElementType::Scalar(_) | ElementType::ValueCurve { .. } => {
+            unreachable!("decode handles {element_type} itself")
+        }
         ElementType::Tuple { .. } => DecodedValues::Tuple(rows.map(<[f64]>::to_vec).collect()),
         ElementType::LinearFunction => DecodedValues::LinearFunction(
             rows.map(|r| LinearFunction {
@@ -222,7 +236,7 @@ pub fn decode(
             })
             .collect(),
         ),
-    })
+    }
 }
 
 /// Encode per-timestep values into the flat array the store holds.
@@ -327,9 +341,10 @@ pub fn encode(values: &DecodedValues, leading_dims: &[usize]) -> Result<TypedArr
     TypedArray::from_slice(shape, &flat).map_err(TimeSeriesError::InvalidParameter)
 }
 
-/// The `(width, flat)` packing of a value-curve series: each function row with
-/// the curve's scalars in front, `NaN` for an absent one.
-fn encode_value_curves(curves: &ValueCurves, leading_dims: &[usize]) -> Result<(usize, Vec<f64>)> {
+/// The element type a value-curve series encodes as, or why it cannot be
+/// encoded at all. [`encode`] and [`element_type_of`] both ask here, so they
+/// never disagree about whether the values are valid.
+fn value_curve_type(curves: &ValueCurves) -> Result<ElementType> {
     let function = element_type_of(&curves.function)
         .and_then(FunctionKind::of)
         .filter(|&f| curves.curve.accepts(f))
@@ -350,28 +365,43 @@ fn encode_value_curves(curves: &ValueCurves, leading_dims: &[usize]) -> Result<(
             curves.input_at_zero.len()
         )));
     }
-    let element_type = ElementType::ValueCurve {
-        kind: curves.curve,
-        function,
-    };
-    let header = element_type.header_len();
-    if header == 1 && curves.initial_input.iter().any(Option::is_some) {
+    if !curves.curve.header_names().contains(&"initial_input")
+        && curves.initial_input.iter().any(Option::is_some)
+    {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "an {} curve has no initial_input",
             curves.curve.as_str()
         )));
     }
+    // `NaN` is how an absent scalar is stored, so a present one would read back
+    // as absent.
+    for (name, column) in curves.header_columns() {
+        if let Some(i) = column.iter().position(|v| v.is_some_and(f64::is_nan)) {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "curve {i}'s {name} is NaN, which is how an absent {name} is stored: \
+                 pass None for an absent scalar"
+            )));
+        }
+    }
+    Ok(ElementType::ValueCurve {
+        kind: curves.curve,
+        function,
+    })
+}
+
+/// The `(width, flat)` packing of a value-curve series: each function row with
+/// the curve's scalars in front, `NaN` for an absent one.
+fn encode_value_curves(curves: &ValueCurves, leading_dims: &[usize]) -> Result<(usize, Vec<f64>)> {
+    let header = value_curve_type(curves)?.header_len();
     let body = encode(&curves.function, leading_dims)?;
     let body_width = *body.shape.last().expect("encode appends the row width");
     let body = body.to_f64_vec().map_err(TimeSeriesError::IntegrityError)?;
     let width = header + body_width;
-    let mut flat = Vec::with_capacity(n * width);
+    let columns: Vec<_> = curves.header_columns().map(|(_, c)| c).collect();
+    let mut flat = Vec::with_capacity(curves.function.len() * width);
     // `chunks_exact` panics on zero, and an empty series has no rows anyway.
     for (i, row) in body.chunks_exact(body_width.max(1)).enumerate() {
-        if header == 2 {
-            flat.push(curves.initial_input[i].unwrap_or(f64::NAN));
-        }
-        flat.push(curves.input_at_zero[i].unwrap_or(f64::NAN));
+        flat.extend(columns.iter().map(|c| c[i].unwrap_or(f64::NAN)));
         flat.extend_from_slice(row);
     }
     Ok((width, flat))
@@ -443,6 +473,9 @@ pub fn encode_as(
 /// A `Tuple` with no rows has no arity to report, so this names `tuple(0,f64)`,
 /// which is not a legal element type. Declare the arity to [`encode_as`] rather
 /// than asking here.
+///
+/// A value-curve series that [`encode`] would refuse has no element type, so
+/// it reports `None`, as `Raw` does.
 pub fn element_type_of(values: &DecodedValues) -> Option<ElementType> {
     Some(match values {
         DecodedValues::Raw => return None,
@@ -454,16 +487,7 @@ pub fn element_type_of(values: &DecodedValues) -> Option<ElementType> {
         DecodedValues::QuadraticFunction(_) => ElementType::QuadraticFunction,
         DecodedValues::PiecewiseLinear(_) => ElementType::PiecewiseLinear,
         DecodedValues::PiecewiseStep(_) => ElementType::PiecewiseStep,
-        DecodedValues::ValueCurve(curves) => {
-            let function = FunctionKind::of(element_type_of(&curves.function)?)?;
-            if !curves.curve.accepts(function) {
-                return None;
-            }
-            ElementType::ValueCurve {
-                kind: curves.curve,
-                function,
-            }
-        }
+        DecodedValues::ValueCurve(curves) => return value_curve_type(curves).ok(),
     })
 }
 
@@ -607,8 +631,25 @@ mod tests {
         assert_eq!(decode(&array, element_type, 1).unwrap(), values);
 
         curves.initial_input = vec![Some(1.0)];
-        let err = encode(&DecodedValues::ValueCurve(curves), &[1]).unwrap_err();
+        let values = DecodedValues::ValueCurve(curves);
+        assert_eq!(element_type_of(&values), None);
+        let err = encode(&values, &[1]).unwrap_err();
         assert!(err.to_string().contains("has no initial_input"), "{err}");
+    }
+
+    #[test]
+    fn a_present_nan_scalar_is_refused_rather_than_read_back_as_absent() {
+        let DecodedValues::ValueCurve(mut curves) = incremental_step_curves() else {
+            unreachable!()
+        };
+        curves.input_at_zero[1] = Some(f64::NAN);
+        let values = DecodedValues::ValueCurve(curves);
+        assert_eq!(element_type_of(&values), None);
+        let err = encode(&values, &[2]).unwrap_err();
+        assert!(
+            err.to_string().contains("curve 1's input_at_zero is NaN"),
+            "{err}"
+        );
     }
 
     #[test]
