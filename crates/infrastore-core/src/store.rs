@@ -3329,7 +3329,12 @@ impl Store {
 
                 let (data, timestamps) = match time_range {
                     None => (
-                        self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
+                        match prefetched {
+                            Some(data) => data,
+                            None => {
+                                self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?
+                            }
+                        },
                         timestamps,
                     ),
                     Some((start, end)) => {
@@ -4221,7 +4226,9 @@ impl Store {
         let batched = |t: TimeSeriesType| {
             matches!(
                 t,
-                TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries
+                TimeSeriesType::SingleTimeSeries
+                    | TimeSeriesType::NonSequentialTimeSeries
+                    | TimeSeriesType::PersistentTimeSeries
             )
         };
         let (packed_hashes, packed_dtypes): (Vec<[u8; 32]>, Vec<Dtype>) = metas

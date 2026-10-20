@@ -776,13 +776,28 @@ fn bulk_read_matches_get_time_series_across_types() {
                 Features::new(),
             );
         }
+        // And a step function last, from a third pool.
+        let breakpoints = vec![initial, initial + Duration::days(90)];
+        let persistent = infrastore_core::PersistentTimeSeries::new(
+            breakpoints,
+            TypedArray::from_f64(vec![2], &[3.5, 4.25]),
+            "fuel_price",
+        )
+        .unwrap();
+        bulk.add(
+            (n + 1) as i64,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::PersistentTimeSeries(persistent),
+            Features::new(),
+        );
         bulk.commit().unwrap();
         store.flush().unwrap();
     }
 
     let store = Store::open(path.as_path(), true).unwrap();
     let mut keys = Vec::new();
-    for owner in 0..=(n as i64) {
+    for owner in 0..=(n as i64 + 1) {
         let k = store
             .list_metadata(
                 ListFilter::new()
@@ -797,7 +812,7 @@ fn bulk_read_matches_get_time_series_across_types() {
     let bulk = store
         .read_by_ids(&ids, infrastore_core::ReadWindow::full())
         .unwrap();
-    assert_eq!(bulk.len(), n + 1);
+    assert_eq!(bulk.len(), n + 2);
     // Every bulk result equals the per-id read, in order.
     for (i, data) in bulk.iter().enumerate() {
         let expected = store
