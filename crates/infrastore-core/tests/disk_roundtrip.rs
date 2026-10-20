@@ -751,8 +751,8 @@ fn bulk_read_matches_get_time_series_across_types() {
     {
         let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let mut bulk = store.bulk_add();
-        // A standalone series first, so the packed fast-path and the standalone
-        // fallback interleave and bulk_read must keep input order.
+        // An irregular series first, from a pool of its own, so two pools'
+        // reads interleave and bulk_read must keep input order.
         let stamps: Vec<_> = (0..8i64)
             .map(|j| initial + Duration::hours(j * 2))
             .collect();
@@ -803,19 +803,7 @@ fn bulk_read_matches_get_time_series_across_types() {
         let expected = store
             .read_by_id(ids[i], infrastore_core::ReadWindow::full())
             .unwrap();
-        match (data, &expected) {
-            (TimeSeriesData::SingleTimeSeries(got), TimeSeriesData::SingleTimeSeries(want)) => {
-                assert_eq!(got.data, want.data)
-            }
-            (
-                TimeSeriesData::NonSequentialTimeSeries(got),
-                TimeSeriesData::NonSequentialTimeSeries(want),
-            ) => {
-                assert_eq!(got.data, want.data);
-                assert_eq!(got.timestamps, want.timestamps);
-            }
-            other => panic!("type mismatch at {i}: {other:?}"),
-        }
+        assert_eq!(data, &expected, "series {i}");
     }
 }
 
