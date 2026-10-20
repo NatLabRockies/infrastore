@@ -8,9 +8,9 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    Dtype, ElementType, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    PersistentTimeSeries, ReadWindow, SingleTimeSeries, Store, TimeRange, TimeReference,
-    TimeSeriesData, TimeSeriesMetadata, TypedArray,
+    CurveKind, Dtype, ElementType, Features, FunctionKind, ListFilter, NonSequentialTimeSeries,
+    OwnerCategory, PersistentTimeSeries, ReadWindow, SingleTimeSeries, Store, TimeRange,
+    TimeReference, TimeSeriesData, TimeSeriesMetadata, TypedArray,
 };
 use infrastore_tabular::ImportOptions;
 use infrastore_tabular::sqlite::{
@@ -239,6 +239,28 @@ fn every_type_and_element_kind_round_trips() {
                 TypedArray::from_f64(vec![1, 5], &[2.0, 0.0, 5.0, 1.0, 7.0]),
             )
             .with_element_type(ElementType::PiecewiseLinear),
+        )),
+        // Value curves, re-padded to one width with their headers in front;
+        // `NaN` is an absent scalar.
+        utc(TimeSeriesData::SingleTimeSeries(
+            single(
+                "curve_narrow",
+                TypedArray::from_f64(vec![1, 4], &[f64::NAN, 2.0, 1.0, 0.0]),
+            )
+            .with_element_type(ElementType::ValueCurve {
+                kind: CurveKind::Incremental,
+                function: FunctionKind::PiecewiseStep,
+            }),
+        )),
+        utc(TimeSeriesData::SingleTimeSeries(
+            single(
+                "curve_wide",
+                TypedArray::from_f64(vec![1, 6], &[5.0, f64::NAN, 2.0, 0.0, 10.0, 3.0]),
+            )
+            .with_element_type(ElementType::ValueCurve {
+                kind: CurveKind::Incremental,
+                function: FunctionKind::PiecewiseStep,
+            }),
         )),
         utc(TimeSeriesData::NonSequentialTimeSeries(
             NonSequentialTimeSeries::new(

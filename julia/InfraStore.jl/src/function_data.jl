@@ -138,6 +138,62 @@ const FunctionData = Union{
     LinearFunction, QuadraticFunction, PiecewiseLinear, PiecewiseStep
 }
 
+"""
+    InputOutput(function_data, input_at_zero=nothing)
+
+A complete input-output curve: `function_data` plus an optional `input_at_zero`.
+The `input_output(F)` element types, where `F` is `linear_function`,
+`quadratic_function` or `piecewise_linear`.
+
+`function_data` may be any value with an element encoding of its own, so a
+consumer's function types nest without conversion.
+"""
+struct InputOutput{F}
+    function_data::F
+    input_at_zero::Union{Nothing, Float64}
+end
+InputOutput(function_data) = InputOutput(function_data, nothing)
+
+"""
+    Incremental(function_data, initial_input=nothing, input_at_zero=nothing)
+
+A complete incremental (marginal) curve. The `incremental(F)` element types,
+where `F` is `linear_function` or `piecewise_step`.
+"""
+struct Incremental{F}
+    function_data::F
+    initial_input::Union{Nothing, Float64}
+    input_at_zero::Union{Nothing, Float64}
+end
+Incremental(function_data) = Incremental(function_data, nothing, nothing)
+
+"""
+    AverageRate(function_data, initial_input=nothing, input_at_zero=nothing)
+
+A complete average-rate curve. The `average_rate(F)` element types, where `F` is
+`linear_function` or `piecewise_step`.
+"""
+struct AverageRate{F}
+    function_data::F
+    initial_input::Union{Nothing, Float64}
+    input_at_zero::Union{Nothing, Float64}
+end
+AverageRate(function_data) = AverageRate(function_data, nothing, nothing)
+
+const _ValueCurve = Union{InputOutput, Incremental, AverageRate}
+
+# A curve's optional scalars, in the slot order the encoding puts them in front
+# of the function row.
+_curve_header(v::InputOutput) = (v.input_at_zero,)
+_curve_header(v::Union{Incremental, AverageRate}) = (v.initial_input, v.input_at_zero)
+
+function Base.:(==)(a::C, b::C) where {C <: _ValueCurve}
+    return a.function_data == b.function_data && _curve_header(a) == _curve_header(b)
+end
+function Base.hash(v::_ValueCurve, h::UInt)
+    return hash(_curve_header(v), hash(v.function_data, hash(nameof(typeof(v)), h)))
+end
+
 # ---- The encode direction -------------------------------------------------
 #
 # Three small generic functions, extended per value type. A consumer with its own
@@ -214,6 +270,44 @@ function write_element_row!(row, v::PiecewiseStep)
     row[1] = n
     row[2:(1 + n)] .= v.x
     row[(2 + n):(1 + n + length(v.y))] .= v.y
+    return nothing
+end
+
+# A value curve is its function's row with the curve's scalars in front, `NaN`
+# for an absent one. Only some pairings are curves; the core refuses the rest.
+const _CURVE_NAMES = (
+    input_output=InputOutput, incremental=Incremental, average_rate=AverageRate
+)
+const _CURVE_FUNCTIONS = (
+    input_output=("linear_function", "quadratic_function", "piecewise_linear"),
+    incremental=("linear_function", "piecewise_step"),
+    average_rate=("linear_function", "piecewise_step"),
+)
+const _CURVE_TAG = r"^(input_output|incremental|average_rate)\((\w+)\)$"
+
+_curve_name(::AbstractVector{<:InputOutput}) = :input_output
+_curve_name(::AbstractVector{<:Incremental}) = :incremental
+_curve_name(::AbstractVector{<:AverageRate}) = :average_rate
+_curve_functions(values::AbstractVector{<:_ValueCurve}) = [v.function_data for v in values]
+
+function element_type_tag(values::AbstractVector{<:_ValueCurve})
+    name = _curve_name(values)
+    inner = element_type_tag(_curve_functions(values))
+    inner in _CURVE_FUNCTIONS[name] || throw(
+        InvalidParameterError("a $name curve cannot be built over $inner values")
+    )
+    return "$name($inner)"
+end
+function element_row_width(values::AbstractVector{<:_ValueCurve})
+    header = _curve_name(values) === :input_output ? 1 : 2
+    return header + element_row_width(_curve_functions(values))
+end
+function write_element_row!(row, v::_ValueCurve)
+    header = _curve_header(v)
+    for (j, x) in enumerate(header)
+        row[j] = something(x, NaN)
+    end
+    write_element_row!(@view(row[(length(header) + 1):end]), v.function_data)
     return nothing
 end
 
@@ -324,7 +418,11 @@ Each entry is called with the values of one timestep, in the order the encoding
 records them: `linear_function(proportional, constant)`,
 `quadratic_function(quadratic, proportional, constant)`,
 `piecewise_linear(points)` with a `Vector` of `(x, y)` NamedTuples, and
-`piecewise_step(x_coords, y_values)`. Those are the signatures
+`piecewise_step(x_coords, y_values)`; a value curve is called with its decoded
+function value and its scalars (`nothing` when absent):
+`input_output(function_data, input_at_zero)`,
+`incremental(function_data, initial_input, input_at_zero)`, and
+`average_rate(function_data, initial_input, input_at_zero)`. Those are the signatures
 InfrastructureSystems.jl's `FunctionData` constructors already have, which is the
 point: a consumer substitutes its types and pays no conversion.
 
@@ -336,6 +434,9 @@ const DEFAULT_ELEMENT_TYPES = (
     quadratic_function=QuadraticFunction,
     piecewise_linear=PiecewiseLinear,
     piecewise_step=PiecewiseStep,
+    input_output=InputOutput,
+    incremental=Incremental,
+    average_rate=AverageRate,
 )
 
 const _TUPLE_TAG = r"^tuple\(\s*(\d+)\s*,\s*f64\s*\)$"
@@ -436,6 +537,7 @@ function decode_element_values(
 end
 
 function _decode_rows(kind::Symbol, rows, types::NamedTuple, tag::AbstractString)
+    haskey(_CURVE_FUNCTIONS, kind) && return _decode_curve_rows(kind, rows, types, tag)
     m = match(_TUPLE_TAG, tag)
     if m !== nothing
         n = parse(Int, m.captures[1])
@@ -474,6 +576,35 @@ end
 # lets the loop inside specialize on the concrete type and kind.
 function _decode_rows_typed(::Type{T}, kind::Val, rows) where {T}
     return T[_decode_element_row(T, kind, @view(rows[i, :])) for i in axes(rows, 1)]
+end
+
+# Peel the header columns off, decode the rest as the curve's function, then
+# build one curve per row.
+function _decode_curve_rows(kind::Symbol, rows, types::NamedTuple, tag::AbstractString)
+    inner = String(match(_CURVE_TAG, tag).captures[2])
+    header = kind === :input_output ? 1 : 2
+    size(rows, 2) > header || throw(
+        InvalidParameterError(
+            "element_type $tag requires a row wider than its $header header slot(s), " *
+            "got $(size(rows, 2))",
+        ),
+    )
+    haskey(types, kind) || throw(
+        InvalidParameterError("no type given for element_type $tag")
+    )
+    functions = _decode_rows(Symbol(inner), @view(rows[:, (header + 1):end]), types, inner)
+    return _decode_curves_typed(types[kind], functions, rows, Val(header))
+end
+
+_curve_scalar(x) = isnan(x) ? nothing : Float64(x)
+
+function _decode_curves_typed(::Type{T}, functions, rows, ::Val{1}) where {T}
+    return map(i -> T(functions[i], _curve_scalar(rows[i, 1])), axes(rows, 1))
+end
+function _decode_curves_typed(::Type{T}, functions, rows, ::Val{2}) where {T}
+    return map(axes(rows, 1)) do i
+        return T(functions[i], _curve_scalar(rows[i, 1]), _curve_scalar(rows[i, 2]))
+    end
 end
 
 # The trailing axis width a kind requires, mirroring the core's
@@ -525,6 +656,11 @@ function _element_kind(tag::AbstractString)
     tag == "piecewise_linear" && return :piecewise_linear
     tag == "piecewise_step" && return :piecewise_step
     occursin(_TUPLE_TAG, tag) && return :tuple
+    m = match(_CURVE_TAG, tag)
+    if m !== nothing
+        name = Symbol(m.captures[1])
+        m.captures[2] in _CURVE_FUNCTIONS[name] && return name
+    end
     return nothing
 end
 

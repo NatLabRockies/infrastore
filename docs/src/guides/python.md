@@ -645,7 +645,7 @@ off the series, so there is nothing left to pass. It returns `None` for a scalar
 for any array whose dtype is not `float64` — there the stored elements already are the values, and
 `.data` is the answer.
 
-Which element type a payload implies is read off the shape of a row; the five shapes are disjoint:
+Which element type a payload implies is read off the shape of a row; the six shapes are disjoint:
 
 | `values` entry                                       | element type         |
 | ---------------------------------------------------- | -------------------- |
@@ -654,6 +654,7 @@ Which element type a payload implies is read off the shape of a row; the five sh
 | `list[{"x": …, "y": …}]`                             | `piecewise_linear`   |
 | `{"x": list, "y": list}`                             | `piecewise_step`     |
 | `list[float]` of length `N`                          | `tuple(N,f64)`       |
+| `{"curve": …, "function": F, …}`                     | `<curve>(F)`         |
 
 `element_type=` is still accepted on `from_values`, as an assertion rather than an override: it
 raises `InvalidParameterError` if it disagrees with the values. Where the values name nothing it is

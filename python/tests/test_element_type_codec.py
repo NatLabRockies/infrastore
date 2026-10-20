@@ -30,6 +30,26 @@ def _vectors():
         return json.load(f)["vectors"]
 
 
+def _timesteps(decoded):
+    """A vector's decoded values in the per-timestep form Python uses.
+
+    The corpus holds a value-curve series column-wise; Python hands back one
+    dict per curve, with `initial_input` only on the curves that have one.
+    """
+    if decoded["kind"] != "value_curve":
+        return decoded["timesteps"]
+    curves = decoded["timesteps"]
+    rows = []
+    for i, function in enumerate(_timesteps(curves["function"])):
+        row = {"curve": curves["curve"]}
+        if curves["curve"] != "input_output":
+            row["initial_input"] = curves["initial_input"][i]
+        row["input_at_zero"] = curves["input_at_zero"][i]
+        row["function"] = function
+        rows.append(row)
+    return rows
+
+
 def _stored_array(vector):
     """The vector's values as the numpy array the store holds."""
     return np.array(vector["values"], dtype=np.float64).reshape(vector["shape"])
@@ -44,7 +64,7 @@ def test_conformance_vector_decodes_to_its_pinned_values(vector):
     decoded = decode_element_values(
         array, vector["element_type"], vector["leading_dims"]
     )
-    assert decoded == vector["decoded"]["timesteps"]
+    assert decoded == _timesteps(vector["decoded"])
 
 
 def test_scalar_and_non_float64_arrays_decode_to_none():
@@ -129,7 +149,7 @@ def test_every_vector_round_trips_through_encode():
         )
         assert encoded.dtype == np.float64
         assert encoded.shape == tuple(vector["shape"]), vector["name"]
-        assert np.array_equal(encoded, array), vector["name"]
+        assert encoded.tobytes().hex() == vector["bytes_hex"], vector["name"]
         checked += 1
     assert checked == len(vectors)
 

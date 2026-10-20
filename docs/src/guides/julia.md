@@ -306,15 +306,19 @@ back the same thing a write was given.
 
 A case covered end to end in the runnable
 [`single_custom_elements.jl`](https://github.com/NatLabRockies/infrastore/blob/main/examples/julia/single_custom_elements.jl)
-example. `InfraStore.jl` ships four value types plus `NTuple{N,Float64}`:
+example. `InfraStore.jl` ships four function value types, `NTuple{N,Float64}`, and three value
+curves that wrap a function value, with `nothing` for an absent scalar:
 
-| Value type          | `element_type`       | Constructor                           |
-| ------------------- | -------------------- | ------------------------------------- |
-| `LinearFunction`    | `linear_function`    | `(proportional, constant)`            |
-| `QuadraticFunction` | `quadratic_function` | `(quadratic, proportional, constant)` |
-| `PiecewiseLinear`   | `piecewise_linear`   | `(points)`, a vector of `XYCoords`    |
-| `PiecewiseStep`     | `piecewise_step`     | `(x_coords, y_values)`                |
-| `NTuple{N,Float64}` | `tuple(N,f64)`       | —                                     |
+| Value type          | `element_type`       | Constructor                                     |
+| ------------------- | -------------------- | ----------------------------------------------- |
+| `LinearFunction`    | `linear_function`    | `(proportional, constant)`                      |
+| `QuadraticFunction` | `quadratic_function` | `(quadratic, proportional, constant)`           |
+| `PiecewiseLinear`   | `piecewise_linear`   | `(points)`, a vector of `XYCoords`              |
+| `PiecewiseStep`     | `piecewise_step`     | `(x_coords, y_values)`                          |
+| `NTuple{N,Float64}` | `tuple(N,f64)`       | —                                               |
+| `InputOutput`       | `input_output(F)`    | `(function_data, input_at_zero)`                |
+| `Incremental`       | `incremental(F)`     | `(function_data, initial_input, input_at_zero)` |
+| `AverageRate`       | `average_rate(F)`    | `(function_data, initial_input, input_at_zero)` |
 
 Every series type takes them, including the irregular ones and the forecasts. A forecast's values
 keep their window shape rather than arriving flat, since a Julia array carries its own:

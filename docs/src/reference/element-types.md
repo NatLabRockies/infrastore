@@ -24,6 +24,9 @@ linear_function
 quadratic_function
 piecewise_linear
 piecewise_step
+input_output(F)         F: linear_function | quadratic_function | piecewise_linear
+incremental(F)          F: linear_function | piecewise_step
+average_rate(F)         F: linear_function | piecewise_step
 ```
 
 The names are deliberately language-neutral: `piecewise_linear`, not `PiecewiseLinearData`;
@@ -34,14 +37,17 @@ The names are deliberately language-neutral: `piecewise_linear`, not `PiecewiseL
 The first array dimension is time (the per-window horizon for forecasts). The trailing dimensions
 are the per-step element shape, determined by the element type:
 
-| `element_type`       | element shape   | row layout (one timestep)                       |
-| -------------------- | --------------- | ----------------------------------------------- |
-| a dtype spelling     | `[]`            | the value                                       |
-| `tuple(N,T)`         | `[N]`           | `t1 … tN`                                       |
-| `linear_function`    | `[2]`           | `proportional, constant`                        |
-| `quadratic_function` | `[3]`           | `quadratic, proportional, constant`             |
-| `piecewise_linear`   | `[1 + 2*w]`     | `n, x1, y1, …, xn, yn`, zero-padded to width    |
-| `piecewise_step`     | `[max(1, 2*w)]` | `n, x1 … xn, y1 … y(n-1)`, zero-padded to width |
+| `element_type`       | element shape    | row layout (one timestep)                       |
+| -------------------- | ---------------- | ----------------------------------------------- |
+| a dtype spelling     | `[]`             | the value                                       |
+| `tuple(N,T)`         | `[N]`            | `t1 … tN`                                       |
+| `linear_function`    | `[2]`            | `proportional, constant`                        |
+| `quadratic_function` | `[3]`            | `quadratic, proportional, constant`             |
+| `piecewise_linear`   | `[1 + 2*w]`      | `n, x1, y1, …, xn, yn`, zero-padded to width    |
+| `piecewise_step`     | `[max(1, 2*w)]`  | `n, x1 … xn, y1 … y(n-1)`, zero-padded to width |
+| `input_output(F)`    | `[1 + width(F)]` | `input_at_zero`, then `F`'s row                 |
+| `incremental(F)`     | `[2 + width(F)]` | `initial_input, input_at_zero`, then `F`'s row  |
+| `average_rate(F)`    | `[2 + width(F)]` | `initial_input, input_at_zero`, then `F`'s row  |
 
 `w` is the maximum point / x-coordinate count across the series (or across every window of a
 forecast). Ragged rows are self-describing through the leading count `n`, so decoding one row needs
@@ -57,6 +63,20 @@ unchanged; only how many leading axes precede it differs (`TimeSeriesType::leadi
 
 Every function-data kind is stored as `f64`.
 
+### Value curves
+
+A value curve is one complete cost or rate curve per timestep, so a time-varying curve is **one
+series** rather than a function-data series plus a scalar series per optional field. Its row is the
+curve's optional scalars followed by its function's row, laid out exactly as that function's own
+element type. A scalar that is absent (`nothing` in Julia, `None` in Python and Rust) is stored as
+`NaN`, so a `NaN` written as a value reads back as absent. The scalars come first because a ragged
+function row leaves no fixed slot after it; for a ragged `F`, the leading count `n` is the first
+slot after the scalars.
+
+Only the pairings the grammar lists are curves — `input_output` over a step function, say, is
+refused. Every scalar and every function coefficient varies together: if only `initial_input`
+changes over time, the function's row is still stored at every step.
+
 ## Validation
 
 Because the store owns the element type, it can reject a write that contradicts it rather than
@@ -65,7 +85,8 @@ storing the inconsistency blindly:
 - the array's dtype must equal the element type's physical dtype;
 - fixed-width kinds must have exactly their per-step dims (`[2]`, `[3]`, `[N]`);
 - ragged kinds must have exactly one trailing dim, of a width their layout can produce (odd for
-  `piecewise_linear`; 1 or even for `piecewise_step`);
+  `piecewise_linear`; 1 or even for `piecewise_step`), counting a value curve's width after its
+  scalars;
 - every ragged row's leading count `n` must be a non-negative whole number that fits the row.
 
 Scalars are unconstrained in their trailing dims, since a dense per-step array is legitimate.
@@ -90,13 +111,15 @@ records what its bytes mean.
 
 Each binding ships a reference codec between the stored bytes and per-timestep values:
 
-- **Rust** — `infrastore_core::{decode, encode}` over `TypedArray` + `ElementType`. Prefer the
-  paired forms: every value type has a `from_values` constructor that encodes the values _and_
-  declares the element type they imply, and `TimeSeriesData::decoded_values` reads them back. An
-  `element_type` and the array it describes are two things a caller can get out of step — the store
-  rejects the mismatch on write, but deriving both from one set of values means there is none to
-  reject. `encode_as` is the declared-type encoder for the one series `from_values` cannot name: a
-  tuple with no rows, whose arity lives in rows it does not have. See
+- **Rust** — `infrastore_core::{decode, encode}` over `TypedArray` + `ElementType`. A value-curve
+  series decodes to `DecodedValues::ValueCurve`, held column-wise: per-timestep scalar vectors
+  beside the function rows as an ordinary function-data `DecodedValues`. Prefer the paired forms:
+  every value type has a `from_values` constructor that encodes the values _and_ declares the
+  element type they imply, and `TimeSeriesData::decoded_values` reads them back. An `element_type`
+  and the array it describes are two things a caller can get out of step — the store rejects the
+  mismatch on write, but deriving both from one set of values means there is none to reject.
+  `encode_as` is the declared-type encoder for the one series `from_values` cannot name: a tuple
+  with no rows, whose arity lives in rows it does not have. See
   [Element values](./rust-api.md#element-values).
 - **Python** — the paired forms first, as in Rust: every series type has a `from_values` classmethod
   that encodes the values _and_ declares the element type they imply, and `.decoded_values()` on a
@@ -107,8 +130,8 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   array that arrived without a series around it.
 
   A Python payload carries no type tag of its own, unlike a Rust `DecodedValues` or a Julia
-  `Vector{PiecewiseLinear}`, so `from_values` reads the element type off the shape of a row. The
-  five shapes are disjoint, which makes that a decision rather than a guess:
+  `Vector{PiecewiseLinear}`, so `from_values` reads the element type off the shape of a row. The six
+  shapes are disjoint, which makes that a decision rather than a guess:
 
   | `values` entry                                       | element type         |
   | ---------------------------------------------------- | -------------------- |
@@ -117,6 +140,13 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   | `list[{"x": …, "y": …}]`                             | `piecewise_linear`   |
   | `{"x": list, "y": list}`                             | `piecewise_step`     |
   | `list[float]` of length `N`                          | `tuple(N,f64)`       |
+  | `{"curve": …, "function": F, …}`                     | `<curve>(F)`         |
+
+  A value-curve row is
+  `{"curve": "incremental", "initial_input": …, "input_at_zero": …,
+  "function": F}`, where `F` is
+  one of the function rows above and an absent scalar is `None` or left out; an `input_output` row
+  has no `initial_input`.
 
   `element_type=` is still accepted, as an assertion rather than an override: it raises if it
   disagrees with the values. Where the values name nothing it is the only thing to go on — an empty
@@ -124,13 +154,13 @@ Each binding ships a reference codec between the stored bytes and per-timestep v
   and without it those are refused, naming the remedy. The one series no declaration reaches is an
   empty `tuple(N,f64)`, whose arity lives in rows it does not have.
 - **Julia** — `InfraStore.encode_element_values` / `decode_element_values`, over the value types
-  `LinearFunction`, `QuadraticFunction`, `PiecewiseLinear` and `PiecewiseStep`. Decode takes a
-  `types` keyword, so a consumer with its own domain types — InfrastructureSystems.jl's
-  `FunctionData` — decodes straight into them and pays no conversion; encode is three small generic
-  functions it extends instead. The names follow the wire vocabulary (`PiecewiseLinear`, not
-  `PiecewiseLinearData`) so that `using InfraStore,
-  InfrastructureSystems` is not an ambiguity
-  error.
+  `LinearFunction`, `QuadraticFunction`, `PiecewiseLinear` and `PiecewiseStep`, and the curves
+  `InputOutput`, `Incremental` and `AverageRate` that wrap one. Decode takes a `types` keyword, so a
+  consumer with its own domain types — InfrastructureSystems.jl's `FunctionData` — decodes straight
+  into them and pays no conversion; encode is three small generic functions it extends instead. The
+  names follow the wire vocabulary (`PiecewiseLinear`, not `PiecewiseLinearData`) so that
+  `using InfraStore,
+  InfrastructureSystems` is not an ambiguity error.
 
 The CLI decodes composite rows for `get -f json`, under an `element_values` key alongside the raw
 `values`. Its **CSV** output stays packed on purpose: that form is what `add` reads back, so it has

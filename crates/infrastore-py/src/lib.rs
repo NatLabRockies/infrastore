@@ -2181,6 +2181,12 @@ impl PySingleTimeSeries {
     /// | `list[{"x": _, "y": _}]`                      | `piecewise_linear`    |
     /// | `{"x": list, "y": list}`                      | `piecewise_step`      |
     /// | `list[float]` of length N                     | `tuple(N,f64)`        |
+    /// | `{"curve": "incremental", "function": F, ...}` | `incremental(F)`     |
+    ///
+    /// A value curve's row also carries `input_at_zero` and, unless it is an
+    /// `input_output` curve, `initial_input` — each a float, or `None` (or left
+    /// out) when absent. `F` is one of the function rows above, read by the same
+    /// rules; `curve` is `input_output`, `incremental`, or `average_rate`.
     ///
     /// A series of plain numbers has no encoding to do: pass the numpy array to
     /// the constructor as `data=`.
@@ -5861,6 +5867,9 @@ fn init_tracing(filter: &str) -> PyResult<()> {
 /// - `piecewise_linear` -> `list[{"x": float, "y": float}]`
 /// - `piecewise_step` -> `{"x": list[float], "y": list[float]}`
 /// - `tuple(N,dtype)` -> `list[float]` of length `N`
+/// - `incremental(F)` / `average_rate(F)` -> `{"curve": str, "initial_input":
+///   float | None, "input_at_zero": float | None, "function": <F's entry>}`
+/// - `input_output(F)` -> the same without `initial_input`
 ///
 /// Returns `None` for a scalar element type and for any array whose physical
 /// dtype is not `float64`: there the stored elements already are the values, so
@@ -5947,6 +5956,20 @@ fn decoded_to_py<'py>(
                 out.append(d)?;
             }
         }
+        DecodedValues::ValueCurve(curves) => {
+            let has_initial_input = curves.curve.header_names().len() == 2;
+            let functions = decoded_to_py(py, &curves.function)?;
+            for (i, function) in functions.try_iter()?.enumerate() {
+                let d = PyDict::new(py);
+                d.set_item("curve", curves.curve.as_str())?;
+                if has_initial_input {
+                    d.set_item("initial_input", curves.initial_input[i])?;
+                }
+                d.set_item("input_at_zero", curves.input_at_zero[i])?;
+                d.set_item("function", function?)?;
+                out.append(d)?;
+            }
+        }
     }
     Ok(out.into_any())
 }
@@ -6014,6 +6037,8 @@ enum Inferred {
 /// - `{"x": [...], "y": [...]}`                  -> `piecewise_step`
 /// - `[{"x": _, "y": _}, ...]`                   -> `piecewise_linear`
 /// - `[float, ...]`                              -> `tuple(N,f64)`
+/// - `{"curve": ..., "function": ...}`           -> a value curve, whose
+///   function is read off the `function` entries by these same rules
 ///
 /// The arity of a tuple is deliberately *not* settled here — it is read off the
 /// decoded rows by [`core_lib::element_type_of`], the same call the core's own
@@ -6032,6 +6057,9 @@ fn infer_element_type(rows: &[Bound<'_, PyAny>]) -> PyResult<Inferred> {
     // sequence raises `TypeError` for a string index -- either way, "no".
     let has = |row: &Bound<'_, PyAny>, key: &str| row.get_item(key).is_ok();
 
+    if let Some(row) = rows.iter().find(|r| has(r, "curve")) {
+        return infer_value_curve(row, rows).map(Inferred::Known);
+    }
     let mut saw_empty_row = false;
     for (index, row) in rows.iter().enumerate() {
         if has(row, "quadratic") {
@@ -6075,6 +6103,42 @@ fn infer_element_type(rows: &[Bound<'_, PyAny>]) -> PyResult<Inferred> {
     } else {
         Inferred::Empty
     })
+}
+
+/// The value-curve element type a payload of curve rows implies: the curve kind
+/// from `row`, the function from every row's `function` entry.
+fn infer_value_curve(
+    row: &Bound<'_, PyAny>,
+    rows: &[Bound<'_, PyAny>],
+) -> PyResult<core_lib::ElementType> {
+    use core_lib::{CurveKind, ElementType, FunctionKind};
+
+    let name: String = row.get_item("curve")?.extract()?;
+    let kind = CurveKind::parse(&name).ok_or_else(|| {
+        InvalidParameterError::new_err(format!(
+            "unknown curve {name:?}; expected input_output, incremental, or average_rate"
+        ))
+    })?;
+    let functions: Vec<Bound<'_, PyAny>> = rows
+        .iter()
+        .map(|r| r.get_item("function"))
+        .collect::<PyResult<_>>()?;
+    let function = match infer_element_type(&functions)? {
+        Inferred::Known(element_type) => FunctionKind::of(element_type),
+        // Only a `piecewise_linear` function row can be an empty sequence: a
+        // curve never holds a tuple.
+        Inferred::Ambiguous => Some(FunctionKind::PiecewiseLinear),
+        Inferred::Empty => None,
+    };
+    function
+        .filter(|&f| kind.accepts(f))
+        .map(|function| ElementType::ValueCurve { kind, function })
+        .ok_or_else(|| {
+            InvalidParameterError::new_err(format!(
+                "the `function` entries of these {name} curves are not a function a {name} \
+                 curve can be built over"
+            ))
+        })
 }
 
 /// Read a `from_values` payload into the core's `DecodedValues`, cross-checking
@@ -6233,6 +6297,38 @@ fn py_to_decoded(
                 })
                 .collect::<PyResult<_>>()?,
         ),
+        ElementType::ValueCurve { kind, function } => {
+            // An absent scalar may be `None` or left out of the row.
+            let scalar = |row: &Bound<'_, PyAny>, name: &str| -> PyResult<Option<f64>> {
+                match row.get_item(name) {
+                    Ok(v) => v.extract::<Option<f64>>(),
+                    Err(_) => Ok(None),
+                }
+            };
+            let mut functions = Vec::with_capacity(rows.len());
+            let mut initial_input = Vec::with_capacity(rows.len());
+            let mut input_at_zero = Vec::with_capacity(rows.len());
+            for (index, row) in rows.iter().enumerate() {
+                if let Ok(name) = row.get_item("curve")
+                    && name.extract::<String>()? != kind.as_str()
+                {
+                    return Err(InvalidParameterError::new_err(format!(
+                        "row {index} is a {} curve, but the series holds {} curves",
+                        name,
+                        kind.as_str()
+                    )));
+                }
+                functions.push(row.get_item("function")?);
+                initial_input.push(scalar(row, "initial_input")?);
+                input_at_zero.push(scalar(row, "input_at_zero")?);
+            }
+            DecodedValues::ValueCurve(core_lib::ValueCurves {
+                curve: kind,
+                initial_input,
+                input_at_zero,
+                function: Box::new(py_to_decoded(&functions, function.element_type())?),
+            })
+        }
     })
 }
 
