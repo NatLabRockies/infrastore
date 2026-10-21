@@ -98,21 +98,6 @@ const CHUNK_CACHE_NSLOTS: usize = 8209;
 const CHUNK_CACHE_NBYTES: usize = 4 * MAX_CHUNK_BYTES;
 const CHUNK_CACHE_W0: f64 = 0.75;
 
-/// How much a bulk packed read may over-fetch before it stops reading the
-/// requested columns as one block and reads them one at a time.
-///
-/// A packed dataset holds a whole cohort side by side, so the columns one call
-/// asks for can sit anywhere in a pool thousands wide. One hyperslab over the
-/// span between the first and last of them is a single HDF5 call and is what
-/// makes a whole-cohort read fast; it is also the wrong shape when the wanted
-/// columns are scattered, because the span then covers columns nobody asked
-/// for, over the pool's full time extent. Read that way, a single late column
-/// out of a wide pool costs gigabytes to return kilobytes.
-///
-/// At this factor the block path reads at most three times what it returns, and
-/// anything sparser pays one call per column and reads exactly what it returns.
-const SPAN_DENSITY: usize = 3;
-
 /// File builder with the store's chunk-cache policy applied.
 fn file_builder() -> h5::FileBuilder {
     let mut b = h5::FileBuilder::new();
@@ -1342,23 +1327,36 @@ impl Inner {
             let first = *cols.first().expect("entry implies a column");
             let last = *cols.last().expect("entry implies a column");
             let span = last - first + 1;
-            let mut columns: HashMap<usize, Vec<u8>> = HashMap::with_capacity(cols.len());
-            if span <= cols.len().saturating_mul(SPAN_DENSITY) {
-                // Dense enough that one hyperslab beats a call per column: the
-                // read is at most `SPAN_DENSITY` times what is returned.
+            // Read across time, one chunk-row strip at a time, over the span
+            // of wanted columns. A chunk is one or more timestamp rows across
+            // every column, so any column read costs the whole chunk anyway:
+            // reading the span strip by strip touches each chunk exactly once
+            // and holds at most one chunk's worth, whereas a read per column
+            // over the full time axis cycles every chunk of the pool through
+            // the cache once per column (#110).
+            let strip = ds
+                .chunk()
+                .and_then(|c| c.first().copied())
+                .unwrap_or(state.length)
+                .max(1);
+            let mut columns: HashMap<usize, Vec<u8>> = cols
+                .iter()
+                .map(|&col| (col, Vec::with_capacity(state.length * elem_bytes)))
+                .collect();
+            for start in (0..state.length).step_by(strip) {
+                let rows = start..(start + strip).min(state.length);
                 let bytes = read_sel(
                     &ds,
                     state.dtype,
-                    packed_block_ranges(0..state.length, first..last + 1, &state.element_shape),
+                    packed_block_ranges(rows, first..last + 1, &state.element_shape),
                 )?;
-                // The block is `length` rows of `span` elements, so a column
-                // is every `span`-th element starting at its offset. Taken by
+                // The strip is rows of `span` elements, so a column is every
+                // `span`-th element starting at its offset. Taken by
                 // `chunks_exact` rather than by index: a short read yields
                 // fewer elements instead of an out-of-bounds slice, and the
                 // shape mismatch is then reported where every other one is,
                 // by `TypedArray::new` below.
-                for &col in cols {
-                    let mut col_bytes = Vec::with_capacity(state.length * elem_bytes);
+                for (&col, col_bytes) in columns.iter_mut() {
                     for block in bytes
                         .chunks_exact(elem_bytes)
                         .skip(col - first)
@@ -1366,21 +1364,6 @@ impl Inner {
                     {
                         col_bytes.extend_from_slice(block);
                     }
-                    columns.insert(col, col_bytes);
-                }
-            } else {
-                // Sparse: one hyperslab per column, which reads exactly what
-                // is returned rather than every column up to the last one asked
-                // for.
-                for &col in cols {
-                    columns.insert(
-                        col,
-                        read_sel(
-                            &ds,
-                            state.dtype,
-                            packed_ranges(0..state.length, col, &state.element_shape),
-                        )?,
-                    );
                 }
             }
             reads.insert(dataset, DatasetRead { columns, state });
@@ -2124,17 +2107,16 @@ mod tests {
     }
 
     /// A bulk read fetches the columns it was asked for, whether they sit
-    /// together or scattered across a wide pool.
-    ///
-    /// The two fetch shapes are a cost decision, not a semantic one, so the
-    /// values must not depend on which one runs.
+    /// together or scattered across a wide pool, and however many chunk-row
+    /// strips the time axis takes.
     #[test]
     fn bulk_read_of_scattered_columns_returns_the_same_arrays() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.h5");
         // One pool 40 columns wide, so a scattered request spans nearly all of
-        // it while wanting two.
-        let arrays: Vec<TypedArray> = (0..40).map(|i| f64_array(vec![8, 3], i as f64)).collect();
+        // it while wanting two. 40 columns of 30 f64 is a 9,600-byte row, so a
+        // chunk is 4 rows and the 10 timesteps read as strips of 4, 4 and 2.
+        let arrays: Vec<TypedArray> = (0..40).map(|i| f64_array(vec![10, 30], i as f64)).collect();
         let hashes: Vec<[u8; 32]> = arrays.iter().map(array_hash).collect();
         let refs: Vec<&TypedArray> = arrays.iter().collect();
         let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
@@ -2144,6 +2126,9 @@ mod tests {
                 .iter()
                 .all(|&w| w)
         );
+        let (_, chunks) =
+            be.dataset_shape_for_test(&dataset_base_name(Dtype::F64, &[30], 10, res()));
+        assert_eq!(chunks.unwrap()[0], 4, "the test needs a partial last strip");
 
         let read = |picks: &[usize]| {
             let h: Vec<[u8; 32]> = picks.iter().map(|&i| hashes[i]).collect();
@@ -2153,18 +2138,18 @@ mod tests {
             picks.iter().map(|&i| arrays[i].clone()).collect()
         };
 
-        // Sparse: the span is 40 columns wide and two are wanted.
+        // The span is 40 columns wide and two are wanted.
         assert_eq!(read(&[0, 39]), expect(&[0, 39]));
-        // Sparse, and out of column order: results follow the request.
+        // Out of column order: results follow the request.
         assert_eq!(read(&[39, 17, 0]), expect(&[39, 17, 0]));
         // A single column, anywhere in the pool.
         assert_eq!(read(&[37]), expect(&[37]));
-        // Dense: adjacent columns still come back in one block read.
+        // Adjacent columns.
         assert_eq!(read(&[4, 5, 6, 7]), expect(&[4, 5, 6, 7]));
-        // Every column, the whole-cohort case the block read exists for.
+        // Every column, the whole-cohort read.
         let all: Vec<usize> = (0..40).collect();
         assert_eq!(read(&all), arrays);
-        // A repeated hash yields one array per occurrence, on both paths.
+        // A repeated hash yields one array per occurrence.
         assert_eq!(read(&[39, 39, 0]), expect(&[39, 39, 0]));
         assert_eq!(read(&[5, 5, 6]), expect(&[5, 5, 6]));
     }

@@ -751,8 +751,8 @@ fn bulk_read_matches_get_time_series_across_types() {
     {
         let mut store = Store::create(Some(path.as_path()), false).unwrap();
         let mut bulk = store.bulk_add();
-        // A standalone series first, so the packed fast-path and the standalone
-        // fallback interleave and bulk_read must keep input order.
+        // An irregular series first, from a pool of its own, so two pools'
+        // reads interleave and bulk_read must keep input order.
         let stamps: Vec<_> = (0..8i64)
             .map(|j| initial + Duration::hours(j * 2))
             .collect();
@@ -776,13 +776,28 @@ fn bulk_read_matches_get_time_series_across_types() {
                 Features::new(),
             );
         }
+        // And a step function last, from a third pool.
+        let breakpoints = vec![initial, initial + Duration::days(90)];
+        let persistent = infrastore_core::PersistentTimeSeries::new(
+            breakpoints,
+            TypedArray::from_f64(vec![2], &[3.5, 4.25]),
+            "fuel_price",
+        )
+        .unwrap();
+        bulk.add(
+            (n + 1) as i64,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::PersistentTimeSeries(persistent),
+            Features::new(),
+        );
         bulk.commit().unwrap();
         store.flush().unwrap();
     }
 
     let store = Store::open(path.as_path(), true).unwrap();
     let mut keys = Vec::new();
-    for owner in 0..=(n as i64) {
+    for owner in 0..=(n as i64 + 1) {
         let k = store
             .list_metadata(
                 ListFilter::new()
@@ -797,25 +812,13 @@ fn bulk_read_matches_get_time_series_across_types() {
     let bulk = store
         .read_by_ids(&ids, infrastore_core::ReadWindow::full())
         .unwrap();
-    assert_eq!(bulk.len(), n + 1);
+    assert_eq!(bulk.len(), n + 2);
     // Every bulk result equals the per-id read, in order.
     for (i, data) in bulk.iter().enumerate() {
         let expected = store
             .read_by_id(ids[i], infrastore_core::ReadWindow::full())
             .unwrap();
-        match (data, &expected) {
-            (TimeSeriesData::SingleTimeSeries(got), TimeSeriesData::SingleTimeSeries(want)) => {
-                assert_eq!(got.data, want.data)
-            }
-            (
-                TimeSeriesData::NonSequentialTimeSeries(got),
-                TimeSeriesData::NonSequentialTimeSeries(want),
-            ) => {
-                assert_eq!(got.data, want.data);
-                assert_eq!(got.timestamps, want.timestamps);
-            }
-            other => panic!("type mismatch at {i}: {other:?}"),
-        }
+        assert_eq!(data, &expected, "series {i}");
     }
 }
 

@@ -3151,10 +3151,22 @@ impl Store {
         meta: &TimeSeriesMetadata,
         time_range: Option<TimeRange>,
     ) -> Result<TimeSeriesData> {
+        self.materialize_prefetched(meta, time_range, None)
+    }
+
+    /// [`Self::materialize_time_series`] with the series' whole array already
+    /// read, by a bulk read that fetched it alongside others from the same pool.
+    /// Only an irregular type with no `time_range` takes one.
+    fn materialize_prefetched(
+        &self,
+        meta: &TimeSeriesMetadata,
+        time_range: Option<TimeRange>,
+        prefetched: Option<TypedArray>,
+    ) -> Result<TimeSeriesData> {
         // The descriptors describe the series but live on the catalog row, not
         // in the array bytes. Filling them in here — once, for every variant —
         // is what makes a read round-trip what a write declared.
-        let mut data = self.materialize_array(meta, time_range)?;
+        let mut data = self.materialize_array(meta, time_range, prefetched)?;
         data.set_descriptors(descriptors_of(meta));
         Ok(data)
     }
@@ -3166,6 +3178,7 @@ impl Store {
         &self,
         meta: &TimeSeriesMetadata,
         time_range: Option<TimeRange>,
+        prefetched: Option<TypedArray>,
     ) -> Result<TimeSeriesData> {
         tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
         // The bound has to be spelled the way the series is, and a mismatch is
@@ -3274,7 +3287,12 @@ impl Store {
 
                 let (data, timestamps) = match time_range {
                     None => (
-                        self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
+                        match prefetched {
+                            Some(data) => data,
+                            None => {
+                                self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?
+                            }
+                        },
                         timestamps,
                     ),
                     Some((start, end)) => {
@@ -3311,7 +3329,12 @@ impl Store {
 
                 let (data, timestamps) = match time_range {
                     None => (
-                        self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
+                        match prefetched {
+                            Some(data) => data,
+                            None => {
+                                self.get_array(&meta.data_hash, meta.element_type.physical_dtype())?
+                            }
+                        },
                         timestamps,
                     ),
                     Some((start, end)) => {
@@ -4197,25 +4220,37 @@ impl Store {
     /// The whole-series body of [`Self::read_by_ids`], working from the rows it
     /// has already resolved.
     fn bulk_read_metas(&self, metas: &[TimeSeriesMetadata]) -> Result<Vec<TimeSeriesData>> {
-        // Batch the packed SingleTimeSeries reads; everything else is standalone
-        // and reuses the per-key reconstruction.
-        let (single_hashes, single_dtypes): (Vec<[u8; 32]>, Vec<Dtype>) = metas
+        // Batch the reads of the packed types, so a pool is read once per call
+        // rather than once per series; everything else is standalone and
+        // reuses the per-key reconstruction.
+        let batched = |t: TimeSeriesType| {
+            matches!(
+                t,
+                TimeSeriesType::SingleTimeSeries
+                    | TimeSeriesType::NonSequentialTimeSeries
+                    | TimeSeriesType::PersistentTimeSeries
+            )
+        };
+        let (packed_hashes, packed_dtypes): (Vec<[u8; 32]>, Vec<Dtype>) = metas
             .iter()
-            .filter(|m| m.time_series_type == TimeSeriesType::SingleTimeSeries)
+            .filter(|m| batched(m.time_series_type))
             .map(|m| (m.data_hash, m.element_type.physical_dtype()))
             .unzip();
-        let mut single_arrays = self
-            .read_arrays(&single_hashes, &single_dtypes)?
+        let mut packed_arrays = self
+            .read_arrays(&packed_hashes, &packed_dtypes)?
             .into_iter();
+        let mut next_packed = || {
+            packed_arrays.next().ok_or_else(|| {
+                TimeSeriesError::IntegrityError(
+                    "bulk_read: fewer arrays returned than packed rows".into(),
+                )
+            })
+        };
 
         let mut out = Vec::with_capacity(metas.len());
         for meta in metas {
             if meta.time_series_type == TimeSeriesType::SingleTimeSeries {
-                let data = single_arrays.next().ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(
-                        "bulk_read: fewer arrays returned than SingleTimeSeries rows".into(),
-                    )
-                })?;
+                let data = next_packed()?;
                 let initial = required(
                     meta.initial_timestamp,
                     "SingleTimeSeries",
@@ -4231,6 +4266,8 @@ impl Store {
                 // descriptors come straight off the row it already loaded.
                 series.set_descriptors(descriptors_of(meta));
                 out.push(series);
+            } else if batched(meta.time_series_type) {
+                out.push(self.materialize_prefetched(meta, None, Some(next_packed()?))?);
             } else {
                 // Materialize from the row already in hand rather than looking
                 // it up a second time: for an irregular series a second lookup
