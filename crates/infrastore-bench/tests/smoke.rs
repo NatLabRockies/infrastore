@@ -81,3 +81,25 @@ fn the_in_memory_backend_runs_the_whole_thing_without_touching_a_disk() {
     ]);
     assert!(out.contains("SingleTimeSeries"), "{out}");
 }
+
+#[test]
+fn the_reader_sweeps_cover_the_derived_forecast() {
+    let dir = tempfile::tempdir().unwrap();
+    // 30 steps clears the 24-step horizon, so the DeterministicSingleTimeSeries
+    // phase runs (7 windows) instead of being skipped.
+    let out = bench(&[
+        "read",
+        "--count",
+        "4",
+        "--length",
+        "30",
+        "--steps",
+        "3",
+        "--reader",
+        "--path",
+        dir.path().to_str().unwrap(),
+    ]);
+    assert!(out.contains("DeterministicSingleTimeSeries"), "{out}");
+    assert!(!out.contains("skipped"), "{out}");
+    assert_eq!(out.matches("ForecastReader sweep").count(), 2, "{out}");
+}

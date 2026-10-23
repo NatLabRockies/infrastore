@@ -480,16 +480,6 @@ impl DatasetState {
         shape.extend_from_slice(&self.element_shape);
         shape
     }
-    /// Refuse a row index the dataset does not have.
-    fn check_row(&self, index: usize, name: &str) -> Result<()> {
-        if index >= self.length {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "index {index} out of bounds for dataset {name} length {}",
-                self.length
-            )));
-        }
-        Ok(())
-    }
 }
 
 /// `[len, *element_shape]`.
@@ -1216,51 +1206,77 @@ impl Inner {
             .collect()
     }
 
-    /// One element block per column — row `row_at(i)` of `hashes[i]` —
-    /// gathered into `out` in `hashes` order.
+    /// The rows `rows_at(i)` of `hashes[i]`, decoded as `dtype_at(i)`,
+    /// gathered into `out` in `hashes` order — each column's run contiguous.
     ///
-    /// Columns that want the same row of the same packed dataset share one
+    /// Columns that want the same rows of the same packed dataset share one
     /// hyperslab, over `0..=` the widest of them. With one row for every
-    /// column — the uniform sweep — that is one hyperslab per dataset. A
-    /// persistent reader, whose columns sit on independent breakpoint vectors,
-    /// wants different rows of one pool and pays up to one per distinct
-    /// `(dataset, row)`: the intrinsic price of independent breakpoints, and
-    /// for the data the type exists for — sparse curves, few distinct vectors —
-    /// a small one.
+    /// column — the uniform static sweep — that is one hyperslab per dataset,
+    /// and so is a forecast window across every derived column, which is the
+    /// same read `horizon` rows tall. A persistent reader, whose columns sit on
+    /// independent breakpoint vectors, wants different rows of one pool and
+    /// pays up to one per distinct `(dataset, rows)`: the intrinsic price of
+    /// independent breakpoints, and for the data the type exists for — sparse
+    /// curves, few distinct vectors — a small one.
     fn read_rows_locked(
         &self,
         hashes: &[[u8; 32]],
-        dtype: Dtype,
-        row_at: impl Fn(usize) -> usize,
+        dtype_at: impl Fn(usize) -> Dtype,
+        rows_at: impl Fn(usize) -> Range<usize>,
         out: &mut Vec<u8>,
     ) -> Result<()> {
         out.clear();
         if hashes.is_empty() {
             return Ok(());
         }
-        let placements = self.place(hashes, |_| dtype)?;
+        let placements = self.place(hashes, &dtype_at)?;
 
-        // Widest column wanted per `(dataset, row)`, so each hyperslab reads
-        // exactly as far as it has to.
-        let mut max_col: HashMap<(&str, usize), usize> = HashMap::new();
-        for (i, placement) in placements.iter().enumerate() {
-            if let Placement::Packed { dataset, col } = *placement {
-                let top = max_col.entry((dataset, row_at(i))).or_insert(0);
-                *top = (*top).max(col);
-            }
+        /// One hyperslab: rows `rows` of dataset `dataset`, over columns
+        /// `0..=top` -- the widest column wanted from it, so each hyperslab
+        /// reads exactly as far as it has to. After the read, `bytes` holds
+        /// `rows.len()` rows of `top + 1` element blocks of `elem_bytes` each.
+        struct Strip<'a> {
+            dataset: &'a str,
+            rows: Range<usize>,
+            top: usize,
+            bytes: Vec<u8>,
+            elem_bytes: usize,
         }
-        let mut rows: HashMap<(&str, usize), (Vec<u8>, usize)> =
-            HashMap::with_capacity(max_col.len());
-        for (&(dataset, row), &top) in &max_col {
-            let state = self.dataset_state(dataset)?;
-            state.check_row(row, dataset)?;
-            let ds = self.dataset(dataset)?;
-            let bytes = read_sel(
+        // Each packed column is resolved to its strip once, here, so the
+        // scatter below indexes rather than hashes: this loop runs per column
+        // of a 2,000-column sweep every timestep.
+        let mut strip_of: HashMap<(&str, Range<usize>), usize> = HashMap::new();
+        let mut strips: Vec<Strip<'_>> = Vec::new();
+        let mut strip_at: Vec<usize> = Vec::with_capacity(placements.len());
+        for (i, placement) in placements.iter().enumerate() {
+            let Placement::Packed { dataset, col } = *placement else {
+                strip_at.push(usize::MAX);
+                continue;
+            };
+            let rows = rows_at(i);
+            let idx = *strip_of.entry((dataset, rows.clone())).or_insert_with(|| {
+                strips.push(Strip {
+                    dataset,
+                    rows,
+                    top: 0,
+                    bytes: Vec::new(),
+                    elem_bytes: 0,
+                });
+                strips.len() - 1
+            });
+            strips[idx].top = strips[idx].top.max(col);
+            strip_at.push(idx);
+        }
+        for strip in &mut strips {
+            let state = self.dataset_state(strip.dataset)?;
+            check_slice(&strip.rows, state.length)?;
+            let ds = self.dataset(strip.dataset)?;
+            strip.bytes = read_sel(
                 &ds,
                 state.dtype,
-                packed_block_ranges(row..row + 1, 0..top + 1, &state.element_shape),
+                packed_block_ranges(strip.rows.clone(), 0..strip.top + 1, &state.element_shape),
             )?;
-            rows.insert((dataset, row), (bytes, state.elem_bytes()));
+            strip.elem_bytes = state.elem_bytes();
         }
 
         // Scatter back in the caller's column order, which is what makes the
@@ -1270,19 +1286,21 @@ impl Inner {
         for (i, placement) in placements.iter().enumerate() {
             match *placement {
                 Placement::Packed { dataset, col } => {
-                    let (row, elem_bytes) =
-                        rows.get(&(dataset, row_at(i))).expect("row read above");
-                    let start = col * elem_bytes;
-                    let block = row.get(start..start + elem_bytes).ok_or_else(|| {
-                        TimeSeriesError::IntegrityError(format!(
-                            "column {col} out of row bounds for dataset {dataset}"
-                        ))
-                    })?;
-                    out.extend_from_slice(block);
+                    let strip = &strips[strip_at[i]];
+                    let (width, elem_bytes) = (strip.top + 1, strip.elem_bytes);
+                    for r in 0..strip.rows.len() {
+                        let start = (r * width + col) * elem_bytes;
+                        let block =
+                            strip.bytes.get(start..start + elem_bytes).ok_or_else(|| {
+                                TimeSeriesError::IntegrityError(format!(
+                                    "column {col} out of row bounds for dataset {dataset}"
+                                ))
+                            })?;
+                        out.extend_from_slice(block);
+                    }
                 }
                 Placement::Individual { hash } => {
-                    let row = row_at(i);
-                    let arr = self.read_locked(&hash, dtype, Some(row..row + 1))?;
+                    let arr = self.read_locked(&hash, dtype_at(i), Some(rows_at(i)))?;
                     out.extend_from_slice(&arr.bytes);
                 }
             }
@@ -1629,7 +1647,7 @@ impl StorageBackend for Hdf5Backend {
         out: &mut Vec<u8>,
     ) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_rows_locked(hashes, dtype, |_| index, out)
+        inner.read_rows_locked(hashes, |_| dtype, |_| index..index + 1, out)
     }
 
     fn read_indices_into(
@@ -1647,7 +1665,20 @@ impl StorageBackend for Hdf5Backend {
             )));
         }
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_rows_locked(hashes, dtype, |i| indices[i], out)
+        inner.read_rows_locked(hashes, |_| dtype, |i| indices[i]..indices[i] + 1, out)
+    }
+
+    #[tracing::instrument(skip(self, hashes, dtypes, ranges, out), fields(n = hashes.len()))]
+    fn read_ranges_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtypes: &[Dtype],
+        ranges: &[Range<usize>],
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        super::check_ranges_arity(hashes, dtypes, ranges)?;
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_rows_locked(hashes, |i| dtypes[i], |i| ranges[i].clone(), out)
     }
 
     #[tracing::instrument(skip(self, hashes), fields(n = hashes.len()))]
@@ -2104,6 +2135,61 @@ mod tests {
         for (i, a) in arrays.iter().enumerate() {
             assert_eq!(buf[i * elem..(i + 1) * elem], a.bytes[5 * elem..6 * elem]);
         }
+    }
+
+    /// `read_ranges_into` hands back each column's run of rows, contiguous and
+    /// in request order, whether the columns share one hyperslab (same rows of
+    /// one pool), want different rows of it, repeat, or sit in a standalone
+    /// dataset -- and a run past the end is refused rather than truncated.
+    #[test]
+    fn range_reads_gather_each_columns_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let arrays: Vec<TypedArray> = (0..7).map(|i| f64_array(vec![8, 3], i as f64)).collect();
+        let hashes: Vec<[u8; 32]> = arrays.iter().map(array_hash).collect();
+        let refs: Vec<&TypedArray> = arrays.iter().collect();
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_packed_block(&hashes, &refs, res()).unwrap();
+        let lone = f64_array(vec![8, 3], 99.0);
+        let lone_hash = array_hash(&lone);
+        be.put_array(&lone_hash, &lone, res(), ArrayLayout::Standalone)
+            .unwrap();
+
+        // Columns 6, 1 and 3 want rows 2..5; column 4 wants 0..8; column 1 is
+        // asked again, for 7..8; the standalone array wants 1..3.
+        let want: Vec<(usize, Range<usize>)> =
+            vec![(6, 2..5), (1, 2..5), (4, 0..8), (3, 2..5), (1, 7..8)];
+        let mut req_hashes: Vec<[u8; 32]> = want.iter().map(|(c, _)| hashes[*c]).collect();
+        let mut ranges: Vec<Range<usize>> = want.iter().map(|(_, r)| r.clone()).collect();
+        req_hashes.push(lone_hash);
+        ranges.push(1..3);
+        let dtypes = vec![Dtype::F64; req_hashes.len()];
+        let mut buf = Vec::new();
+        be.read_ranges_into(&req_hashes, &dtypes, &ranges, &mut buf)
+            .unwrap();
+
+        let elem = 3 * 8;
+        let mut expected = Vec::new();
+        for (c, r) in &want {
+            expected.extend_from_slice(&arrays[*c].bytes[r.start * elem..r.end * elem]);
+        }
+        expected.extend_from_slice(&lone.bytes[elem..3 * elem]);
+        assert_eq!(buf, expected);
+
+        let err = be
+            .read_ranges_into(
+                &hashes[..1],
+                &dtypes[..1],
+                std::slice::from_ref(&(6..9)),
+                &mut buf,
+            )
+            .unwrap_err();
+        assert!(matches!(err, TimeSeriesError::InvalidParameter(_)), "{err}");
+        assert!(
+            be.read_ranges_into(&hashes[..2], &dtypes[..1], &ranges[..2], &mut buf)
+                .is_err(),
+            "mismatched slice lengths are refused"
+        );
     }
 
     /// A bulk read fetches the columns it was asked for, whether they sit

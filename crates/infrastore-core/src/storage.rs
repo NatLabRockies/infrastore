@@ -406,6 +406,37 @@ pub(crate) trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    /// [`Self::read_index_into`] with a **row range per column**: rows
+    /// `ranges[i]` of `hashes[i]`, decoded as `dtypes[i]`, appended to `out` in
+    /// `hashes` order — each column's run contiguous, `[len, *element_shape]`
+    /// row-major, so a column's bytes are `ranges[i].len() * element_bytes` and
+    /// the caller walks `out` with the lengths it asked for. The three slices
+    /// must be the same length. `out` is cleared first.
+    ///
+    /// Serves a [`ForecastReader`](crate::reader::ForecastReader)'s
+    /// `DeterministicSingleTimeSeries` entries, whose windows are consecutive
+    /// runs of a packed `SingleTimeSeries` column: a window read across every
+    /// derived entry is "these rows of every column", the static reader's row
+    /// read widened to a range.
+    ///
+    /// The default reads each column's slice individually; the on-disk backend
+    /// overrides this to read one hyperslab per packed dataset and range.
+    fn read_ranges_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtypes: &[Dtype],
+        ranges: &[Range<usize>],
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        check_ranges_arity(hashes, dtypes, ranges)?;
+        out.clear();
+        for ((hash, &dtype), range) in hashes.iter().zip(dtypes).zip(ranges) {
+            let run = self.get_slice(hash, dtype, range.clone())?;
+            out.extend_from_slice(&run.bytes);
+        }
+        Ok(())
+    }
+
     /// The stored shape of an array, ideally without reading its data. Used by
     /// the forecast reader to plan window slicing. Needs no `dtype`: a shape is
     /// element-count-per-axis, which every backend records independently of how
@@ -611,6 +642,23 @@ pub(crate) trait StorageBackend: Send + Sync {
 /// independently knows (the packed pool's dataset name, or an in-memory array's
 /// own tag). Only reachable if the catalog and the array store have drifted, so
 /// it is an integrity error rather than a bad argument.
+/// Refuse a [`StorageBackend::read_ranges_into`] whose three slices disagree.
+pub(crate) fn check_ranges_arity(
+    hashes: &[[u8; 32]],
+    dtypes: &[Dtype],
+    ranges: &[Range<usize>],
+) -> Result<()> {
+    if hashes.len() != dtypes.len() || hashes.len() != ranges.len() {
+        return Err(TimeSeriesError::IntegrityError(format!(
+            "read_ranges_into got {} hashes, {} dtypes and {} ranges",
+            hashes.len(),
+            dtypes.len(),
+            ranges.len()
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn check_dtype(hash: &[u8; 32], stored: Dtype, requested: Dtype) -> Result<()> {
     if stored != requested {
         return Err(TimeSeriesError::IntegrityError(format!(

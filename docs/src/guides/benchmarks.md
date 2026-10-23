@@ -81,12 +81,22 @@ For on-disk stores the binary flushes, drops, and reopens the store read-only be
 This rebuilds the HDF5 in-memory index and starts the HDF5 chunk cache cold, reflecting real
 simulation startup conditions. The OS page cache may still be warm.
 
-Reports per-step **min / median / p95 / max** and total **component-reads/s**.
+Reports per-step **min / median / p95 / max** and total **component-reads/s**, for three shapes: the
+`SingleTimeSeries`, a dense `Deterministic` of `--length` windows, and a
+`DeterministicSingleTimeSeries` — the `SingleTimeSeries` viewed through
+`transform_single_time_series` as hourly 24-step windows, which is the forecast most simulations
+actually read. The derived phase has `--length − 23` windows and is skipped when `--length` is
+shorter than the horizon.
 
-> **Deterministic note.** The current `read_by_id` implementation reads the full `[H × count]` array
-> from storage and then slices to the requested window in memory. For large `count` (e.g. 168
-> windows) each single-step read transfers `H × count × 8` bytes, which is `24 × 168 × 8 = 32 KB`
-> per component. The benchmark output flags this explicitly so the overhead is visible.
+`--reader` swaps the per-step `read_by_ids_range` for the columnar readers: a `StaticReader` over
+the `SingleTimeSeries` and a `ForecastReader` over each forecast shape. Those are the simulation
+read path, and the two forecast shapes take different routes through storage — a dense window is a
+slab of a standalone array, a derived window is a run of rows in a packed column — so a change to
+either shows up here:
+
+```sh
+infrastore-bench read --count 2000 --length 168 --steps 24 --reader
+```
 
 ## Interpreting results
 

@@ -40,7 +40,11 @@ The forecast case is the same argument with a different unit. A dense forecast a
 bounded blocks along the window axis, so reading one window decompresses its whole block. A
 `ForecastReader` sizes its cache to that block width, so a sweep over the window timeline
 decompresses each block exactly once — where independent per-window reads re-decompress overlapping
-data every step.
+data every step. A `DeterministicSingleTimeSeries` has no window axis of its own: each window is a
+run of rows of a packed `SingleTimeSeries` column, in a pool chunked one timestamp row across every
+column. So the reader reads every derived entry in one batch per step — one hyperslab per packed
+dataset, the static reader's row read widened to the horizon — rather than one read per series,
+which would decompress the same chunks once per column.
 
 ## A Reader Is a Plan, Not a Cursor
 
