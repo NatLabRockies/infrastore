@@ -49,6 +49,26 @@ def _vectors():
         return json.load(f)["vectors"]
 
 
+def _timesteps(decoded):
+    """A vector's decoded values in the per-timestep form Python uses.
+
+    The corpus holds a value-curve series column-wise; Python hands back one
+    dict per curve, with `initial_input` only on the curves that have one.
+    """
+    if decoded["kind"] != "value_curve":
+        return decoded["timesteps"]
+    curves = decoded["timesteps"]
+    rows = []
+    for i, function in enumerate(_timesteps(curves["function"])):
+        row = {"curve": curves["curve"]}
+        if curves["curve"] != "input_output":
+            row["initial_input"] = curves["initial_input"][i]
+        row["input_at_zero"] = curves["input_at_zero"][i]
+        row["function"] = function
+        rows.append(row)
+    return rows
+
+
 def _series_from(vector, values):
     """Every series type whose leading-axis count matches this vector's.
 
@@ -91,7 +111,7 @@ def _series_from(vector, values):
 
 @pytest.mark.parametrize("vector", _vectors(), ids=lambda v: v["name"])
 def test_from_values_reaches_the_pinned_packing(vector):
-    values = vector["decoded"]["timesteps"]
+    values = _timesteps(vector["decoded"])
     for series in _series_from(vector, values):
         what = type(series).__name__
         # The element type nobody declared.
@@ -276,3 +296,108 @@ def test_the_irregular_types_still_check_their_timestamps():
         NonSequentialTimeSeries.from_values(stamps, CURVES, "n")
     with pytest.raises(InvalidParameterError, match="does not match data length"):
         PersistentTimeSeries.from_values(stamps, CURVES, "p")
+
+
+def test_a_value_curve_series_round_trips_through_the_store():
+    curves = [
+        {
+            "curve": "incremental",
+            "initial_input": 5.0,
+            "input_at_zero": None,
+            "function": {"x": [0.0, 10.0], "y": [3.0]},
+        },
+        {
+            "curve": "incremental",
+            "initial_input": None,
+            "input_at_zero": 1.5,
+            "function": {"x": [0.0, 10.0, 20.0], "y": [3.0, 4.0]},
+        },
+    ]
+    series = SingleTimeSeries.from_values(T0, HOUR, curves, "offer")
+    assert series.element_type == "incremental(piecewise_step)"
+    store = Store.create(in_memory=True)
+    id_ = store.add_time_series(
+        owner_id=1,
+        owner_type="Generator",
+        owner_category=OwnerCategory.Component,
+        time_series=series,
+    )
+    assert store.get_metadata_by_id(id_)["element_type"] == "incremental(piecewise_step)"
+    assert store.read_by_id(id_).decoded_values() == curves
+
+
+def test_a_value_curve_row_may_leave_out_an_absent_scalar():
+    series = SingleTimeSeries.from_values(
+        T0,
+        HOUR,
+        [{"curve": "input_output", "function": {"proportional": 2.0, "constant": 1.0}}],
+        "cost",
+    )
+    assert series.element_type == "input_output(linear_function)"
+    assert series.decoded_values() == [
+        {
+            "curve": "input_output",
+            "input_at_zero": None,
+            "function": {"proportional": 2.0, "constant": 1.0},
+        }
+    ]
+
+
+def test_a_value_curve_over_a_function_it_cannot_hold_is_refused():
+    with pytest.raises(InvalidParameterError):
+        SingleTimeSeries.from_values(
+            T0,
+            HOUR,
+            [{"curve": "incremental", "function": [{"x": 0.0, "y": 1.0}]}],
+            "bad",
+        )
+
+
+def test_a_present_nan_scalar_is_refused_rather_than_read_back_as_absent():
+    with pytest.raises(InvalidParameterError, match="input_at_zero is NaN"):
+        SingleTimeSeries.from_values(
+            T0,
+            HOUR,
+            [
+                {
+                    "curve": "input_output",
+                    "input_at_zero": float("nan"),
+                    "function": {"proportional": 2.0, "constant": 1.0},
+                }
+            ],
+            "cost",
+        )
+
+
+@pytest.mark.parametrize(
+    "second, message",
+    [
+        ({"curve": "incremental"}, 'row 1 is a value curve with no "function"'),
+        ({"function": {"x": [0.0, 1.0], "y": [2.0]}}, "row 1's \"curve\" is not \"incremental\""),
+        (
+            {"curve": "average_rate", "function": {"x": [0.0, 1.0], "y": [2.0]}},
+            "row 1's \"curve\" is not \"incremental\"",
+        ),
+    ],
+)
+def test_every_value_curve_row_names_its_curve_and_function(second, message):
+    first = {"curve": "incremental", "function": {"x": [0.0, 1.0], "y": [2.0]}}
+    with pytest.raises(InvalidParameterError, match=message):
+        SingleTimeSeries.from_values(T0, HOUR, [first, second], "offer")
+
+
+def test_a_quadratic_row_after_a_linear_one_is_not_read_as_linear():
+    linear = {"proportional": 2.0, "constant": 1.0}
+    quadratic = {"quadratic": 0.5, "proportional": 2.0, "constant": 1.0}
+    with pytest.raises(InvalidParameterError, match="row 1 is a quadratic function"):
+        SingleTimeSeries.from_values(T0, HOUR, [linear, quadratic], "cost")
+    with pytest.raises(InvalidParameterError, match="row 1 is a quadratic function"):
+        SingleTimeSeries.from_values(
+            T0,
+            HOUR,
+            [
+                {"curve": "incremental", "function": linear},
+                {"curve": "incremental", "function": quadratic},
+            ],
+            "offer",
+        )

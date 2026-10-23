@@ -305,13 +305,16 @@ for a static series, an `(H, count)` matrix for a `Deterministic`, an `(P, H, co
 `is_composite_element_type` tells the cases apart, and an unrecognized spelling reads back as raw
 numbers rather than throwing.
 
-| Value type          | `element_type`       | Constructor                           |
-| ------------------- | -------------------- | ------------------------------------- |
-| `LinearFunction`    | `linear_function`    | `(proportional, constant)`            |
-| `QuadraticFunction` | `quadratic_function` | `(quadratic, proportional, constant)` |
-| `PiecewiseLinear`   | `piecewise_linear`   | `(points)`, a vector of `XYCoords`    |
-| `PiecewiseStep`     | `piecewise_step`     | `(x_coords, y_values)`                |
-| `NTuple{N,Float64}` | `tuple(N,f64)`       | —                                     |
+| Value type          | `element_type`       | Constructor                                     |
+| ------------------- | -------------------- | ----------------------------------------------- |
+| `LinearFunction`    | `linear_function`    | `(proportional, constant)`                      |
+| `QuadraticFunction` | `quadratic_function` | `(quadratic, proportional, constant)`           |
+| `PiecewiseLinear`   | `piecewise_linear`   | `(points)`, a vector of `XYCoords`              |
+| `PiecewiseStep`     | `piecewise_step`     | `(x_coords, y_values)`                          |
+| `NTuple{N,Float64}` | `tuple(N,f64)`       | —                                               |
+| `InputOutput`       | `input_output(F)`    | `(function_data, input_at_zero)`                |
+| `Incremental`       | `incremental(F)`     | `(function_data, initial_input, input_at_zero)` |
+| `AverageRate`       | `average_rate(F)`    | `(function_data, initial_input, input_at_zero)` |
 
 These types are **permissive on purpose**: they accept everything the store accepts, including the
 zero- and one-point piecewise curves that a domain type such as InfrastructureSystems.jl's

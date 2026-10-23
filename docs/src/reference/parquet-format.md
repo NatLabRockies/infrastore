@@ -93,13 +93,15 @@ and writes one set of three files per distinct triple. The payoff is that **ever
 file is required**: there are no nullable columns anywhere in this format, and a reader never has to
 ask whether a null means "absent" or "unknown".
 
-The **value type** is the element type with its per-step shape, except that the four composite kinds
-(`linear_function`, `quadratic_function`, `piecewise_linear`, `piecewise_step`) partition by **kind
-alone**. Their stored width varies per series — a `piecewise_linear` row is `[n, x₁, y₁, …]`
-zero-padded to the widest timestep in that series — so keying by width would scatter one kind across
-a file per width. Instead every composite row in a partition is re-padded to the widest series in
-it, which the layout allows: the leading count `n` keeps each row self-describing whatever the
-padding. The cost is a `data_hash` caveat, below.
+The **value type** is the element type with its per-step shape, except that the composite kinds —
+the four function-data kinds (`linear_function`, `quadratic_function`, `piecewise_linear`,
+`piecewise_step`) and the value curves over them (`incremental(piecewise_step)`, …) — partition by
+**kind alone**. A value curve's stem drops its parentheses: `incremental_piecewise_step`. Their
+stored width varies per series — a `piecewise_linear` row is `[n, x₁, y₁, …]` zero-padded to the
+widest timestep in that series — so keying by width would scatter one kind across a file per width.
+Instead every composite row in a partition is re-padded to the widest series in it, which the layout
+allows: the leading count `n` keeps each row self-describing whatever the padding. The cost is a
+`data_hash` caveat, below.
 
 An **unspecified** `time_reference` is a partition of its own. A series that declared no spelling
 must not pool with one that declared UTC, even though both write a UTC-zoned column.

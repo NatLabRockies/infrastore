@@ -76,7 +76,8 @@ impl ValueKind {
     /// Shapes join with `x` (`f64_2x3`) and a tuple keeps its arity next to its
     /// dtype (`tuple3_f64`), because the canonical spellings — `tuple(3,f64)`,
     /// `[2, 3]` — carry `(`, `,` and spaces, which are either forbidden or
-    /// merely awful in a filename.
+    /// merely awful in a filename. A value curve drops its parentheses the same
+    /// way (`incremental_piecewise_step`).
     pub fn slug(&self) -> String {
         match self {
             ValueKind::Dense { dtype, shape } if shape.is_empty() => dtype.as_str().to_string(),
@@ -90,6 +91,9 @@ impl ValueKind {
                     .join("x")
             ),
             ValueKind::Tuple { arity, dtype } => format!("tuple{arity}_{}", dtype.as_str()),
+            ValueKind::Composite(infrastore_core::ElementType::ValueCurve { kind, function }) => {
+                format!("{}_{}", kind.as_str(), function.element_type())
+            }
             ValueKind::Composite(kind) => kind.to_string(),
         }
     }

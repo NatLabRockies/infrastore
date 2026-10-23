@@ -27,7 +27,7 @@ pub(crate) mod openapi;
 pub(crate) mod timestamps;
 
 pub use codec::{
-    DecodedValues, LinearFunction, QuadraticFunction, StepFunction, XyPoint, decode,
+    DecodedValues, LinearFunction, QuadraticFunction, StepFunction, ValueCurves, XyPoint, decode,
     element_type_of, encode, encode_as,
 };
 pub use error::{Result, TimeSeriesError};
@@ -52,7 +52,7 @@ pub use store::{
 };
 pub use types::{
     array::{Dtype, Element, TypedArray},
-    element_type::ElementType,
+    element_type::{CurveKind, ElementType, FunctionKind},
     id::TimeSeriesId,
     key::KeyIdentity,
     metadata::{

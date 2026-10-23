@@ -27,7 +27,8 @@ const _NAME_BY_DTYPE = Dict{Type, String}(v => k for (k, v) in _DTYPE_BY_NAME)
 # `element_type` is the store's own vocabulary for what the elements mean: a
 # dtype spelling for plain numbers, else `tuple(N,dtype)` or one of the
 # function-data kinds (`linear_function`, `quadratic_function`,
-# `piecewise_linear`, `piecewise_step`). It supersedes the dtype code on the
+# `piecewise_linear`, `piecewise_step`), or a value curve over one
+# (`incremental(piecewise_step)`). It supersedes the dtype code on the
 # write ABI — the physical dtype is derived from it.
 
 function _element_type_name(::Type{T}) where {T}
@@ -44,6 +45,7 @@ function _physical_dtype_of(element_type::AbstractString)
     s = String(element_type)
     s in ("linear_function", "quadratic_function", "piecewise_linear", "piecewise_step") &&
         return Float64
+    occursin(_CURVE_TAG, s) && return Float64
     inner = match(r"^tuple\(\s*\d+\s*,\s*([A-Za-z0-9]+)\s*\)$", s)
     inner !== nothing && return get(_DTYPE_BY_NAME, inner.captures[1], nothing)
     return get(_DTYPE_BY_NAME, s, nothing)

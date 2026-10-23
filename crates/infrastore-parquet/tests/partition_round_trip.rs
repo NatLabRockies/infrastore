@@ -13,9 +13,9 @@ use std::path::Path;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
-    Dtype, ElementType, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, Period,
-    PersistentTimeSeries, SingleTimeSeries, Store, TimeReference, TimeSeriesData,
-    TimeSeriesMetadata, TypedArray,
+    CurveKind, Dtype, ElementType, FeatureValue, Features, FunctionKind, NonSequentialTimeSeries,
+    OwnerCategory, Period, PersistentTimeSeries, SingleTimeSeries, Store, TimeReference,
+    TimeSeriesData, TimeSeriesMetadata, TypedArray,
 };
 use infrastore_parquet::read::{ImportOptions, ImportedSeries};
 use infrastore_parquet::{PartitionFiles, partitions, read_partition_with, write_partitions};
@@ -392,6 +392,51 @@ fn a_repadded_composite_comes_back_at_its_own_width() {
     };
     assert_eq!(b.data.shape, vec![1, 5]);
     assert_eq!(b.data.to_f64_vec().unwrap(), vec![2.0, 0.0, 5.0, 1.0, 7.0]);
+}
+
+#[test]
+fn a_value_curve_partition_has_a_plain_file_name_and_round_trips() {
+    let curve = ElementType::ValueCurve {
+        kind: CurveKind::InputOutput,
+        function: FunctionKind::PiecewiseLinear,
+    };
+    let narrow = SingleTimeSeries::new(
+        t0(),
+        Duration::hours(1),
+        TypedArray::from_f64(vec![1, 2], &[f64::NAN, 0.0]),
+        "narrow",
+    )
+    .with_element_type(curve);
+    let wide = SingleTimeSeries::new(
+        t0(),
+        Duration::hours(1),
+        TypedArray::from_f64(vec![1, 4], &[1.5, 1.0, 0.0, 5.0]),
+        "wide",
+    )
+    .with_element_type(curve);
+
+    let (back, dir) = round_trip(plain(vec![
+        (1, utc(TimeSeriesData::SingleTimeSeries(narrow.clone()))),
+        (2, utc(TimeSeriesData::SingleTimeSeries(wide.clone()))),
+    ]));
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|n| n.contains("input_output_piecewise_linear") && !n.contains('(')),
+        "{names:?}"
+    );
+    for (one, want) in back.iter().zip([narrow, wide]) {
+        let TimeSeriesData::SingleTimeSeries(got) = &one.data else {
+            panic!("expected a SingleTimeSeries");
+        };
+        assert_eq!(got.element_type, curve);
+        // Back at its own width, header and NaN included.
+        assert_eq!(got.data, want.data, "{}", want.name);
+    }
 }
 
 #[test]

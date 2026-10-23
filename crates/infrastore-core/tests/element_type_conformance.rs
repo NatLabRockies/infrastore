@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use infrastore_core::{
-    DecodedValues, Dtype, ElementType, LinearFunction, QuadraticFunction, StepFunction,
-    TimeSeriesType, TypedArray, XyPoint,
+    CurveKind, DecodedValues, Dtype, ElementType, FunctionKind, LinearFunction, QuadraticFunction,
+    StepFunction, TimeSeriesType, TypedArray, ValueCurves, XyPoint,
 };
 
 /// One conformance case: an array as stored, plus what it must decode to.
@@ -38,7 +38,8 @@ pub struct ConformanceVector {
     /// Full array shape, `leading_dims` axes then the per-step element shape.
     pub shape: Vec<usize>,
     /// The stored elements as `f64`s in row-major order — the flat form a
-    /// binding builds before encoding to bytes.
+    /// binding builds before encoding to bytes. A value curve's absent scalar
+    /// is `NaN`, which JSON spells `null`.
     pub values: Vec<f64>,
     /// The same elements as little-endian bytes, hex-encoded. This is the
     /// byte-level contract: a binding that produces different bytes for the
@@ -324,7 +325,142 @@ pub fn vectors() -> Vec<ConformanceVector> {
                 },
             ]),
         ),
+        // Value curves: the function row with the curve's scalars in front,
+        // `NaN` (JSON `null`) for an absent one.
+        vector(
+            "input_output_linear_function_static",
+            curve(CurveKind::InputOutput, FunctionKind::LinearFunction),
+            TimeSeriesType::SingleTimeSeries,
+            &[2],
+            DecodedValues::ValueCurve(ValueCurves {
+                curve: CurveKind::InputOutput,
+                initial_input: vec![None, None],
+                input_at_zero: vec![Some(4.0), None],
+                function: Box::new(DecodedValues::LinearFunction(vec![
+                    LinearFunction {
+                        proportional: 2.0,
+                        constant: 1.0,
+                    },
+                    LinearFunction {
+                        proportional: -0.5,
+                        constant: 0.0,
+                    },
+                ])),
+            }),
+        ),
+        vector(
+            "input_output_quadratic_function_static",
+            curve(CurveKind::InputOutput, FunctionKind::QuadraticFunction),
+            TimeSeriesType::SingleTimeSeries,
+            &[1],
+            DecodedValues::ValueCurve(ValueCurves {
+                curve: CurveKind::InputOutput,
+                initial_input: vec![None],
+                input_at_zero: vec![Some(0.25)],
+                function: Box::new(DecodedValues::QuadraticFunction(vec![QuadraticFunction {
+                    quadratic: 0.1,
+                    proportional: 2.0,
+                    constant: 3.0,
+                }])),
+            }),
+        ),
+        vector(
+            "input_output_piecewise_linear_ragged",
+            curve(CurveKind::InputOutput, FunctionKind::PiecewiseLinear),
+            TimeSeriesType::SingleTimeSeries,
+            &[2],
+            DecodedValues::ValueCurve(ValueCurves {
+                curve: CurveKind::InputOutput,
+                initial_input: vec![None, None],
+                input_at_zero: vec![None, Some(1.0)],
+                function: Box::new(DecodedValues::PiecewiseLinear(vec![
+                    vec![XyPoint { x: 0.0, y: 0.0 }, XyPoint { x: 10.0, y: 50.0 }],
+                    vec![],
+                ])),
+            }),
+        ),
+        vector(
+            "incremental_piecewise_step_ragged",
+            curve(CurveKind::Incremental, FunctionKind::PiecewiseStep),
+            TimeSeriesType::SingleTimeSeries,
+            &[2],
+            DecodedValues::ValueCurve(ValueCurves {
+                curve: CurveKind::Incremental,
+                initial_input: vec![Some(5.0), None],
+                input_at_zero: vec![None, Some(1.5)],
+                function: Box::new(DecodedValues::PiecewiseStep(vec![
+                    StepFunction {
+                        x: vec![0.0, 10.0],
+                        y: vec![3.0],
+                    },
+                    StepFunction {
+                        x: vec![0.0, 10.0, 20.0],
+                        y: vec![3.0, 4.0],
+                    },
+                ])),
+            }),
+        ),
+        vector(
+            "incremental_linear_function_static",
+            curve(CurveKind::Incremental, FunctionKind::LinearFunction),
+            TimeSeriesType::SingleTimeSeries,
+            &[1],
+            DecodedValues::ValueCurve(ValueCurves {
+                curve: CurveKind::Incremental,
+                initial_input: vec![Some(2.0)],
+                input_at_zero: vec![Some(3.0)],
+                function: Box::new(DecodedValues::LinearFunction(vec![LinearFunction {
+                    proportional: 0.5,
+                    constant: 10.0,
+                }])),
+            }),
+        ),
+        vector(
+            "average_rate_linear_function_deterministic",
+            curve(CurveKind::AverageRate, FunctionKind::LinearFunction),
+            TimeSeriesType::Deterministic,
+            // [H = 2, count = 2, 2 + 2]
+            &[2, 2],
+            DecodedValues::ValueCurve(ValueCurves {
+                curve: CurveKind::AverageRate,
+                initial_input: (0..4).map(|i| Some(i as f64)).collect(),
+                input_at_zero: vec![None, Some(1.0), None, Some(2.0)],
+                function: Box::new(DecodedValues::LinearFunction(
+                    (0..4)
+                        .map(|i| LinearFunction {
+                            proportional: i as f64 * 0.5,
+                            constant: 20.0 - i as f64,
+                        })
+                        .collect(),
+                )),
+            }),
+        ),
+        vector(
+            "average_rate_piecewise_step_ragged",
+            curve(CurveKind::AverageRate, FunctionKind::PiecewiseStep),
+            TimeSeriesType::SingleTimeSeries,
+            &[2],
+            DecodedValues::ValueCurve(ValueCurves {
+                curve: CurveKind::AverageRate,
+                initial_input: vec![None, Some(7.0)],
+                input_at_zero: vec![None, None],
+                function: Box::new(DecodedValues::PiecewiseStep(vec![
+                    StepFunction {
+                        x: vec![],
+                        y: vec![],
+                    },
+                    StepFunction {
+                        x: vec![1.0, 2.0],
+                        y: vec![9.0],
+                    },
+                ])),
+            }),
+        ),
     ]
+}
+
+fn curve(kind: CurveKind, function: FunctionKind) -> ElementType {
+    ElementType::ValueCurve { kind, function }
 }
 
 /// The checked-in corpus every other binding reads.
