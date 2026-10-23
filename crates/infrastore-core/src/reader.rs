@@ -2746,6 +2746,141 @@ mod tests {
         }
     }
 
+    /// The batched derived read is bytes-in, bytes-out: every dtype, a scalar
+    /// or multi-dimensional per-step shape, and each composite element type
+    /// (whose rows are wider than one value) round-trips through an on-disk
+    /// `ForecastReader` byte-identical to the windowed `read_by_id`. Each
+    /// shape lands in a pool of its own, so one read also spans them all.
+    #[test]
+    fn derived_windows_cover_every_dtype_and_element_type() {
+        use crate::store::ReadWindow;
+
+        let len = 7usize;
+        fn arr<T: Element + Copy>(
+            len: usize,
+            element_shape: &[usize],
+            f: impl Fn(usize) -> T,
+        ) -> TypedArray {
+            let per_step: usize = element_shape.iter().product();
+            let vals: Vec<T> = (0..len * per_step).map(f).collect();
+            let mut shape = vec![len];
+            shape.extend_from_slice(element_shape);
+            TypedArray::from_slice(shape, &vals).unwrap()
+        }
+        // (array, declared element type); a scalar's shape may still be dense.
+        let cases: Vec<(TypedArray, ElementType)> = vec![
+            (
+                arr(len, &[], |i| i as f64 + 0.5),
+                ElementType::Scalar(Dtype::F64),
+            ),
+            (
+                arr(len, &[3], |i| i as f32),
+                ElementType::Scalar(Dtype::F32),
+            ),
+            (
+                arr(len, &[2, 2], |i| -(i as i64)),
+                ElementType::Scalar(Dtype::I64),
+            ),
+            (
+                arr(len, &[], |i| i as i32 * 7),
+                ElementType::Scalar(Dtype::I32),
+            ),
+            (
+                arr(len, &[2], |i| (i as u64) << 40),
+                ElementType::Scalar(Dtype::U64),
+            ),
+            (
+                arr(len, &[3], |i| i % 3 == 0),
+                ElementType::Scalar(Dtype::Bool),
+            ),
+            (
+                arr(len, &[2], |i| i as f64),
+                ElementType::Tuple {
+                    arity: 2,
+                    dtype: Dtype::F64,
+                },
+            ),
+            (
+                arr(len, &[2], |i| i as f64 * 1.5),
+                ElementType::LinearFunction,
+            ),
+            (
+                arr(len, &[3], |i| i as f64 * 2.5),
+                ElementType::QuadraticFunction,
+            ),
+            // `[1 + 2w]` with w = 2: n, x1, y1, x2, y2.
+            (
+                arr(len, &[5], |i| if i % 5 == 0 { 2.0 } else { i as f64 }),
+                ElementType::PiecewiseLinear,
+            ),
+            // `[2w]` with w = 2: n, x1, x2, y1.
+            (
+                arr(len, &[4], |i| if i % 4 == 0 { 2.0 } else { i as f64 }),
+                ElementType::PiecewiseStep,
+            ),
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.h5");
+        let mut store = Store::create(Some(&path), false).unwrap();
+        for (owner, (data, element_type)) in cases.iter().enumerate() {
+            store
+                .add_time_series(
+                    owner as i64 + 1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(
+                        SingleTimeSeries::new(t0(), Duration::hours(1), data.clone(), "load")
+                            .with_element_type(*element_type),
+                    ),
+                    Default::default(),
+                )
+                .unwrap();
+        }
+        store
+            .transform_single_time_series(
+                Duration::hours(3),
+                Duration::hours(2),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+
+        let mut reader = store.build_forecast_reader(forecast_filter()).unwrap();
+        assert_eq!(reader.entries().len(), cases.len());
+        assert_eq!(reader.count(), 3, "windows at steps 0, 2, 4");
+        for k in 0..reader.count() {
+            let at = t0() + Duration::hours(2 * k as i64);
+            store.forecast_read(&mut reader, at).unwrap();
+            for entry in reader.entries() {
+                let slot = reader.entry_slot(entry.slot());
+                let row = store.get_metadata_by_id(entry.id()).unwrap().unwrap();
+                let (data, element_type) = &cases[row.owner_id as usize - 1];
+                assert_eq!(slot.element_type(), *element_type);
+                let TimeSeriesData::Deterministic(det) = store
+                    .read_by_id(entry.id(), ReadWindow::from(at).with_count(1))
+                    .unwrap()
+                else {
+                    panic!("a DST reads back as a Deterministic")
+                };
+                assert_eq!(
+                    slot.window(),
+                    &det.data.bytes[..],
+                    "window {k} of {element_type:?}"
+                );
+                // And against the source itself: steps 2k..2k+3 of the array.
+                let step = data.bytes.len() / len;
+                assert_eq!(
+                    slot.window(),
+                    &data.bytes[2 * k * step..(2 * k + 3) * step],
+                    "window {k} of {element_type:?}"
+                );
+            }
+        }
+    }
+
     // ---- Oracle cross-checks against get_time_series ----------------------
     //
     // The strongest correctness check: a reader's bytes must equal what the
