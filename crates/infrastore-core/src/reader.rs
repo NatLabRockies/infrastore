@@ -1233,7 +1233,8 @@ pub(crate) enum WindowRead {
 /// A derived slot has no block of its own: its window is a run of rows of a
 /// packed `SingleTimeSeries` column, chunked one timestamp row across every
 /// column of the pool. [`Store::forecast_read`] therefore reads every derived
-/// slot of a reader in one batch — one hyperslab per packed dataset — and hands
+/// slot of a reader in one batch — hyperslabs per packed dataset and row range, in
+/// bounded strips — and hands
 /// each its run through [`Self::set_window`].
 #[derive(Debug)]
 pub struct WindowSlot {

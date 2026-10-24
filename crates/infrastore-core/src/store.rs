@@ -4022,8 +4022,8 @@ impl Store {
         // own to cache: its window is `horizon` consecutive rows of a packed
         // `SingleTimeSeries` column, and that pool is chunked one timestamp row
         // across every column. So every derived slot of the reader is read in
-        // one batch — one hyperslab per packed dataset, exactly as the static
-        // reader reads a row — instead of one backend call per slot, which
+        // one batch — hyperslabs per packed dataset and row range, in bounded
+        // strips, exactly as the static reader reads a row — instead of one backend call per slot, which
         // decompressed the same chunks once per column (#113).
         let mut derived: Vec<usize> = Vec::new();
         let mut hashes: Vec<[u8; 32]> = Vec::new();
