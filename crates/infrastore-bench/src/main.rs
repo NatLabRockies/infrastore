@@ -102,8 +102,10 @@ struct ReadArgs {
     #[arg(long)]
     steps: Option<usize>,
 
-    /// Sweep the SingleTimeSeries with a `StaticReader` (one columnar read per
-    /// step) instead of `read_by_ids_range`.
+    /// Sweep with the readers instead of `read_by_ids_range`: a `StaticReader`
+    /// over the SingleTimeSeries (one columnar read per step) and a
+    /// `ForecastReader` over the Deterministic and DeterministicSingleTimeSeries
+    /// forecasts (one window read per step).
     #[arg(long)]
     reader: bool,
 }
@@ -415,6 +417,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         None,
         "read_sts",
         make_sts_requests,
+        |_| Ok(()),
         |store, step_times| {
             if !args.reader {
                 let keys = ids_by_owner(
@@ -448,13 +451,15 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
         c,
         steps,
         "Deterministic",
-        Some(format!(
-            "  note: each call fetches the full [{}×{}] array from storage, then slices to 1 window",
-            DET_HORIZON_H, c.length,
-        )),
+        None,
         "read_det",
         make_det_requests,
+        |_| Ok(()),
         |store, step_times| {
+            if args.reader {
+                println!("  (ForecastReader sweep: one window read per step)");
+                return forecast_sweep(store, hour, initial, steps, step_times);
+            }
             let keys = ids_by_owner(
                 store,
                 ListFilter::new()
@@ -468,13 +473,91 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
             range_sweep(store, &keys, initial, steps, step_times)
         },
     )?;
+
+    // The forecast most simulations actually read: a SingleTimeSeries of
+    // `length` steps viewed through `transform_single_time_series` as hourly
+    // windows of DET_HORIZON_H. Its windows are runs of a packed column rather
+    // than a standalone array, so it exercises a different read path from the
+    // dense Deterministic above (#113).
+    let windows = (c.length + 1).saturating_sub(DET_HORIZON_H);
+    if windows == 0 {
+        sep();
+        println!(
+            "Simulation read: DeterministicSingleTimeSeries skipped: --length {} is shorter than \
+             the {DET_HORIZON_H}-step horizon",
+            c.length
+        );
+    } else {
+        let steps = steps.min(windows);
+        let _dst = read_phase(
+            c,
+            steps,
+            "DeterministicSingleTimeSeries",
+            Some(format!(
+                "  note: {windows} windows of {DET_HORIZON_H} steps over the {}-step source",
+                c.length
+            )),
+            "read_dst",
+            make_sts_requests,
+            |store| {
+                store.transform_single_time_series(
+                    chrono::Duration::hours(DET_HORIZON_H as i64),
+                    chrono::Duration::hours(1),
+                    None,
+                    None,
+                    Default::default(),
+                )?;
+                Ok(())
+            },
+            |store, step_times| {
+                if args.reader {
+                    println!("  (ForecastReader sweep: one window read per step)");
+                    return forecast_sweep(store, hour, initial, steps, step_times);
+                }
+                let keys = ids_by_owner(
+                    store,
+                    ListFilter::new()
+                        .owner_category(OwnerCategory::Component)
+                        .time_series_type(TimeSeriesType::DeterministicSingleTimeSeries)
+                        .name("active_power")
+                        .resolution(hour),
+                    c.count,
+                )?;
+                range_sweep(store, &keys, initial, steps, step_times)
+            },
+        )?;
+    }
     sep();
 
     Ok(())
 }
 
-/// One simulation-read benchmark: write the series, reopen the store (on disk),
-/// then let `sweep` time one read per step into `step_times`.
+/// One `forecast_read` per step over every hourly forecast in the store.
+fn forecast_sweep(
+    store: &Store,
+    resolution: infrastore_core::Period,
+    initial: DateTime<Utc>,
+    steps: usize,
+    step_times: &mut Vec<StdDuration>,
+) -> Result<(), Error> {
+    let mut reader = store.build_forecast_reader(
+        ListFilter::new()
+            .time_series_type(TimeSeriesType::Deterministic)
+            .resolution(resolution),
+    )?;
+    for step in 0..steps {
+        let at = initial + chrono::Duration::milliseconds(step as i64 * HOUR_MS);
+        let t0 = Instant::now();
+        store.forecast_read(&mut reader, at)?;
+        step_times.push(t0.elapsed());
+    }
+    Ok(())
+}
+
+/// One simulation-read benchmark: write the series, run `prepare` on the
+/// still-writable store, reopen it (on disk), then let `sweep` time one read
+/// per step into `step_times`.
+#[allow(clippy::too_many_arguments)]
 fn read_phase(
     c: &CommonArgs,
     steps: usize,
@@ -482,6 +565,7 @@ fn read_phase(
     note: Option<String>,
     suffix: &str,
     build: fn(usize, usize) -> Vec<AddRequest>,
+    prepare: impl FnOnce(&mut Store) -> Result<(), Error>,
     sweep: impl FnOnce(&Store, &mut Vec<StdDuration>) -> Result<(), Error>,
 ) -> Result<StoreHandle, Error> {
     sep();
@@ -504,6 +588,7 @@ fn read_phase(
     let reqs = build(c.count, c.length);
     let mut handle = bench_store(c, suffix)?;
     let _ = handle.store.add_time_series_bulk(reqs)?;
+    prepare(&mut handle.store)?;
     let handle = if c.in_memory {
         handle.store.flush()?;
         handle

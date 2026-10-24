@@ -391,19 +391,44 @@ pub(crate) trait StorageBackend: Send + Sync {
         indices: &[usize],
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        if hashes.len() != indices.len() {
-            return Err(TimeSeriesError::IntegrityError(format!(
-                "read_indices_into got {} hashes and {} indices",
-                hashes.len(),
-                indices.len()
-            )));
-        }
+        debug_assert_eq!(hashes.len(), indices.len());
         out.clear();
         for (hash, &index) in hashes.iter().zip(indices) {
             let step = self.get_slice(hash, dtype, index..index + 1)?;
             out.extend_from_slice(&step.bytes);
         }
         Ok(())
+    }
+
+    /// [`Self::read_index_into`] with a **row range per column**: rows
+    /// `ranges[i]` of `hashes[i]`, decoded as `dtypes[i]`, appended to `out` in
+    /// `hashes` order — each column's run contiguous, `[len, *element_shape]`
+    /// row-major, so a column's bytes are `ranges[i].len() * element_bytes` and
+    /// the caller walks `out` with the lengths it asked for. The three slices
+    /// must be the same length. `out` is cleared first.
+    ///
+    /// Serves a [`ForecastReader`](crate::reader::ForecastReader)'s
+    /// `DeterministicSingleTimeSeries` entries, whose windows are consecutive
+    /// runs of a packed `SingleTimeSeries` column: a window read across every
+    /// derived entry is "these rows of every column", the static reader's row
+    /// read widened to a range.
+    ///
+    /// The default reads each column's slice individually; the on-disk backend
+    /// overrides this to read one hyperslab per packed dataset and range.
+    fn read_ranges_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtypes: &[Dtype],
+        ranges: &[Range<usize>],
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        read_ranges_by_slice(
+            |h, d, r| self.get_slice(h, d, r),
+            hashes,
+            dtypes,
+            ranges,
+            out,
+        )
     }
 
     /// The stored shape of an array, ideally without reading its data. Used by
@@ -605,6 +630,24 @@ pub(crate) trait StorageBackend: Send + Sync {
     fn compression(&self) -> Compression {
         Compression::None
     }
+}
+
+/// [`StorageBackend::read_ranges_into`] one `get_slice` per column: the
+/// backend default, and the store's path while a transaction holds some of the
+/// arrays unwritten.
+pub(crate) fn read_ranges_by_slice(
+    get_slice: impl Fn(&[u8; 32], Dtype, Range<usize>) -> Result<TypedArray>,
+    hashes: &[[u8; 32]],
+    dtypes: &[Dtype],
+    ranges: &[Range<usize>],
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    debug_assert!(hashes.len() == dtypes.len() && hashes.len() == ranges.len());
+    out.clear();
+    for ((hash, &dtype), range) in hashes.iter().zip(dtypes).zip(ranges) {
+        out.extend_from_slice(&get_slice(hash, dtype, range.clone())?.bytes);
+    }
+    Ok(())
 }
 
 /// Reject a read whose caller-supplied dtype disagrees with one the backend

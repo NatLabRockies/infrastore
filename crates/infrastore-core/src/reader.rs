@@ -1229,6 +1229,13 @@ pub(crate) enum WindowRead {
 /// [`window_block_cols`] chunking). Reads whose window falls in the cached block
 /// are served from memory, so sweeping the timeline decompresses each block
 /// once instead of once per window.
+///
+/// A derived slot has no block of its own: its window is a run of rows of a
+/// packed `SingleTimeSeries` column, chunked one timestamp row across every
+/// column of the pool. [`Store::forecast_read`] therefore reads every derived
+/// slot of a reader in one batch — hyperslabs per packed dataset and row range, in
+/// bounded strips — and hands
+/// each its run through [`Self::set_window`].
 #[derive(Debug)]
 pub struct WindowSlot {
     hash: [u8; 32],
@@ -1240,7 +1247,7 @@ pub struct WindowSlot {
     /// Total windows on the timeline; bounds the final (short) cache block.
     count: usize,
     /// Windows per cached block for the dense path — the storage chunk width
-    /// along the count axis (1 for the derived path, which is not block-cached).
+    /// along the count axis (1 for the derived path, which is read in a batch).
     block_cols: usize,
     /// Window index range currently held in [`Self::block`], if any.
     cached: Option<Range<usize>>,
@@ -1248,7 +1255,7 @@ pub struct WindowSlot {
     /// `cached`, in native (count-axis-interior) row-major order. Dense only.
     block: Vec<u8>,
     /// Reused single-window output buffer: `product(window_shape) * dtype.size()`
-    /// bytes, gathered from [`Self::block`] (dense) or read directly (derived).
+    /// bytes, gathered from [`Self::block`] (dense) or handed in (derived).
     buf: Vec<u8>,
     filled: bool,
 }
@@ -1321,74 +1328,92 @@ impl WindowSlot {
             .collect())
     }
 
-    /// Fill this slot's single-window buffer for window index `window`.
-    ///
-    /// Dense forecasts read the enclosing chunk block once via `read_block`
-    /// (`hash, count_axis, block_start, block_len, out`) and gather the window
-    /// from the cache; a repeat read inside the cached block does no I/O.
-    /// The derived path reads its contiguous horizon run via `read_range`
-    /// (`hash, start, len, out`).
-    pub(crate) fn read_window<FBlock, FRange>(
-        &mut self,
-        window: usize,
-        read_block: FBlock,
-        read_range: FRange,
-    ) -> Result<()>
-    where
-        FBlock: FnOnce(&[u8; 32], Dtype, usize, usize, usize, &mut Vec<u8>) -> Result<()>,
-        FRange: FnOnce(&[u8; 32], Dtype, usize, usize, &mut Vec<u8>) -> Result<()>,
-    {
-        // The slot's element type comes from the catalog; the backend is told
-        // the dtype rather than inferring one from what it stored.
-        let dtype = self.element_type.physical_dtype();
-        // Cleared before the read: the derived path fails before it touches the
-        // buffer, so without this a failed read would leave `window()` serving
-        // the previous window as if it were the one asked for.
-        self.filled = false;
+    /// The rows of the underlying `SingleTimeSeries` column that make up
+    /// window `window` of a derived slot; `None` for a dense one, which reads
+    /// through [`Self::read_window`].
+    pub(crate) fn derived_span(&self, window: usize) -> Option<Range<usize>> {
         match self.read {
-            WindowRead::Dense { count_axis } => {
-                let cols = self.block_cols.max(1);
-                let start = (window / cols) * cols;
-                let end = (start + cols).min(self.count);
-                if self.cached.as_ref() != Some(&(start..end)) {
-                    // Invalidated *before* the read, not after it. `read_block`
-                    // may clear `self.block` and then fail — the HDF5 backend
-                    // does exactly that, emptying `out` before the lookup that
-                    // returns `NotFound` — and leaving `cached` set across that
-                    // failure would leave the slot advertising a range it no
-                    // longer holds. The next read landing in that range would
-                    // skip the I/O and `gather_window` would index an empty
-                    // buffer, turning a removed array into an out-of-range panic
-                    // instead of the `NotFound` the failing read already reported.
-                    self.cached = None;
-                    read_block(
-                        &self.hash,
-                        dtype,
-                        count_axis,
-                        start,
-                        end - start,
-                        &mut self.block,
-                    )?;
-                    self.cached = Some(start..end);
-                }
-                gather_window(
-                    &self.block,
-                    &self.window_shape,
-                    count_axis,
-                    end - start,
-                    window - start,
-                    self.dtype().size(),
-                    &mut self.buf,
-                );
-            }
+            WindowRead::Dense { .. } => None,
             WindowRead::Derived {
                 interval_steps,
                 horizon_steps,
             } => {
                 let start = window * interval_steps;
-                read_range(&self.hash, dtype, start, horizon_steps, &mut self.buf)?;
+                Some(start..start + horizon_steps)
             }
         }
+    }
+
+    /// Bytes of one window: `product(window_shape) * dtype.size()`.
+    pub(crate) fn window_bytes(&self) -> usize {
+        self.window_shape.iter().product::<usize>() * self.dtype().size()
+    }
+
+    /// Install `window` — exactly [`Self::window_bytes`] bytes, row-major,
+    /// little-endian — as the slot's current window.
+    pub(crate) fn set_window(&mut self, window: &[u8]) {
+        debug_assert_eq!(window.len(), self.window_bytes());
+        self.buf.clear();
+        self.buf.extend_from_slice(window);
+        self.filled = true;
+    }
+
+    /// Fill this slot's single-window buffer for window index `window` of a
+    /// dense forecast: read the enclosing chunk block once via `read_block`
+    /// (`hash, dtype, count_axis, block_start, block_len, out`) and gather the
+    /// window from the cache; a repeat read inside the cached block does no I/O.
+    ///
+    /// A derived slot is an error here: its rows come from the batch
+    /// [`Store::forecast_read`] reads for every derived slot at once (see
+    /// [`Self::derived_span`]).
+    pub(crate) fn read_window<FBlock>(&mut self, window: usize, read_block: FBlock) -> Result<()>
+    where
+        FBlock: FnOnce(&[u8; 32], Dtype, usize, usize, usize, &mut Vec<u8>) -> Result<()>,
+    {
+        let WindowRead::Dense { count_axis } = self.read else {
+            return Err(TimeSeriesError::IntegrityError(
+                "read_window on a derived slot; derived windows are read in a batch".into(),
+            ));
+        };
+        // The slot's element type comes from the catalog; the backend is told
+        // the dtype rather than inferring one from what it stored.
+        let dtype = self.element_type.physical_dtype();
+        // Cleared before the read, so a failed read cannot leave `window()`
+        // serving the previous window as if it were the one asked for.
+        self.filled = false;
+        let cols = self.block_cols.max(1);
+        let start = (window / cols) * cols;
+        let end = (start + cols).min(self.count);
+        if self.cached.as_ref() != Some(&(start..end)) {
+            // Invalidated *before* the read, not after it. `read_block`
+            // may clear `self.block` and then fail — the HDF5 backend
+            // does exactly that, emptying `out` before the lookup that
+            // returns `NotFound` — and leaving `cached` set across that
+            // failure would leave the slot advertising a range it no
+            // longer holds. The next read landing in that range would
+            // skip the I/O and `gather_window` would index an empty
+            // buffer, turning a removed array into an out-of-range panic
+            // instead of the `NotFound` the failing read already reported.
+            self.cached = None;
+            read_block(
+                &self.hash,
+                dtype,
+                count_axis,
+                start,
+                end - start,
+                &mut self.block,
+            )?;
+            self.cached = Some(start..end);
+        }
+        gather_window(
+            &self.block,
+            &self.window_shape,
+            count_axis,
+            end - start,
+            window - start,
+            self.dtype().size(),
+            &mut self.buf,
+        );
         self.filled = true;
         Ok(())
     }
@@ -1714,8 +1739,8 @@ pub(crate) fn build_forecast_entries(
                 let mut buf = vec![0u8; bytes];
                 buf.clear();
                 // Block-cache the dense path at the storage chunk width so a window
-                // sweep decompresses each chunk once; the derived path reads a
-                // contiguous run per window and is not block-cached.
+                // sweep decompresses each chunk once; the derived path is read in
+                // one batch across every derived slot and keeps no block.
                 let block_cols = match read {
                     WindowRead::Dense { count_axis } => {
                         window_block_cols(m.element_type.physical_dtype(), &shape, count_axis)
@@ -2413,27 +2438,19 @@ mod tests {
             filled: false,
         };
         let reads = Cell::new(0usize);
-        let range_unused =
-            |_: &[u8; 32], _: Dtype, _: usize, _: usize, _: &mut Vec<u8>| -> Result<()> {
-                unreachable!()
-            };
 
         for k in 0..count {
-            slot.read_window(
-                k,
-                |_hash, _dtype, _axis, start, len, out| {
-                    reads.set(reads.get() + 1);
-                    out.clear();
-                    // Emit the `[H, len]` block in native row-major order.
-                    for hi in 0..h {
-                        for kk in start..start + len {
-                            out.extend_from_slice(&((kk * 10 + hi) as f64).to_le_bytes());
-                        }
+            slot.read_window(k, |_hash, _dtype, _axis, start, len, out| {
+                reads.set(reads.get() + 1);
+                out.clear();
+                // Emit the `[H, len]` block in native row-major order.
+                for hi in 0..h {
+                    for kk in start..start + len {
+                        out.extend_from_slice(&((kk * 10 + hi) as f64).to_le_bytes());
                     }
-                    Ok(())
-                },
-                range_unused,
-            )
+                }
+                Ok(())
+            })
             .unwrap();
             assert_eq!(
                 f64_window(&slot),
@@ -2444,11 +2461,9 @@ mod tests {
         assert_eq!(reads.get(), 3, "one backend read per 2-window block over 5");
 
         // Re-reading a window inside the currently cached block does no I/O.
-        slot.read_window(
-            count - 1,
-            |_, _, _, _, _, _| -> Result<()> { panic!("cached block must not re-read") },
-            range_unused,
-        )
+        slot.read_window(count - 1, |_, _, _, _, _, _| -> Result<()> {
+            panic!("cached block must not re-read")
+        })
         .unwrap();
         assert_eq!(reads.get(), 3);
     }
@@ -2620,6 +2635,250 @@ mod tests {
             // On-disk (packed underlying hyperslab) == in-memory default.
             assert_eq!(dst.window(), rm.entry_slot(0).window());
             assert_eq!(det_entry.window(), rm.entry_slot(1).window());
+        }
+    }
+
+    /// The batched derived read gathers each slot's own rows when the slots
+    /// span several packed pools (two batch-sized `f64` datasets plus an `f32`
+    /// one) and sit at different columns of them: every window of every entry
+    /// equals the windowed `read_by_id` of the same row, on disk.
+    #[test]
+    fn derived_windows_batch_across_pools_and_dtypes() {
+        use crate::storage::ArrayLocation;
+        use crate::store::{AddRequest, ReadWindow};
+
+        let len = 6usize;
+        let sts = |owner: i64, dtype: Dtype| {
+            let vals: Vec<f64> = (0..len).map(|i| (owner * 100 + i as i64) as f64).collect();
+            let data = match dtype {
+                Dtype::F64 => TypedArray::from_f64(vec![len], &vals),
+                Dtype::F32 => TypedArray::new(
+                    Dtype::F32,
+                    vec![len],
+                    vals.iter()
+                        .flat_map(|v| (*v as f32).to_le_bytes())
+                        .collect(),
+                )
+                .unwrap(),
+                other => panic!("{other:?}"),
+            };
+            AddRequest {
+                owner_id: owner,
+                owner_type: "Generator".into(),
+                owner_category: OwnerCategory::Component,
+                data: TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    t0(),
+                    Duration::hours(1),
+                    data,
+                    "load",
+                )),
+                features: Default::default(),
+            }
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.h5");
+        let mut store = Store::create(Some(&path), false).unwrap();
+        // Three bulk adds, each sized to its batch: two f64 pools and an f32 one.
+        store
+            .add_time_series_bulk((1..=3).map(|o| sts(o, Dtype::F64)).collect())
+            .unwrap();
+        store
+            .add_time_series_bulk((4..=5).map(|o| sts(o, Dtype::F64)).collect())
+            .unwrap();
+        store
+            .add_time_series_bulk((6..=7).map(|o| sts(o, Dtype::F32)).collect())
+            .unwrap();
+        store
+            .transform_single_time_series(
+                Duration::hours(2),
+                Duration::hours(1),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+
+        let mut reader = store.build_forecast_reader(forecast_filter()).unwrap();
+        assert_eq!(reader.entries().len(), 7);
+        let datasets: std::collections::HashSet<String> = reader
+            .slots()
+            .iter()
+            .map(|s| match store.locate_array(s.hash()).unwrap() {
+                ArrayLocation::Packed { dataset, .. } => dataset,
+                other => panic!("a DST source is packed, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(datasets.len(), 3, "three pools: {datasets:?}");
+
+        for k in 0..reader.count() {
+            let at = t0() + Duration::hours(k as i64);
+            store.forecast_read(&mut reader, at).unwrap();
+            for entry in reader.entries() {
+                let slot = reader.entry_slot(entry.slot());
+                let TimeSeriesData::Deterministic(det) = store
+                    .read_by_id(entry.id(), ReadWindow::from(at).with_count(1))
+                    .unwrap()
+                else {
+                    panic!("a DST reads back as a Deterministic")
+                };
+                assert_eq!(slot.dtype(), det.data.dtype);
+                assert_eq!(slot.window(), &det.data.bytes[..], "window {k}");
+                // Concrete: owner o's window k is [o*100 + k, o*100 + k + 1].
+                let owner = store
+                    .get_metadata_by_id(entry.id())
+                    .unwrap()
+                    .unwrap()
+                    .owner_id as f64;
+                let got: Vec<f64> = match slot.dtype() {
+                    Dtype::F64 => slot.window_to_vec::<f64>().unwrap(),
+                    _ => slot
+                        .window_to_vec::<f32>()
+                        .unwrap()
+                        .into_iter()
+                        .map(f64::from)
+                        .collect(),
+                };
+                assert_eq!(
+                    got,
+                    vec![owner * 100.0 + k as f64, owner * 100.0 + k as f64 + 1.0]
+                );
+            }
+        }
+    }
+
+    /// The batched derived read is bytes-in, bytes-out: every dtype, a scalar
+    /// or multi-dimensional per-step shape, and each composite element type
+    /// (whose rows are wider than one value) round-trips through an on-disk
+    /// `ForecastReader` byte-identical to the windowed `read_by_id`. Each
+    /// shape lands in a pool of its own, so one read also spans them all.
+    #[test]
+    fn derived_windows_cover_every_dtype_and_element_type() {
+        use crate::store::ReadWindow;
+
+        let len = 7usize;
+        fn arr<T: Element + Copy>(
+            len: usize,
+            element_shape: &[usize],
+            f: impl Fn(usize) -> T,
+        ) -> TypedArray {
+            let per_step: usize = element_shape.iter().product();
+            let vals: Vec<T> = (0..len * per_step).map(f).collect();
+            let mut shape = vec![len];
+            shape.extend_from_slice(element_shape);
+            TypedArray::from_slice(shape, &vals).unwrap()
+        }
+        // (array, declared element type); a scalar's shape may still be dense.
+        let cases: Vec<(TypedArray, ElementType)> = vec![
+            (
+                arr(len, &[], |i| i as f64 + 0.5),
+                ElementType::Scalar(Dtype::F64),
+            ),
+            (
+                arr(len, &[3], |i| i as f32),
+                ElementType::Scalar(Dtype::F32),
+            ),
+            (
+                arr(len, &[2, 2], |i| -(i as i64)),
+                ElementType::Scalar(Dtype::I64),
+            ),
+            (
+                arr(len, &[], |i| i as i32 * 7),
+                ElementType::Scalar(Dtype::I32),
+            ),
+            (
+                arr(len, &[2], |i| (i as u64) << 40),
+                ElementType::Scalar(Dtype::U64),
+            ),
+            (
+                arr(len, &[3], |i| i % 3 == 0),
+                ElementType::Scalar(Dtype::Bool),
+            ),
+            (
+                arr(len, &[2], |i| i as f64),
+                ElementType::Tuple {
+                    arity: 2,
+                    dtype: Dtype::F64,
+                },
+            ),
+            (
+                arr(len, &[2], |i| i as f64 * 1.5),
+                ElementType::LinearFunction,
+            ),
+            (
+                arr(len, &[3], |i| i as f64 * 2.5),
+                ElementType::QuadraticFunction,
+            ),
+            // `[1 + 2w]` with w = 2: n, x1, y1, x2, y2.
+            (
+                arr(len, &[5], |i| if i % 5 == 0 { 2.0 } else { i as f64 }),
+                ElementType::PiecewiseLinear,
+            ),
+            // `[2w]` with w = 2: n, x1, x2, y1.
+            (
+                arr(len, &[4], |i| if i % 4 == 0 { 2.0 } else { i as f64 }),
+                ElementType::PiecewiseStep,
+            ),
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.h5");
+        let mut store = Store::create(Some(&path), false).unwrap();
+        for (owner, (data, element_type)) in cases.iter().enumerate() {
+            store
+                .add_time_series(
+                    owner as i64 + 1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(
+                        SingleTimeSeries::new(t0(), Duration::hours(1), data.clone(), "load")
+                            .with_element_type(*element_type),
+                    ),
+                    Default::default(),
+                )
+                .unwrap();
+        }
+        store
+            .transform_single_time_series(
+                Duration::hours(3),
+                Duration::hours(2),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+
+        let mut reader = store.build_forecast_reader(forecast_filter()).unwrap();
+        assert_eq!(reader.entries().len(), cases.len());
+        assert_eq!(reader.count(), 3, "windows at steps 0, 2, 4");
+        for k in 0..reader.count() {
+            let at = t0() + Duration::hours(2 * k as i64);
+            store.forecast_read(&mut reader, at).unwrap();
+            for entry in reader.entries() {
+                let slot = reader.entry_slot(entry.slot());
+                let row = store.get_metadata_by_id(entry.id()).unwrap().unwrap();
+                let (data, element_type) = &cases[row.owner_id as usize - 1];
+                assert_eq!(slot.element_type(), *element_type);
+                let TimeSeriesData::Deterministic(det) = store
+                    .read_by_id(entry.id(), ReadWindow::from(at).with_count(1))
+                    .unwrap()
+                else {
+                    panic!("a DST reads back as a Deterministic")
+                };
+                assert_eq!(
+                    slot.window(),
+                    &det.data.bytes[..],
+                    "window {k} of {element_type:?}"
+                );
+                // And against the source itself: steps 2k..2k+3 of the array.
+                let step = data.bytes.len() / len;
+                assert_eq!(
+                    slot.window(),
+                    &data.bytes[2 * k * step..(2 * k + 3) * step],
+                    "window {k} of {element_type:?}"
+                );
+            }
         }
     }
 

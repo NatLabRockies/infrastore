@@ -2200,18 +2200,30 @@ impl Store {
         TypedArray::new(dtype, out_shape, bytes).map_err(TimeSeriesError::IntegrityError)
     }
 
-    fn read_range_into(
+    /// Rows `ranges[i]` of `hashes[i]` into `out` in `hashes` order, each
+    /// column's run contiguous — what a forecast reader's derived entries
+    /// consume. The columns the file holds go to the backend in one call; a
+    /// buffered column's run is cut out of its array.
+    fn read_ranges_into(
         &self,
-        hash: &[u8; 32],
-        dtype: Dtype,
-        start: usize,
-        len: usize,
+        hashes: &[[u8; 32]],
+        dtypes: &[Dtype],
+        ranges: &[Range<usize>],
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        let slice = self.get_slice(hash, dtype, start..start + len)?;
-        out.clear();
-        out.extend_from_slice(&slice.bytes);
-        Ok(())
+        if self.write_buffer.is_empty() || !hashes.iter().any(|h| self.write_buffer.contains(h)) {
+            return self.backend.read_ranges_into(hashes, dtypes, ranges, out);
+        }
+        // ponytail: one slice per column while a transaction holds some of
+        // these arrays unwritten; split buffered from file columns the way
+        // `read_rows_into` does if a reader is ever driven mid-transaction.
+        crate::storage::read_ranges_by_slice(
+            |h, d, r| self.get_slice(h, d, r),
+            hashes,
+            dtypes,
+            ranges,
+            out,
+        )
     }
 
     /// Whole arrays, one per hash, in `hashes` order. The ones the file holds
@@ -4005,7 +4017,26 @@ impl Store {
         // slot at build time, so the backend is hit once for all of them. Each
         // slot caches its enclosing chunk block, so stepping the timeline only
         // hits the backend when the window crosses a block boundary.
-        for slot in reader.slots_mut() {
+        //
+        // A derived (`DeterministicSingleTimeSeries`) slot has no block of its
+        // own to cache: its window is `horizon` consecutive rows of a packed
+        // `SingleTimeSeries` column, and that pool is chunked one timestamp row
+        // across every column. So every derived slot of the reader is read in
+        // one batch — hyperslabs per packed dataset and row range, in bounded
+        // strips, exactly as the static reader reads a row — instead of one backend call per slot, which
+        // decompressed the same chunks once per column (#113).
+        let mut derived: Vec<usize> = Vec::new();
+        let mut hashes: Vec<[u8; 32]> = Vec::new();
+        let mut dtypes: Vec<Dtype> = Vec::new();
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        for (i, slot) in reader.slots_mut().iter_mut().enumerate() {
+            if let Some(rows) = slot.derived_span(window) {
+                derived.push(i);
+                hashes.push(*slot.hash());
+                dtypes.push(slot.dtype());
+                ranges.push(rows);
+                continue;
+            }
             // A read served from the cached block does no I/O, so it cannot
             // notice that the forecast's array was removed since the block was
             // read; it would hand back a deleted array as `Ok` where the static
@@ -4019,13 +4050,31 @@ impl Store {
                 slot.forget();
                 return Err(TimeSeriesError::NotFound);
             }
-            slot.read_window(
-                window,
-                |hash, dtype, count_axis, start, len, out| {
-                    self.read_window_block_into(hash, dtype, count_axis, start, len, out)
-                },
-                |hash, dtype, start, len, out| self.read_range_into(hash, dtype, start, len, out),
-            )?;
+            slot.read_window(window, |hash, dtype, count_axis, start, len, out| {
+                self.read_window_block_into(hash, dtype, count_axis, start, len, out)
+            })?;
+        }
+        if derived.is_empty() {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        self.read_ranges_into(&hashes, &dtypes, &ranges, &mut bytes)?;
+        let mut rest = bytes.as_slice();
+        for &i in &derived {
+            let slot = &mut reader.slots_mut()[i];
+            let n = slot.window_bytes();
+            let (run, tail) = rest.split_at_checked(n).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(
+                    "read_ranges_into returned fewer bytes than the derived windows need".into(),
+                )
+            })?;
+            slot.set_window(run);
+            rest = tail;
+        }
+        if !rest.is_empty() {
+            return Err(TimeSeriesError::IntegrityError(
+                "read_ranges_into returned more bytes than the derived windows need".into(),
+            ));
         }
         Ok(())
     }
@@ -7908,6 +7957,7 @@ mod windowed_read_tests {
         block_reads: AtomicUsize,
         block_windows: AtomicUsize,
         block_axis: AtomicUsize,
+        range_reads: AtomicUsize,
     }
 
     /// A `MemoryBackend` that tallies whole-array fetches and slice fetches.
@@ -7961,6 +8011,17 @@ mod windowed_read_tests {
             // *its own* `get_array` -- so the whole-array tally stays honest.
             self.inner
                 .read_window_block_into(hash, dtype, count_axis, window_start, len, out)
+        }
+
+        fn read_ranges_into(
+            &self,
+            hashes: &[[u8; 32]],
+            dtypes: &[Dtype],
+            ranges: &[Range<usize>],
+            out: &mut Vec<u8>,
+        ) -> Result<()> {
+            self.counts.range_reads.fetch_add(1, Ordering::Relaxed);
+            self.inner.read_ranges_into(hashes, dtypes, ranges, out)
         }
 
         fn array_shape(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
@@ -8103,6 +8164,111 @@ mod windowed_read_tests {
         assert_eq!(det.count, 1);
         assert_eq!(det.initial_timestamp, start);
         assert_eq!(det.data.to_f64_vec().unwrap(), vals[120..144].to_vec());
+    }
+
+    /// A forecast reader reads every derived slot in one `read_ranges_into`
+    /// per `forecast_read`, not one slice per slot (#113), and the dense slots
+    /// beside them still go through their own block read.
+    #[test]
+    fn forecast_reader_batches_derived_slots() {
+        let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let (mut store, counts) = counting_store();
+        let n = 5usize;
+        let series: Vec<Vec<f64>> = (0..n)
+            .map(|s| (0..LEN).map(|i| (s * 1000 + i) as f64).collect())
+            .collect();
+        for (s, vals) in series.iter().enumerate() {
+            store
+                .add_time_series(
+                    s as i64 + 1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                        initial,
+                        Duration::hours(1),
+                        TypedArray::from_f64(vec![LEN], vals),
+                        "load",
+                    )),
+                    Features::new(),
+                )
+                .unwrap();
+        }
+        store
+            .transform_single_time_series(
+                Duration::hours(H as i64),
+                Duration::hours(H as i64),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        // One dense Deterministic on the same window timeline: `[H, count]`.
+        let count = LEN / H;
+        let dense: Vec<f64> = (0..H * count).map(|i| -(i as f64)).collect();
+        store
+            .add_time_series(
+                100,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(
+                    Deterministic::new(
+                        initial,
+                        Duration::hours(1),
+                        Duration::hours(H as i64),
+                        Duration::hours(H as i64),
+                        count,
+                        TypedArray::from_f64(vec![H, count], &dense),
+                        "load",
+                    )
+                    .unwrap(),
+                ),
+                Features::new(),
+            )
+            .unwrap();
+
+        let mut reader = store
+            .build_forecast_reader(
+                ListFilter::new()
+                    .time_series_type(TimeSeriesType::Deterministic)
+                    .resolution(Duration::hours(1)),
+            )
+            .unwrap();
+        assert_eq!(reader.entries().len(), n + 1);
+
+        for w in [2usize, 3, 0] {
+            let _ = take(&counts);
+            let _ = take_blocks(&counts);
+            counts.range_reads.store(0, Ordering::Relaxed);
+            store
+                .forecast_read(&mut reader, initial + Duration::hours((H * w) as i64))
+                .unwrap();
+            assert_eq!(
+                counts.range_reads.load(Ordering::Relaxed),
+                1,
+                "window {w}: one batched range read for {n} derived slots"
+            );
+            let (full_reads, slice_reads, _) = take(&counts);
+            assert_eq!((full_reads, slice_reads), (0, 0), "window {w}");
+            // The dense slot's block holds every window, so only the first
+            // read of the sweep fetches it.
+            let (block_reads, _, _) = take_blocks(&counts);
+            assert_eq!(block_reads, usize::from(w == 2), "window {w}");
+            for entry in reader.entries() {
+                let row = store.get_metadata_by_id(entry.id()).unwrap().unwrap();
+                let got = reader
+                    .entry_slot(entry.slot())
+                    .window_to_vec::<f64>()
+                    .unwrap();
+                let expected: Vec<f64> = match row.time_series_type {
+                    TimeSeriesType::DeterministicSingleTimeSeries => {
+                        series[row.owner_id as usize - 1][H * w..H * (w + 1)].to_vec()
+                    }
+                    TimeSeriesType::Deterministic => (0..H).map(|s| dense[s * count + w]).collect(),
+                    other => panic!("unexpected {other:?}"),
+                };
+                assert_eq!(got, expected, "window {w}, owner {}", row.owner_id);
+            }
+        }
     }
 
     /// The unwindowed read still returns every window, and still reads the
