@@ -1,47 +1,47 @@
 [[libinfrastore_ffi]]
 arch = "x86_64"
-git-tree-sha1 = "8d9797c8c10e5dd7a4fa44fc65dcac86ccd99175"
+git-tree-sha1 = "cdecff3a06c5e5a118a277e761ca2d848eb73390"
 libc = "glibc"
 os = "linux"
 
     [[libinfrastore_ffi.download]]
-    sha256 = "c083f42a42b3e7d906a65adcc51acd9e37a290f555a1dfdf70b63d031f8866cd"
-    size = 6132659
-    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.0/libinfrastore_ffi.x86_64-linux-gnu.tar.gz"
+    sha256 = "4f28c065e89199420515cd0a090d2cf76fbb221856059aac6fd0e04ce75c84e4"
+    size = 6142190
+    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.1/libinfrastore_ffi.x86_64-linux-gnu.tar.gz"
 [[libinfrastore_ffi]]
 arch = "aarch64"
-git-tree-sha1 = "bb563ea078b1187c3bc8edfb8ba4552382cfc0f3"
+git-tree-sha1 = "bbc7589a7b66686858960d85e5e91d036e1dfef7"
 libc = "glibc"
 os = "linux"
 
     [[libinfrastore_ffi.download]]
-    sha256 = "8cc5a588ffedf43b64966887552e42514d8b583714ae05f1afb4360b90b97314"
-    size = 5819690
-    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.0/libinfrastore_ffi.aarch64-linux-gnu.tar.gz"
+    sha256 = "dfb25576cfca0992294bb8c0822a9677b51b6c1fcbb31110fef7a63d01df6f69"
+    size = 5827893
+    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.1/libinfrastore_ffi.aarch64-linux-gnu.tar.gz"
 [[libinfrastore_ffi]]
 arch = "x86_64"
-git-tree-sha1 = "70195a14e3e3045019c357cbdc7caeb75768e35e"
+git-tree-sha1 = "6021a89b6a8ae7d1e3eab63b3c9f295894cc1946"
 os = "macos"
 
     [[libinfrastore_ffi.download]]
-    sha256 = "3ca8dc80709b2d1842a7b747e596a4e9fb369206adaccc118ad812eacda0c935"
-    size = 5743632
-    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.0/libinfrastore_ffi.x86_64-apple-darwin.tar.gz"
+    sha256 = "1c3c3be04b5e74b28c1b130b1113b5e73208d4a1a005d26bef46351a329445c0"
+    size = 5751495
+    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.1/libinfrastore_ffi.x86_64-apple-darwin.tar.gz"
 [[libinfrastore_ffi]]
 arch = "aarch64"
-git-tree-sha1 = "adb1d2e42a8ed215e981357d2f4edae44c199993"
+git-tree-sha1 = "5073d8c80ea7e0cc318c77387f6ca1c46db99760"
 os = "macos"
 
     [[libinfrastore_ffi.download]]
-    sha256 = "a7c383257e07813ccc9146a906a72034ca46b05cf7f98610d57636b1489f742a"
-    size = 5095063
-    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.0/libinfrastore_ffi.aarch64-apple-darwin.tar.gz"
+    sha256 = "c409e3a8c6aaff17682c97d739e4a55394ddb7ca30cb0e67d07b5fd083724011"
+    size = 5102839
+    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.1/libinfrastore_ffi.aarch64-apple-darwin.tar.gz"
 [[libinfrastore_ffi]]
 arch = "x86_64"
-git-tree-sha1 = "34fac15edb1eb7c79341ce62485bdb0fcd2b7be6"
+git-tree-sha1 = "e27333d03ff0d25a8f343e362dd14f6744913280"
 os = "windows"
 
     [[libinfrastore_ffi.download]]
-    sha256 = "0d2312092e637e015c6063939cc097aab3666cc9a4cdbedcf75b94db28d3a6c5"
-    size = 7324340
-    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.0/libinfrastore_ffi.x86_64-w64-mingw32.tar.gz"
+    sha256 = "d53cf620b6987d01bd492bfee34641f1c7697fe4e311c92a10106200fbaf29ec"
+    size = 7330545
+    url = "https://github.com/NatLabRockies/infrastore/releases/download/v0.15.1/libinfrastore_ffi.x86_64-w64-mingw32.tar.gz"
