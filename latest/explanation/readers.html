@@ -218,7 +218,11 @@ direction once per component; a reader walks the fast one once per timestep.</p>
 bounded blocks along the window axis, so reading one window decompresses its whole block. A
 <code>ForecastReader</code> sizes its cache to that block width, so a sweep over the window timeline
 decompresses each block exactly once — where independent per-window reads re-decompress overlapping
-data every step.</p>
+data every step. A <code>DeterministicSingleTimeSeries</code> has no window axis of its own: each window is a
+run of rows of a packed <code>SingleTimeSeries</code> column, in a pool chunked one timestamp row across every
+column. So the reader reads every derived entry in one batch per step — one hyperslab per packed
+dataset and row range, read in bounded strips, the static reader's row read widened to the horizon —
+rather than one read per series, which would decompress the same chunks once per column.</p>
 <h2 id="a-reader-is-a-plan-not-a-cursor"><a class="header" href="#a-reader-is-a-plan-not-a-cursor">A Reader Is a Plan, Not a Cursor</a></h2>
 <p>Building one resolves the filter to a fixed set of columns, pins the timeline, and allocates the
 buffers each read will overwrite in place. It holds no borrow on the store and advances no position

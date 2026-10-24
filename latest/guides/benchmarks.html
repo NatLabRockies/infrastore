@@ -247,13 +247,19 @@ infrastore-bench read --count 10000 --length 168 --steps 24
 <p>For on-disk stores the binary flushes, drops, and reopens the store read-only before the timed loop.
 This rebuilds the HDF5 in-memory index and starts the HDF5 chunk cache cold, reflecting real
 simulation startup conditions. The OS page cache may still be warm.</p>
-<p>Reports per-step <strong>min / median / p95 / max</strong> and total <strong>component-reads/s</strong>.</p>
-<blockquote>
-<p><strong>Deterministic note.</strong> The current <code>read_by_id</code> implementation reads the full <code>[H × count]</code> array
-from storage and then slices to the requested window in memory. For large <code>count</code> (e.g. 168
-windows) each single-step read transfers <code>H × count × 8</code> bytes, which is <code>24 × 168 × 8 = 32 KB</code>
-per component. The benchmark output flags this explicitly so the overhead is visible.</p>
-</blockquote>
+<p>Reports per-step <strong>min / median / p95 / max</strong> and total <strong>component-reads/s</strong>, for three shapes: the
+<code>SingleTimeSeries</code>, a dense <code>Deterministic</code> of <code>--length</code> windows, and a
+<code>DeterministicSingleTimeSeries</code> — the <code>SingleTimeSeries</code> viewed through
+<code>transform_single_time_series</code> as hourly 24-step windows, which is the forecast most simulations
+actually read. The derived phase has <code>--length − 23</code> windows and is skipped when <code>--length</code> is
+shorter than the horizon.</p>
+<p><code>--reader</code> swaps the per-step <code>read_by_ids_range</code> for the columnar readers: a <code>StaticReader</code> over
+the <code>SingleTimeSeries</code> and a <code>ForecastReader</code> over each forecast shape. Those are the simulation
+read path, and the two forecast shapes take different routes through storage — a dense window is a
+slab of a standalone array, a derived window is a run of rows in a packed column — so a change to
+either shows up here:</p>
+<pre><code class="language-sh">infrastore-bench read --count 2000 --length 168 --steps 24 --reader
+</code></pre>
 <h2 id="interpreting-results"><a class="header" href="#interpreting-results">Interpreting results</a></h2>
 <p>The two metrics to watch:</p>
 <ul>
