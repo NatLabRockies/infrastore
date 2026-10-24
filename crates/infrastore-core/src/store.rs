@@ -2217,13 +2217,13 @@ impl Store {
         // ponytail: one slice per column while a transaction holds some of
         // these arrays unwritten; split buffered from file columns the way
         // `read_rows_into` does if a reader is ever driven mid-transaction.
-        crate::storage::check_ranges_arity(hashes, dtypes, ranges)?;
-        out.clear();
-        for ((hash, &dtype), range) in hashes.iter().zip(dtypes).zip(ranges) {
-            let run = self.get_slice(hash, dtype, range.clone())?;
-            out.extend_from_slice(&run.bytes);
-        }
-        Ok(())
+        crate::storage::read_ranges_by_slice(
+            |h, d, r| self.get_slice(h, d, r),
+            hashes,
+            dtypes,
+            ranges,
+            out,
+        )
     }
 
     /// Whole arrays, one per hash, in `hashes` order. The ones the file holds

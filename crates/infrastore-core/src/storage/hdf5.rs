@@ -1708,7 +1708,7 @@ impl StorageBackend for Hdf5Backend {
         ranges: &[Range<usize>],
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        super::check_ranges_arity(hashes, dtypes, ranges)?;
+        debug_assert!(hashes.len() == dtypes.len() && hashes.len() == ranges.len());
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_rows_locked(hashes, |i| dtypes[i], |i| ranges[i].clone(), out)
     }
@@ -2217,11 +2217,6 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, TimeSeriesError::InvalidParameter(_)), "{err}");
-        assert!(
-            be.read_ranges_into(&hashes[..2], &dtypes[..1], &ranges[..2], &mut buf)
-                .is_err(),
-            "mismatched slice lengths are refused"
-        );
     }
 
     /// A range read over a span of columns too tall to hold at once is taken

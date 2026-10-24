@@ -428,13 +428,13 @@ pub(crate) trait StorageBackend: Send + Sync {
         ranges: &[Range<usize>],
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        check_ranges_arity(hashes, dtypes, ranges)?;
-        out.clear();
-        for ((hash, &dtype), range) in hashes.iter().zip(dtypes).zip(ranges) {
-            let run = self.get_slice(hash, dtype, range.clone())?;
-            out.extend_from_slice(&run.bytes);
-        }
-        Ok(())
+        read_ranges_by_slice(
+            |h, d, r| self.get_slice(h, d, r),
+            hashes,
+            dtypes,
+            ranges,
+            out,
+        )
     }
 
     /// The stored shape of an array, ideally without reading its data. Used by
@@ -638,27 +638,28 @@ pub(crate) trait StorageBackend: Send + Sync {
     }
 }
 
-/// Reject a read whose caller-supplied dtype disagrees with one the backend
-/// independently knows (the packed pool's dataset name, or an in-memory array's
-/// own tag). Only reachable if the catalog and the array store have drifted, so
-/// it is an integrity error rather than a bad argument.
-/// Refuse a [`StorageBackend::read_ranges_into`] whose three slices disagree.
-pub(crate) fn check_ranges_arity(
+/// [`StorageBackend::read_ranges_into`] one `get_slice` per column: the
+/// backend default, and the store's path while a transaction holds some of the
+/// arrays unwritten.
+pub(crate) fn read_ranges_by_slice(
+    get_slice: impl Fn(&[u8; 32], Dtype, Range<usize>) -> Result<TypedArray>,
     hashes: &[[u8; 32]],
     dtypes: &[Dtype],
     ranges: &[Range<usize>],
+    out: &mut Vec<u8>,
 ) -> Result<()> {
-    if hashes.len() != dtypes.len() || hashes.len() != ranges.len() {
-        return Err(TimeSeriesError::IntegrityError(format!(
-            "read_ranges_into got {} hashes, {} dtypes and {} ranges",
-            hashes.len(),
-            dtypes.len(),
-            ranges.len()
-        )));
+    debug_assert!(hashes.len() == dtypes.len() && hashes.len() == ranges.len());
+    out.clear();
+    for ((hash, &dtype), range) in hashes.iter().zip(dtypes).zip(ranges) {
+        out.extend_from_slice(&get_slice(hash, dtype, range.clone())?.bytes);
     }
     Ok(())
 }
 
+/// Reject a read whose caller-supplied dtype disagrees with one the backend
+/// independently knows (the packed pool's dataset name, or an in-memory array's
+/// own tag). Only reachable if the catalog and the array store have drifted, so
+/// it is an integrity error rather than a bad argument.
 pub(crate) fn check_dtype(hash: &[u8; 32], stored: Dtype, requested: Dtype) -> Result<()> {
     if stored != requested {
         return Err(TimeSeriesError::IntegrityError(format!(

@@ -488,9 +488,10 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
             c.length
         );
     } else {
+        let steps = steps.min(windows);
         let _dst = read_phase(
             c,
-            steps.min(windows),
+            steps,
             "DeterministicSingleTimeSeries",
             Some(format!(
                 "  note: {windows} windows of {DET_HORIZON_H} steps over the {}-step source",
@@ -509,7 +510,6 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
                 Ok(())
             },
             |store, step_times| {
-                let steps = steps.min(windows);
                 if args.reader {
                     println!("  (ForecastReader sweep: one window read per step)");
                     return forecast_sweep(store, hour, initial, steps, step_times);
