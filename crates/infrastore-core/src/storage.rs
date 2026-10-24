@@ -391,13 +391,7 @@ pub(crate) trait StorageBackend: Send + Sync {
         indices: &[usize],
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        if hashes.len() != indices.len() {
-            return Err(TimeSeriesError::IntegrityError(format!(
-                "read_indices_into got {} hashes and {} indices",
-                hashes.len(),
-                indices.len()
-            )));
-        }
+        debug_assert_eq!(hashes.len(), indices.len());
         out.clear();
         for (hash, &index) in hashes.iter().zip(indices) {
             let step = self.get_slice(hash, dtype, index..index + 1)?;

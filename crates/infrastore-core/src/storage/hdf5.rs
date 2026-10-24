@@ -1689,13 +1689,7 @@ impl StorageBackend for Hdf5Backend {
         indices: &[usize],
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        if hashes.len() != indices.len() {
-            return Err(TimeSeriesError::IntegrityError(format!(
-                "read_indices_into got {} hashes and {} indices",
-                hashes.len(),
-                indices.len()
-            )));
-        }
+        debug_assert_eq!(hashes.len(), indices.len());
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_rows_locked(hashes, |_| dtype, |i| indices[i]..indices[i] + 1, out)
     }
