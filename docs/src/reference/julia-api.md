@@ -968,9 +968,14 @@ forecast_values(reader, entry_index::Integer; lazy=false) -> AbstractArray
 
 The values are stored row-major and returned in column-major Julia layout. For an array of more
 than one dimension, `static_values` and `forecast_values` reorder the values with a copy by default,
-returning an `Array`. With `lazy=true` they return a `PermutedDimsArray` over the values in stored
-order: it indexes identically and skips the copy, at the cost of strided access. A one-dimensional
-result is a `Vector` either way.
+returning an `Array`. With `lazy=true` they skip the copy and return a `PermutedDimsArray` over the
+values in stored order, which indexes the same way.
+
+Pass `lazy=true` when the first thing you do with the result is slice or index it along its first
+axis (time, for a `Deterministic` window) and the values need no decoding. In stored order each
+slice along that axis, such as one time step's values, is contiguous in memory. Keep the default
+when you will decode or reorder the values anyway, or when you need a plain `Array`. A
+one-dimensional result is a `Vector` either way.
 
 Valid read timestamps are `initial_timestamp + k·interval` for `k in 0:count-1` (each names the
 window forecast _from_ that instant). A window's shape is `[H, *E]` for `Deterministic` /

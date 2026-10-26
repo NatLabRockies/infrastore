@@ -423,10 +423,11 @@ Column `j` corresponds to `static_groups(reader)[group_index].ids[j]`; resolve i
 with [`get_metadata_by_id`](@ref) to recover the series it came from.
 
 The stored values are row-major, so a group with an element shape is reordered to
-that column-major layout. By default that is a copy (an `Array`); with
+that column-major layout. By default that is a copy (an `Array`). With
 `lazy=true` it is a `PermutedDimsArray` over the values in stored order, which
-indexes the same but skips the copy. A group without an element shape is a
-`Vector` either way.
+indexes the same way without the copy. Pass it when you will slice the values by
+column and need no decoding: in stored order each column's values are contiguous.
+A group without an element shape is a `Vector` either way.
 """
 function static_values(reader::StaticReader, group_index::Integer; lazy::Bool=false)
     group = reader.groups[group_index]
@@ -741,10 +742,12 @@ The window from the most recent [`forecast_read!`] for entry `entry_index`
 (1-based), as a column-major array of size `window_shape`.
 
 The stored window is row-major, so a window of more than one dimension is
-reordered to that column-major layout. By default that is a copy (an `Array`);
-with `lazy=true` it is a `PermutedDimsArray` over the values in stored order,
-which indexes the same but skips the copy. A one-dimensional window is a `Vector`
-either way.
+reordered to that column-major layout. By default that is a copy (an `Array`).
+With `lazy=true` it is a `PermutedDimsArray` over the values in stored order,
+which indexes the same way without the copy. Pass it when you will slice the
+window along its first axis (time, for a `Deterministic` window) and need no
+decoding: in stored order each time step's values are contiguous. A
+one-dimensional window is a `Vector` either way.
 """
 function forecast_values(reader::ForecastReader, entry_index::Integer; lazy::Bool=false)
     entry = reader.entries[entry_index]
