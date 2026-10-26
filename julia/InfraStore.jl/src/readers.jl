@@ -44,8 +44,15 @@ function _reader_values(
     nd = length(dims)
     nd <= 1 && return flat
     stored = reshape(flat, reverse(dims)...)
-    perm = reverse(ntuple(identity, nd))
-    return lazy ? PermutedDimsArray(stored, perm) : permutedims(stored, perm)
+    lazy && return _stored_order_view(stored)
+    return permutedims(stored, reverse(ntuple(identity, nd)))
+end
+
+# The column-major view over row-major `stored`, built behind a barrier on the rank so the
+# permutation is a compile-time constant. With a runtime permutation the wrapper's type
+# parameters are worked out on every call, which costs more than the copy it replaces.
+function _stored_order_view(stored::Array{T, N}) where {T, N}
+    return PermutedDimsArray(stored, ntuple(i -> N + 1 - i, Val(N)))
 end
 
 # ---- StaticReader ---------------------------------------------------------
