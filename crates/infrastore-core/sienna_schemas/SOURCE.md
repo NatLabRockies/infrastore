@@ -8,12 +8,12 @@ this is a maintainer-run sync rather than a live fetch, mirroring the `conforman
 `julia/generate_artifacts.jl` precedent.
 
 - **Source repo**: `Sienna-Platform/SiennaSchemas`
-- **Release**: `v0.1.0` (named by `.schema-version` at the repository root)
-- **Release commit**: `9f589ad266f55e91c946378cd6a4c88ba3554119`
+- **Release**: `v0.3.0` (named by `.schema-version` at the repository root)
+- **Release commit**: `ee93996970c616cc29f39cd0ce94e9def08cfe6d`
 - **Sync note**: the content is `git archive` of the release tag, never a working tree, so it is the
   published release and nothing else. To move to a newer release, change `.schema-version` and
   re-run the sync.
-- **Synced**: 2026-09-13T01:05:31Z
+- **Synced**: 2026-10-27T01:36:21Z
 
 ## Refreshing
 

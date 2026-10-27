@@ -478,6 +478,10 @@ struct RawTsRow {
     horizon: Option<String>,
     #[serde(default)]
     interval: Option<String>,
+    /// Accepted only as `PERIOD_ENDING`, the schema's default: the catalog has
+    /// no column for it, so any other value would be dropped on import.
+    #[serde(default)]
+    interval_alignment: Option<String>,
     #[serde(default)]
     count: Option<usize>,
     #[serde(default)]
@@ -607,6 +611,17 @@ impl RawTsRow {
     }
 
     fn into_metadata(self) -> Result<DecodedTsRow> {
+        if let Some(a) = self
+            .interval_alignment
+            .as_deref()
+            .filter(|a| *a != "PERIOD_ENDING")
+        {
+            return Err(wire_err(format!(
+                "row '{}': interval_alignment {a:?} is not storable; the store records only \
+                 the default PERIOD_ENDING",
+                self.name
+            )));
+        }
         let data_hash = self.resolve_hash()?;
         let ts_type = TimeSeriesType::parse(&self.time_series_type).ok_or_else(|| {
             wire_err(format!(
@@ -986,5 +1001,23 @@ mod tests {
             panic!("both rows conform");
         };
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn interval_alignment_decodes_only_as_the_default() {
+        let decode = |alignment: &str| {
+            decode_rows(
+                &ts_row_json(&format!(",\n\"interval_alignment\": \"{alignment}\"")),
+                schema::check_time_series_row,
+                RawTsRow::into_metadata,
+            )
+        };
+        assert!(decode("PERIOD_ENDING").is_ok());
+        let Err(err) = decode("PERIOD_BEGINNING") else {
+            panic!("a non-default alignment has no catalog column");
+        };
+        let message = err.to_string();
+        assert!(message.contains("min_active_power"), "{message}");
+        assert!(message.contains("PERIOD_BEGINNING"), "{message}");
     }
 }
