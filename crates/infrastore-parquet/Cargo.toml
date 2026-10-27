@@ -27,13 +27,13 @@ vendored = ["infrastore-core/vendored", "infrastore-tabular/vendored"]
 # Parquet codecs worth having -- zstd for archival size, snappy because it is
 # what every other Parquet writer defaults to and therefore what a foreign
 # reader is guaranteed to handle.
-arrow = { version = "59", default-features = false }
+arrow = { version = "60", default-features = false }
 chrono = { workspace = true }
 infrastore-core = { workspace = true }
 # The container-independent half of the layout: partitioning, the array key,
 # row walking, and series assembly on import.
 infrastore-tabular = { workspace = true }
-parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
