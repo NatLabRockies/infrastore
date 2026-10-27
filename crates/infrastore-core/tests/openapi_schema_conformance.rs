@@ -1,98 +1,24 @@
 //! Validates the checked-in OpenAPI row fixtures
-//! (`conformance/openapi_row_fixtures/`) against the vendored SiennaSchemas
-//! wire-format specs (`crates/infrastore-core/sienna_schemas/`).
+//! (`conformance/openapi_row_fixtures/`) against the SiennaSchemas wire
+//! contract that the `power-openapi-models` SDK carries.
 //!
-//! Each time-series fixture is checked against its own per-type schema AND
-//! against `TimeSeries/TimeSeriesAssociation.json`'s `oneOf` wrapper; the
+//! Each time-series fixture is checked against the `TimeSeriesAssociation`
+//! `oneOf` and must parse into the SDK type its `time_series_type` names; the
 //! supplemental-attribute-association fixture is checked against
-//! `Core/Associations/SupplementalAttributeAssociation.json`. A failure here
-//! means either a fixture drifted from the wire contract or the vendored
-//! schemas are stale — refresh with `scripts/sync_sienna_schemas.sh` and see
-//! `crates/infrastore-core/sienna_schemas/SOURCE.md`.
-//!
-//! The schemas are draft-07 and their `$ref`s are relative filesystem paths
-//! (`common.json#/definitions/...`, `../Core/common.json#/definitions/...`),
-//! not `$id`-anchored URLs. Each schema is compiled with a synthetic
-//! `vendored:///<path relative to schemas_dir()>` base URI — not `file://`,
-//! which on Windows would have to carry `canonicalize()`'s verbatim-path
-//! prefix (`\\?\D:\...`) and is not a valid URI. RFC 3986 relative-reference
-//! resolution is scheme-agnostic, so the library's standard resolution still
-//! turns those `$ref`s into `vendored:` URIs pointing at the sibling vendored
-//! files; a custom `Retrieve` impl below then splits the resolved URI's path
-//! into segments and rejoins them onto `schemas_dir()` with native path
-//! separators, then reads and parses whichever file that names. This needs
-//! no `resolve-file`/`resolve-http` feature and no network access — see the
-//! `jsonschema` dependency comment in `infrastore-core/Cargo.toml`.
+//! `SupplementalAttributeAssociation`. A failure here means a fixture drifted
+//! from the wire contract, or the SDK moved to a schema release the fixtures
+//! do not match.
 
 use std::path::{Path, PathBuf};
 
 use infrastore_core::types::metadata::RESERVED_FEATURE_NAMES;
-use jsonschema::{Draft, Retrieve, Uri, Validator};
+use power_openapi_models::infrastructure_core::SupplementalAttributeAssociation;
+use power_openapi_models::timeseries::TimeSeriesAssociation;
+use power_openapi_models::validate::Validator;
 use serde_json::Value;
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("repo root exists")
-}
-
-fn schemas_dir() -> PathBuf {
-    repo_root().join("crates/infrastore-core/sienna_schemas")
-}
-
 fn fixtures_dir() -> PathBuf {
-    repo_root().join("conformance/openapi_row_fixtures")
-}
-
-/// Resolves every relative `$ref` by reading straight off the vendored
-/// schema tree on disk; see the module doc for how the base URIs line up.
-struct VendoredRetriever;
-
-impl Retrieve for VendoredRetriever {
-    fn retrieve(
-        &self,
-        uri: &Uri<String>,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        if uri.scheme().as_str() != "vendored" {
-            return Err(format!("expected a vendored: URI, got {uri}").into());
-        }
-        let mut path = schemas_dir();
-        for segment in uri.path().as_str().split('/') {
-            if segment.is_empty() {
-                continue;
-            }
-            if segment == ".." {
-                return Err(
-                    format!("refusing to escape the vendored schema tree for {uri}").into(),
-                );
-            }
-            path.push(segment);
-        }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("reading vendored schema referenced as {uri}: {e}"))?;
-        Ok(serde_json::from_str(&text)?)
-    }
-}
-
-/// Builds a synthetic `vendored:///a/b/c.json` base URI from `path`'s
-/// location relative to `schemas_dir()`, joined with forward slashes
-/// regardless of platform. No `canonicalize()`: on Windows that returns a
-/// verbatim path (`\\?\D:\...`) that is not valid inside a URI.
-fn base_uri_for(path: &Path) -> String {
-    let rel = path
-        .strip_prefix(schemas_dir())
-        .unwrap_or_else(|e| panic!("{} is not under schemas_dir(): {e}", path.display()));
-    let joined = rel
-        .components()
-        .map(|c| {
-            c.as_os_str()
-                .to_str()
-                .unwrap_or_else(|| panic!("non-UTF-8 path component in {}", path.display()))
-        })
-        .collect::<Vec<_>>()
-        .join("/");
-    format!("vendored:///{joined}")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/openapi_row_fixtures")
 }
 
 fn read_json(path: &Path) -> Value {
@@ -102,144 +28,100 @@ fn read_json(path: &Path) -> Value {
         .unwrap_or_else(|e| panic!("parsing {} as JSON: {e}", path.display()))
 }
 
-/// Compiles the schema at `path` against draft-07, resolving its `$ref`s
-/// against the vendored tree.
-fn compile(path: &Path) -> Validator {
-    let schema = read_json(path);
-    jsonschema::options()
-        .with_draft(Draft::Draft202012)
-        .with_retriever(VendoredRetriever)
-        .with_base_uri(base_uri_for(path))
-        .build(&schema)
-        .unwrap_or_else(|e| panic!("compiling schema {}: {e}", path.display()))
-}
-
 fn fixture(name: &str) -> Value {
     read_json(&fixtures_dir().join(name))
 }
 
-/// Validates `instance` (from fixture file `fixture_name`) against
-/// `validator` (compiled from `schema_name`), panicking with the offending
-/// field and error on the first mismatch.
-fn assert_conforms(validator: &Validator, instance: &Value, fixture_name: &str, schema_name: &str) {
-    if let Err(error) = validator.validate(instance) {
-        panic!(
-            "{fixture_name} does not conform to {schema_name}: {error} (at instance path \
-             '{}', schema path '{}'). If the fixture is right, the vendored schema is stale — \
-             refresh with scripts/sync_sienna_schemas.sh.",
-            error.instance_path(),
-            error.schema_path(),
-        );
-    }
+fn assert_conforms(definition: &str, instance: &Value, fixture_name: &str) {
+    let validator = Validator::new(definition).expect("the SDK bundle has the definition");
+    let violations = validator.violations(instance);
+    assert!(
+        violations.is_empty(),
+        "{fixture_name} does not conform to {definition} at SiennaSchemas {}: {violations:?}",
+        power_openapi_models::SCHEMA_VERSION,
+    );
 }
 
-/// One (fixture file, `time_series_type` schema file) pair for every
-/// time-series row type. Kept as one list so both the per-type and the
-/// `TimeSeriesAssociation` `oneOf` checks below iterate the same set.
-fn time_series_cases() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("single_time_series.json", "SingleTimeSeries.json"),
-        (
-            "non_sequential_time_series.json",
-            "NonSequentialTimeSeries.json",
-        ),
-        ("deterministic.json", "Deterministic.json"),
-        (
-            "deterministic_single_time_series.json",
-            "DeterministicSingleTimeSeries.json",
-        ),
-        ("probabilistic.json", "Probabilistic.json"),
-        ("scenarios.json", "Scenarios.json"),
-    ]
-}
+/// One fixture file per time-series row type.
+const TIME_SERIES_FIXTURES: &[&str] = &[
+    "single_time_series.json",
+    "non_sequential_time_series.json",
+    "deterministic.json",
+    "deterministic_single_time_series.json",
+    "probabilistic.json",
+    "scenarios.json",
+];
 
-#[test]
-fn each_time_series_fixture_conforms_to_its_own_schema() {
-    for (fixture_name, schema_name) in time_series_cases() {
-        let validator = compile(&schemas_dir().join("TimeSeries").join(schema_name));
-        let instance = fixture(fixture_name);
-        assert_conforms(&validator, &instance, fixture_name, schema_name);
-    }
+fn parse_row(fixture_name: &str) -> TimeSeriesAssociation {
+    serde_json::from_value(fixture(fixture_name))
+        .unwrap_or_else(|e| panic!("{fixture_name} does not parse into the SDK type: {e}"))
 }
 
 #[test]
 fn each_time_series_fixture_conforms_to_the_association_one_of() {
-    let validator = compile(
-        &schemas_dir()
-            .join("TimeSeries")
-            .join("TimeSeriesAssociation.json"),
-    );
-    for (fixture_name, _) in time_series_cases() {
-        let instance = fixture(fixture_name);
+    for fixture_name in TIME_SERIES_FIXTURES {
         assert_conforms(
-            &validator,
-            &instance,
+            "TimeSeriesAssociation",
+            &fixture(fixture_name),
             fixture_name,
-            "TimeSeriesAssociation.json (oneOf)",
         );
+        parse_row(fixture_name);
     }
 }
 
 #[test]
 fn supplemental_attribute_association_fixture_conforms() {
-    let validator = compile(
-        &schemas_dir()
-            .join("Core")
-            .join("Associations")
-            .join("SupplementalAttributeAssociation.json"),
-    );
-    let instance = fixture("supplemental_attribute_association.json");
-    assert_conforms(
-        &validator,
-        &instance,
-        "supplemental_attribute_association.json",
-        "SupplementalAttributeAssociation.json",
-    );
+    let name = "supplemental_attribute_association.json";
+    let instance = fixture(name);
+    assert_conforms("SupplementalAttributeAssociation", &instance, name);
+    serde_json::from_value::<SupplementalAttributeAssociation>(instance)
+        .unwrap_or_else(|e| panic!("{name} does not parse into the SDK type: {e}"));
 }
 
 /// The reserved feature names are maintained by hand in two repositories --
-/// [`RESERVED_FEATURE_NAMES`] here and `TimeSeriesFeatures.propertyNames.not.enum`
-/// in the vendored `TimeSeries/common.json`. Nothing ties the two together, and
-/// they can drift in both directions at once, which is what this test catches.
+/// [`RESERVED_FEATURE_NAMES`] here and `TimeSeriesFeatures.propertyNames` in
+/// the schema. Nothing ties the two together, which is what this test catches.
 ///
-/// The two directions are not equally harmful. A name the schema reserves and
-/// the core does not is the one that breaks a document: the store accepts the
-/// feature, and the export it produces then fails validation on the features
-/// map. The reverse only makes the store stricter than the wire contract. The
-/// assertion is equality anyway, because holding them equal is what keeps the
-/// harmful direction from appearing unnoticed -- and because a core-only
-/// reservation is a field the schema should learn about too.
+/// The schema reserves every field of a time-series row. So the names are the
+/// keys of the six fixture rows, re-serialized through the SDK types so that a
+/// defaulted field such as `interval_alignment` appears, plus the core's own
+/// list. Each must be reserved on both sides. A name the schema reserves and
+/// the core does not is the harmful direction: the store accepts the feature,
+/// and the export it produces then fails validation on the features map.
 #[test]
-fn the_reserved_feature_names_match_the_vendored_schema() {
-    let common = read_json(&schemas_dir().join("TimeSeries").join("common.json"));
-    let schema_names: Vec<&str> =
-        common["$defs"]["TimeSeriesFeatures"]["propertyNames"]["not"]["enum"]
-            .as_array()
-            .expect("TimeSeriesFeatures.propertyNames.not.enum is an array")
-            .iter()
-            .map(|v| {
-                v.as_str()
-                    .expect("every reserved name in the schema is a string")
-            })
-            .collect();
-
-    let schema_only: Vec<&&str> = schema_names
+fn the_reserved_feature_names_match_the_schema() {
+    let features = Validator::new("TimeSeriesFeatures").expect("the SDK bundle has the definition");
+    let mut names: Vec<String> = RESERVED_FEATURE_NAMES
         .iter()
-        .filter(|n| !RESERVED_FEATURE_NAMES.contains(n))
+        .map(|n| n.to_string())
         .collect();
-    let core_only: Vec<&&str> = RESERVED_FEATURE_NAMES
+    for fixture_name in TIME_SERIES_FIXTURES {
+        let row = serde_json::to_value(parse_row(fixture_name)).expect("the row serializes");
+        names.extend(row.as_object().expect("a row is an object").keys().cloned());
+    }
+    names.sort();
+    names.dedup();
+
+    let schema_allows: Vec<&String> = names
         .iter()
-        .filter(|n| !schema_names.contains(n))
+        .filter(|n| {
+            features
+                .violations(&serde_json::json!({ n.as_str(): 1 }))
+                .is_empty()
+        })
+        .collect();
+    let core_allows: Vec<&String> = names
+        .iter()
+        .filter(|n| !RESERVED_FEATURE_NAMES.contains(&n.as_str()))
         .collect();
 
     assert!(
-        schema_only.is_empty() && core_only.is_empty(),
-        "the reserved feature names drifted from the vendored schema.\n\
-         reserved by the schema, not by the core: {schema_only:?} -- the store would accept \
+        schema_allows.is_empty() && core_allows.is_empty(),
+        "the reserved feature names drifted from the schema.\n\
+         a row field the core does not reserve: {core_allows:?} -- the store would accept \
          these features and then export a document the schema rejects; add them to \
          RESERVED_FEATURE_NAMES.\n\
-         reserved by the core, not by the schema: {core_only:?} -- harmless for reads, but the \
-         schema should carry them too; upstream them, or refresh the vendored copy with \
-         scripts/sync_sienna_schemas.sh if it is simply stale."
+         reserved by the core, not by the schema: {schema_allows:?} -- harmless for reads, \
+         but the schema should carry them too; upstream them."
     );
 }

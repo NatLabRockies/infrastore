@@ -917,8 +917,8 @@ content-addressed — two irregular series with byte-identical values on _differ
 stored array, and only the catalog's `timestamps_hash` tells them apart, so an import that guessed
 would hand back another series' timestamps.
 
-Incoming rows are validated against the vendored [SiennaSchemas](#the-wire-contract) specs before
-anything is decoded, so a document that drifted is refused in the schema's own terms.
+Incoming rows are validated against the [SiennaSchemas](#the-wire-contract) specs before anything is
+decoded, so a document that drifted is refused in the schema's own terms.
 
 **What does not travel.** A `PersistentTimeSeries` is an infrastore-local extension, and the wire
 contract is a `oneOf` over six canonical types with no schema for a seventh — so the export omits
@@ -931,13 +931,11 @@ restore would leave behind.
 
 ### The wire contract
 
-The JSON spelling both directions use is SiennaSchemas' own, vendored at
-`crates/infrastore-core/sienna_schemas/` (its `SOURCE.md` records the upstream commit; refresh with
-`scripts/sync_sienna_schemas.sh`). Those files are compiled into the crate and are what the import
-path validates against — no filesystem access, no network. A time-series row is checked against the
-per-type schema its own `time_series_type` selects, which is how the wrapper's `discriminator` says
-to read it and what makes an error name the offending field rather than only reporting that a
-`oneOf` matched nothing.
+The JSON spelling both directions use is SiennaSchemas' own, through the `power-openapi-models`
+crate: its generated types are the rows, and its `validate::Validator` holds the schema bundle the
+import path validates against — compiled in, no filesystem access, no network. The schema release is
+`power_openapi_models::SCHEMA_VERSION`. A failed `oneOf` reports its closest branch, so an error
+names the offending field rather than only reporting that a `oneOf` matched nothing.
 
 ## Types
 

@@ -38,7 +38,7 @@ the active virtual environment:
 ```sh
 cd crates/infrastore-py
 python3 -m venv .venv && source .venv/bin/activate
-pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
+pip install maturin pytest numpy tzdata "power-openapi-models==0.3.*"  # tzdata: zoneinfo on Windows
 pip install netCDF4 h5py                 # only for the HDF5-interop tests
 maturin develop
 
@@ -598,13 +598,12 @@ for at in load_reader.timestamps():        # the hourly grid the simulation runs
 
 ### These rows do not travel in an OpenAPI document
 
-`PersistentTimeSeries` is an infrastore-local extension, and the vendored wire contract is a `oneOf`
-over six canonical Sienna types with no schema for a seventh. So
-`export_time_series_associations_openapi` **omits** persistent rows — a mixed store still exports
-its six-type rows — a filter naming the type raises `InvalidParameterError` rather than answering
-with an empty array, and an import refuses a document that carries one. The series themselves are
-unaffected: they live in the artifact, which holds them in full. Ask the catalog what a document
-leaves behind:
+`PersistentTimeSeries` is an infrastore-local extension, and the wire contract is a `oneOf` over six
+canonical Sienna types with no schema for a seventh. So `export_time_series_associations_openapi`
+**omits** persistent rows — a mixed store still exports its six-type rows — a filter naming the type
+raises `InvalidParameterError` rather than answering with an empty array, and an import refuses a
+document that carries one. The series themselves are unaffected: they live in the artifact, which
+holds them in full. Ask the catalog what a document leaves behind:
 
 ```python
 left_behind = store.list_metadata(time_series_type=TimeSeriesType.PersistentTimeSeries)

@@ -20,6 +20,7 @@
   "quantity_kind": "ActivePower",
   "unit_system": "NATURAL_UNITS",
   "component_field": "max_active_power",
+  "interval_alignment": "PERIOD_ENDING",
   "initial_timestamp": "2030-01-01T00:00:00Z",
   "resolution": "PT1H",
   "length": 8760

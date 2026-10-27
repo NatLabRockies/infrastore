@@ -298,9 +298,9 @@ fn export_reproduces_every_time_series_fixture() {
 
 /// A `PersistentTimeSeries` does not travel in an OpenAPI document at all.
 ///
-/// The vendored `TimeSeriesAssociation.json` is a `oneOf` over a closed set of
+/// The SiennaSchemas `TimeSeriesAssociation.json` is a `oneOf` over a closed set of
 /// six canonical Sienna types, and there is no upstream schema for a seventh;
-/// inventing one would misrepresent the vendored contract. So the type is not a
+/// inventing one would misrepresent the wire contract. So the type is not a
 /// fixture in `build_fixture_store`, `openapi_schema_conformance.rs::time_series_cases`
 /// stays at exactly six entries, and an export emits nothing for it — a
 /// document that carried a row no import would take back is worse than one that

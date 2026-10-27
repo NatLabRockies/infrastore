@@ -158,15 +158,13 @@ door, the guarantee holds there too: a supplied id must sit above the destinatio
 issued ids of its own), and a document supplies one for every row or for none. Neither association
 catalog's wire form carries an id at all, so both always assign.
 
-The same round trip carries two fields the schema gained late
-(`crates/infrastore-core/sienna_schemas/SOURCE.md` records the upstream commit vendored here):
-`array_shape`, the stored array's full native shape (`[length, *element_shape]` in the catalog's
-terms, where the schema's `element_shape` is only the per-step trailing shape), and
-`time_reference`. Both exist so an imported row is _identical_ to the exported one — the forecast
-layouts above are conventions the caller owns, so the native shape cannot be rebuilt from `horizon`
-and `count`. Neither is required: a producer predating them writes rows without them, a reader that
-does not know them ignores them, and an import that finds them absent falls back to the schema's own
-fields.
+The same round trip carries two fields the schema gained late: `array_shape`, the stored array's
+full native shape (`[length, *element_shape]` in the catalog's terms, where the schema's
+`element_shape` is only the per-step trailing shape), and `time_reference`. Both exist so an
+imported row is _identical_ to the exported one — the forecast layouts above are conventions the
+caller owns, so the native shape cannot be rebuilt from `horizon` and `count`. Neither is required:
+a producer predating them writes rows without them, a reader that does not know them ignores them,
+and an import that finds them absent falls back to the schema's own fields.
 
 ### Reading an artifact back from arrays plus a document
 
@@ -181,7 +179,7 @@ save the paired-stamp check exists to catch.
 
 All six of the types the wire contract defines make the trip, including `NonSequentialTimeSeries` —
 which needs one field the others do not. (A `PersistentTimeSeries` does not: it is an
-infrastore-local extension outside the vendored `oneOf`, so the export omits its rows and the import
+infrastore-local extension outside the six-type `oneOf`, so the export omits its rows and the import
 refuses them. A store holding them still exports the rest, but a restore from arrays plus a document
 alone will not carry them.) Its timestamp vector lives in the store rather than the document,
 content-addressed so a cohort sharing one axis stores it once, and the values cannot imply which
@@ -194,12 +192,11 @@ would repeat the whole vector on every row of the cohort. The axis ships in the 
 the arrays, so the import resolves the locator against the store; a row missing it, or naming an
 axis the store does not hold, is refused.
 
-Both imports validate every incoming row against those vendored schemas before decoding it, so a
-document that drifted from the contract is refused in the schema's own terms — the row, the field,
-and what was expected — rather than by whatever the Rust struct happens to notice first. A
-time-series row is checked against the per-type schema its own `time_series_type` selects, which is
-what the wrapper's `discriminator` prescribes and what keeps the error specific: a failed `oneOf`
-can only report that nothing matched.
+Both imports validate every incoming row against the schema bundle the `power-openapi-models` crate
+carries before decoding it, so a document that drifted from the contract is refused in the schema's
+own terms — the row, the field, and what was expected — rather than by whatever the generated type
+happens to notice first. A failed `oneOf` reports its closest branch, which keeps the error
+specific.
 
 Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
 alongside the table it came from.
@@ -438,7 +435,7 @@ Four rules are worth stating outright:
 They live in the catalog, so they travel with `persist_to` and `persist_catalog`, survive `compact`
 (which rewrites only the array half), and come across with `open_copy`. `open_without_catalog` mints
 an empty set, since there is nowhere else for them to have been. They are **not** carried by the
-OpenAPI export or import: the vendored schema has no place for them.
+OpenAPI export or import: the schema has no place for them.
 
 Available in the Rust core, the C ABI, Julia, Python, and the CLI (`store-attr`, plus
 `store_attributes` in `store-info`); the read-only gRPC server carries the read half

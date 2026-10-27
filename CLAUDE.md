@@ -84,25 +84,24 @@ semantics, which is why it is a distinct type rather than a read flag — "an ir
 no value between its timestamps" is a guarantee `NonSequentialTimeSeries` leans on. A range read
 begins at the breakpoint _in force at_ `start`, so the result always defines a value there.
 Scalar-collapse policy is the application's and rides in `application_data`; there are no catalog
-columns for it. It is an infrastore-local extension, not a Sienna type: it sits outside the vendored
-six-type `oneOf`, nothing under `conformance/` mentions it, and it does not travel in an OpenAPI
-document in either direction — the export omits its rows (refusing a filter that names the type
-outright) and the import rejects one a foreign document carries. `Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading values across the
-Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`, `Probabilistic`,
-`Scenarios`) are written through the generic `add_time_series` by passing the matching forecast
-object across the Rust core, Python, and Julia (the C ABI's one write path is a batch —
-`infrastore_batch_new` / `infrastore_batch_add_*` / `infrastore_store_add_batch` — so a single add
-is a one-item batch and there are no per-type store-level adds); `DeterministicSingleTimeSeries` is
-derived from stored `SingleTimeSeries` via `transform_single_time_series` rather than added
-directly. Forecast writes are not exposed over the read-only gRPC server. Arrays are dtype-generic
-(`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every binding, including Python) and may have
-multidimensional per-timestep values. The columnar simulation readers
-(`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia, and Python;
-`StaticReader` covers all three static types, sweeping a `SingleTimeSeries` grid, a cohort of
-`NonSequentialTimeSeries` sharing one timestamp vector, or a set of `PersistentTimeSeries` (its
-`resolution()` is `None` for both irregular kinds). The persistent case is the **one exception to
-"one timeline per reader"**: a step function has a value at every instant from its own first
+columns for it. It is an infrastore-local extension, not a Sienna type: it sits outside the six-type
+`oneOf`, nothing under `conformance/` mentions it, and it does not travel in an OpenAPI document in
+either direction — the export omits its rows (refusing a filter that names the type outright) and
+the import rejects one a foreign document carries. `Deterministic`, `DeterministicSingleTimeSeries`,
+`Probabilistic`, and `Scenarios` support reading values across the Rust core, C ABI, Python, Julia,
+and gRPC. Dense forecasts (`Deterministic`, `Probabilistic`, `Scenarios`) are written through the
+generic `add_time_series` by passing the matching forecast object across the Rust core, Python, and
+Julia (the C ABI's one write path is a batch — `infrastore_batch_new` / `infrastore_batch_add_*` /
+`infrastore_store_add_batch` — so a single add is a one-item batch and there are no per-type
+store-level adds); `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
+`transform_single_time_series` rather than added directly. Forecast writes are not exposed over the
+read-only gRPC server. Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every
+binding, including Python) and may have multidimensional per-timestep values. The columnar
+simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia,
+and Python; `StaticReader` covers all three static types, sweeping a `SingleTimeSeries` grid, a
+cohort of `NonSequentialTimeSeries` sharing one timestamp vector, or a set of `PersistentTimeSeries`
+(its `resolution()` is `None` for both irregular kinds). The persistent case is the **one exception
+to "one timeline per reader"**: a step function has a value at every instant from its own first
 breakpoint on, so its columns may hold independent breakpoint vectors. Such a reader interns the
 distinct vectors, gives each column the id of the one it resolves against, and takes their sorted
 **union** as its public axis; `index_at` then reports a position on that union and is _not_ a
@@ -207,19 +206,21 @@ are content-addressed, so two irregular series with identical values on differen
 stored array and only the catalog's `timestamps_hash` tells them apart. The wire form therefore
 locates the axis, and the import resolves it against the store (the axis ships in the array file,
 like the arrays). A `PersistentTimeSeries` row never gets that far: the type is an infrastore-local
-extension, outside the six the vendored contract defines, so the schema check refuses a document
-naming one — and no export writes one either, which leaves the rows-only
-`Store::import_association_rows` as the only door such a row fits through. Neither association
-catalog's wire form carries an id, so both always assign — their row types carry an `id` field that
-a listing populates and an add ignores — with independent counters, and equality on both association
-types deliberately excludes the id.
+extension, outside the six the wire contract defines, so the schema check refuses a document naming
+one — and no export writes one either, which leaves the rows-only `Store::import_association_rows`
+as the only door such a row fits through. Neither association catalog's wire form carries an id, so
+both always assign — their row types carry an `id` field that a listing populates and an add ignores
+— with independent counters, and equality on both association types deliberately excludes the id.
 
-Both imports **validate every incoming row against the vendored SiennaSchemas specs** before
-decoding it (`crates/infrastore-core/src/openapi/schema.rs`, schemas at
-`crates/infrastore-core/sienna_schemas/`, embedded with `include_str!` so there is no filesystem or
-network access — refresh with `scripts/sync_sienna_schemas.sh`). A time-series row is checked
-against the per-type schema its own `time_series_type` selects, not the `oneOf` wrapper, so an error
-names the offending field instead of only reporting that nothing matched.
+Both imports **validate every incoming row against the SiennaSchemas contract** before decoding it
+(`crates/infrastore-core/src/openapi/schema.rs`). The contract comes from the `power-openapi-models`
+crate: its generated types are the wire rows in both directions, and its `validate::Validator`
+carries the strict schema bundle compiled in, so there is no filesystem or network access. The
+schema release is the one the crate version names (`power_openapi_models::SCHEMA_VERSION`); a schema
+upgrade is a dependency bump. The SDK reports a failed `oneOf` against its closest branch, so an
+error names the offending field instead of only reporting that nothing matched. The SDK enables
+serde_json's `preserve_order` for the whole workspace, so a `serde_json::Map` keeps insertion order,
+not sorted order.
 
 Together with **`Store::open_without_catalog`** — which opens the array half of an artifact whose
 `.sqlite` is absent, minting an empty catalog stamped to match the arrays — these make an artifact
@@ -425,7 +426,7 @@ flags are inert.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
+pip install maturin pytest numpy tzdata "power-openapi-models==0.3.*"  # tzdata: zoneinfo on Windows
 maturin develop --manifest-path crates/infrastore-py/Cargo.toml
 pytest python/tests
 ```
@@ -437,8 +438,10 @@ cargo build -p infrastore-ffi --release
 export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
 julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
-# The ZonedDateTime tests need the TimeZones weak dependency, which is only
-# loadable through the test target; the run above skips them with a warning:
+# The ZonedDateTime tests need the TimeZones weak dependency, and the OpenAPI SDK
+# decode tests need the test-only InfrastructureCoreOpenAPIModels and
+# InfrastructureTimeSeriesOpenAPIModels. Both load only through the test target;
+# the run above skips them with a warning:
 julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'
 ```
 

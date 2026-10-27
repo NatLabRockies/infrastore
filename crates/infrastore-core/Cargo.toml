@@ -41,13 +41,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 hdf5-metno = { version = "0.14.0", features = ["zlib"] }
-# Enforces the SiennaSchemas wire contract on the OpenAPI import path
-# (`src/openapi/schema.rs`), against the schemas vendored at `sienna_schemas/`
-# and compiled into the binary. `default-features = false` drops
-# `resolve-http`/`resolve-async`/`tls-aws-lc-rs` (reqwest, rustls, tokio,
-# aws-lc-rs): every `$ref` is resolved by our own `Retrieve` reading the
-# embedded copies, so no network, no filesystem, and no async runtime.
-jsonschema = { version = "0.49.9", default-features = false }
+# The SiennaSchemas wire contract: the typed OpenAPI rows and, with
+# `validate`, the strict schema bundle compiled in, so the import check needs
+# no filesystem and no network.
+power-openapi-models = { version = "0.3", features = ["validate"] }
 
 # `asm` selects hand-written SHA-256 kernels (and the ARMv8 crypto extensions
 # on aarch64), ~5x faster than the portable fallback for content hashing on

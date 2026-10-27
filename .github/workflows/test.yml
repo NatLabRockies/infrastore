@@ -107,7 +107,7 @@ jobs:
       - name: Install Python test dependencies
         shell: bash
         run: |
-          python -m pip install --upgrade maturin pytest numpy tzdata ty==0.0.25
+          python -m pip install --upgrade maturin pytest numpy tzdata ty==0.0.25 "power-openapi-models==0.3.*"
           python -m pip install -r examples/python/requirements.txt
 
       - name: Build and install the Python extension

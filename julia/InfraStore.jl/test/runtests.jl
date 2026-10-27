@@ -5176,6 +5176,23 @@ else
         "Run them with: julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'"
 end
 
+# The power-openapi-models SDKs are test-only dependencies, so like TimeZones
+# they load only under `Pkg.test()`.
+if (
+    try
+        @eval import InfrastructureCoreOpenAPIModels as CoreModels
+        @eval import InfrastructureTimeSeriesOpenAPIModels as TimeSeriesModels
+        true
+    catch
+        false
+    end
+)
+    include("openapi_sdk_tests.jl")
+else
+    @warn "The OpenAPI model packages are not loadable here, so the SDK decode tests " *
+        "were SKIPPED. Run them with: julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'"
+end
+
 @testset "association ids: the handle a caller stores in its own model" begin
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)

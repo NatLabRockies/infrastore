@@ -19,13 +19,22 @@ TimeZones = "f269a46b-ccf7-5d73-abea-4c690281aa53"
 InfraStoreTimeZonesExt = "TimeZones"
 
 [compat]
+InfrastructureCoreOpenAPIModels = "0.3"
+InfrastructureTimeSeriesOpenAPIModels = "0.3"
 JSON = "0.21, 1"
 TimeZones = "1"
 julia = "1.11"
 
 [extras]
+InfrastructureCoreOpenAPIModels = "1f5e1c8d-e0cc-4dbf-8c6d-f2a3d2ae70a8"
+InfrastructureTimeSeriesOpenAPIModels = "37a216c8-a490-47cf-89d7-db2cb9618199"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TimeZones = "f269a46b-ccf7-5d73-abea-4c690281aa53"
 
 [targets]
-test = ["Test", "TimeZones"]
+test = [
+    "InfrastructureCoreOpenAPIModels",
+    "InfrastructureTimeSeriesOpenAPIModels",
+    "Test",
+    "TimeZones",
+]

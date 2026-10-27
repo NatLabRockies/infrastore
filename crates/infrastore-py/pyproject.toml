@@ -35,7 +35,7 @@ Issues = "https://github.com/NatLabRockies/infrastore/issues"
 [project.optional-dependencies]
 # `tzdata` because `zoneinfo` has no time-zone database to read on Windows and
 # the datetime tests name real zones; see the note on `test-requires` below.
-test = ["pytest>=7", "tzdata"]
+test = ["pytest>=7", "tzdata", "power-openapi-models==0.3.*"]
 # `to_arrow()` only. Kept out of `dependencies` deliberately: pyarrow is several
 # times the size of the wheel that would pull it in, and the binding's currency
 # is numpy arrays -- a caller who never asks for a table should not carry it.
@@ -79,7 +79,7 @@ build-frontend = "build"
 # `to_arrow()` rather than skipping it. The interesting part is cross-platform:
 # the method hands numpy buffers to pyarrow, and the two agree on byte order and
 # datetime64 semantics only if the platform is the one both were built for.
-test-requires = ["pytest>=7", "netCDF4", "h5py", "tzdata", "pyarrow>=14"]
+test-requires = ["pytest>=7", "netCDF4", "h5py", "tzdata", "pyarrow>=14", "power-openapi-models==0.3.*"]
 test-command = "pytest -q {project}/python/tests"
 # Never build netCDF4 from source: no runner has the netCDF headers its sdist
 # needs. Binary-only makes pip fall back to the newest release with a wheel for

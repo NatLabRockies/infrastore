@@ -3,8 +3,8 @@
 //! `time_series_associations` and `supplemental_attribute_associations` are
 //! the store's own tables; this module is the only place that knows how a row
 //! of either one maps to and from the wire spelling SiennaSchemas defines
-//! (`TimeSeries/*.json`, `Core/Associations/SupplementalAttributeAssociation.json`,
-//! vendored at `crates/infrastore-core/sienna_schemas/`). Everything else in the crate —
+//! (`TimeSeries/*.json`, `Core/Associations/SupplementalAttributeAssociation.json`),
+//! through the generated types of the `power-openapi-models` SDK. Everything else in the crate —
 //! the catalog schema, the metadata query, the association tables — is
 //! untouched by this module; it only maps rows [`crate::store::Store`]
 //! already produces into JSON, and JSON back into the calls that already
@@ -30,8 +30,7 @@
 //! through the round trip.
 //!
 //! Three fields reached the schema after the rest (`timestamps_uri`, below, is
-//! the third) — see `crates/infrastore-core/sienna_schemas/SOURCE.md` for the
-//! release the vendored copy carries: `time_reference`,
+//! the third): `time_reference`,
 //! the catalog spelling of [`TimeReference`] (`"utc"`, `"zoneless"`, an offset,
 //! or a zone name), and `array_shape`, the stored array's full native shape —
 //! `[length, *element_shape]` in the catalog's own terms, where the schema's
@@ -40,11 +39,10 @@
 //! is *identical* to the row that was exported: the forecast layouts are
 //! conventions the caller owns, not rules the store enforces, so the native
 //! shape cannot be reconstructed from `horizon`/`count`/`percentiles` and has
-//! to travel. Neither is required, and the schemas do not close their objects,
-//! so a producer predating them writes rows without them and a reader that does
-//! not know them ignores them; an import that finds `array_shape` absent falls
-//! back to the schema fields, which is exact for the static types and a best
-//! effort for forecasts.
+//! to travel. Neither is required, so a producer predating them writes rows
+//! without them; an import that finds `array_shape` absent falls back to the
+//! schema fields, which is exact for the static types and a best effort for
+//! forecasts.
 //!
 //! A time-series row also carries **`association_id`**, the wire spelling of
 //! [`TimeSeriesMetadata::id`], required by the schema on all six types.
@@ -65,12 +63,13 @@
 //! against the store and hands the vector to the ordinary insert path.
 //!
 //! On top of the shared fields, each of the six [`TimeSeriesType`] values adds
-//! its own geometry fields — see [`ts_row_to_json`] — and every field that
+//! its own geometry fields — see [`ts_row_to_wire`] — and every field that
 //! does not apply to a row's type is absent from that row's object, never
-//! present as `null`.
+//! present as `null`. The five types that carry `interval_alignment` always
+//! write the schema default `PERIOD_ENDING`, the only value the catalog stores.
 //!
 //! `initial_timestamp` is RFC3339 UTC, floored to millisecond precision (see
-//! [`format_initial_timestamp`]) — the store's own precision floor
+//! [`floor_to_millis`]) — the store's own precision floor
 //! (`crate::timestamps` module docs), and all the OpenAPI wire form promises.
 //! `resolution` / `horizon` / `interval` are [`Period::to_iso8601`]'s canonical
 //! spelling, which is not always the "seconds" form a hand-written fixture
@@ -84,15 +83,19 @@
 //! matters and how periods and features participate in a total order despite
 //! not being numeric.
 
-use chrono::{DateTime, SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+use power_openapi_models::infrastructure_core::SupplementalAttributeAssociation as WireSaRow;
+use power_openapi_models::timeseries::{self as wire, TimeSeriesAssociation};
 use serde_json::{Map, Value};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::metadata::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 use crate::store::{ListFilter, Store};
 use crate::types::id::TimeSeriesId;
-use crate::types::metadata::{FeatureValue, Features, TimeSeriesMetadata, UnitSystem};
+use crate::types::metadata::{
+    FeatureValue, Features, OwnerCategory, TimeSeriesMetadata, UnitSystem,
+};
+use crate::types::period::Period;
 use crate::types::time_reference::TimeReference;
 use crate::types::time_series::TimeSeriesType;
 
@@ -163,31 +166,153 @@ pub fn features_to_plain(features: &Features) -> Map<String, Value> {
     out
 }
 
-/// `NATURAL_UNITS` / `COMPONENT_BASE`, the schema's spelling — the module maps
-/// to and from the store's snake_case [`UnitSystem::as_str`].
-fn unit_system_wire(system: UnitSystem) -> &'static str {
-    match system {
-        UnitSystem::NaturalUnits => "NATURAL_UNITS",
-        UnitSystem::ComponentBase => "COMPONENT_BASE",
+/// The fields every one of the six row types shares, in the SDK's types.
+///
+/// The six generated row structs cannot share a type, so [`wire_row`] spreads
+/// this into whichever one a row is, and [`shared_of`] gathers it back.
+struct Shared {
+    association_id: i64,
+    owner_id: i64,
+    owner_type: String,
+    owner_category: wire::OwnerCategory,
+    name: String,
+    features: wire::TimeSeriesFeatures,
+    uri: String,
+    data_hash: Option<String>,
+    element_type: String,
+    element_shape: Vec<i64>,
+    array_shape: Option<Vec<i64>>,
+    units: Option<String>,
+    quantity_kind: Option<String>,
+    unit_system: Option<wire::UnitSystem>,
+    time_reference: Option<String>,
+    component_field: Option<String>,
+    application_data: Option<String>,
+}
+
+/// Build the `$variant` row from a [`Shared`] plus the type's own fields.
+macro_rules! wire_row {
+    ($variant:ident, $shared:expr, { $($field:ident: $value:expr),* $(,)? }) => {{
+        let s: Shared = $shared;
+        TimeSeriesAssociation::$variant(wire::$variant {
+            association_id: s.association_id,
+            owner_id: s.owner_id,
+            owner_type: s.owner_type,
+            owner_category: s.owner_category,
+            time_series_type: Default::default(),
+            name: s.name,
+            features: s.features,
+            uri: s.uri,
+            data_hash: s.data_hash,
+            element_type: s.element_type,
+            element_shape: s.element_shape,
+            array_shape: s.array_shape,
+            units: s.units,
+            quantity_kind: s.quantity_kind,
+            unit_system: s.unit_system,
+            time_reference: s.time_reference,
+            component_field: s.component_field,
+            application_data: s.application_data,
+            $($field: $value,)*
+        })
+    }};
+}
+
+/// The inverse of [`wire_row`]: move the shared fields out of one row.
+macro_rules! shared_of {
+    ($row:ident) => {
+        Shared {
+            association_id: $row.association_id,
+            owner_id: $row.owner_id,
+            owner_type: $row.owner_type,
+            owner_category: $row.owner_category,
+            name: $row.name,
+            features: $row.features,
+            uri: $row.uri,
+            data_hash: $row.data_hash,
+            element_type: $row.element_type,
+            element_shape: $row.element_shape,
+            array_shape: $row.array_shape,
+            units: $row.units,
+            quantity_kind: $row.quantity_kind,
+            unit_system: $row.unit_system,
+            time_reference: $row.time_reference,
+            component_field: $row.component_field,
+            application_data: $row.application_data,
+        }
+    };
+}
+
+fn owner_category_wire(category: OwnerCategory) -> wire::OwnerCategory {
+    match category {
+        OwnerCategory::Component => wire::OwnerCategory::Component,
+        OwnerCategory::SupplementalAttribute => wire::OwnerCategory::SupplementalAttribute,
     }
 }
 
-/// RFC3339 UTC, floored to millisecond precision: the write path refuses a
-/// finer instant, but reads stay permissive for an artifact written before that
-/// rule, so any finer component such a catalog holds is dropped rather than
-/// surfaced. A whole-second timestamp renders with no fractional part at all
-/// (`"...T00:00:00Z"`), and anything with a nonzero millisecond remainder
-/// renders with exactly three fractional digits — never more.
-fn format_initial_timestamp(ts: DateTime<Utc>) -> String {
-    let millis = ts.timestamp_millis();
-    let floored = DateTime::<Utc>::from_timestamp_millis(millis)
-        .expect("a timestamp's own millisecond count is always representable");
-    let format = if millis.rem_euclid(1_000) == 0 {
-        SecondsFormat::Secs
-    } else {
-        SecondsFormat::Millis
-    };
-    floored.to_rfc3339_opts(format, true)
+fn owner_category_from_wire(category: wire::OwnerCategory) -> OwnerCategory {
+    match category {
+        wire::OwnerCategory::Component => OwnerCategory::Component,
+        wire::OwnerCategory::SupplementalAttribute => OwnerCategory::SupplementalAttribute,
+    }
+}
+
+fn unit_system_wire(system: UnitSystem) -> wire::UnitSystem {
+    match system {
+        UnitSystem::NaturalUnits => wire::UnitSystem::NaturalUnits,
+        UnitSystem::ComponentBase => wire::UnitSystem::ComponentBase,
+    }
+}
+
+fn unit_system_from_wire(system: wire::UnitSystem) -> UnitSystem {
+    match system {
+        wire::UnitSystem::NaturalUnits => UnitSystem::NaturalUnits,
+        wire::UnitSystem::ComponentBase => UnitSystem::ComponentBase,
+    }
+}
+
+fn features_wire(features: &Features) -> wire::TimeSeriesFeatures {
+    let additional_properties = features
+        .iter()
+        .map(|(key, value)| {
+            let value = match value {
+                FeatureValue::Int(i) => wire::TimeSeriesFeatureValue::Integer(*i),
+                FeatureValue::Float(f) => wire::TimeSeriesFeatureValue::Number(*f),
+                FeatureValue::Bool(b) => wire::TimeSeriesFeatureValue::Boolean(*b),
+                FeatureValue::Str(s) => wire::TimeSeriesFeatureValue::String(s.clone()),
+            };
+            (key.clone(), value)
+        })
+        .collect();
+    wire::TimeSeriesFeatures {
+        additional_properties,
+    }
+}
+
+fn features_from_wire(features: wire::TimeSeriesFeatures) -> Features {
+    features
+        .additional_properties
+        .into_iter()
+        .map(|(key, value)| {
+            let value = match value {
+                wire::TimeSeriesFeatureValue::Integer(i) => FeatureValue::Int(i),
+                wire::TimeSeriesFeatureValue::Number(f) => FeatureValue::Float(f),
+                wire::TimeSeriesFeatureValue::Boolean(b) => FeatureValue::Bool(b),
+                wire::TimeSeriesFeatureValue::String(s) => FeatureValue::Str(s),
+            };
+            (key, value)
+        })
+        .collect()
+}
+
+/// Floored to millisecond precision: the write path refuses a finer instant,
+/// but reads stay permissive for an artifact written before that rule, so any
+/// finer component such a catalog holds is dropped rather than surfaced. The
+/// SDK then writes a whole second with no fractional part and anything else
+/// with exactly three digits.
+fn floor_to_millis(ts: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp_millis(ts.timestamp_millis())
+        .expect("a timestamp's own millisecond count is always representable")
 }
 
 /// The true per-step trailing shape (the wire contract's `element_shape`), derived from the
@@ -209,160 +334,115 @@ fn wire_element_shape(meta: &TimeSeriesMetadata) -> &[usize] {
     meta.element_shape.get(extra_leading..).unwrap_or(&[])
 }
 
-/// Insert the fields every forecast type shares
-/// (`resolution`/`horizon`/`interval`/`count`); the caller adds the type's own
-/// extras (`percentiles`, `scenario_count`) on top.
-fn insert_forecast_fields(row: &mut Map<String, Value>, meta: &TimeSeriesMetadata) {
-    if let Some(r) = meta.resolution {
-        row.insert("resolution".into(), Value::from(r.to_iso8601()));
-    }
-    if let Some(h) = meta.horizon {
-        row.insert("horizon".into(), Value::from(h.to_iso8601()));
-    }
-    if let Some(i) = meta.interval {
-        row.insert("interval".into(), Value::from(i.to_iso8601()));
-    }
-    if let Some(c) = meta.count {
-        row.insert("count".into(), Value::from(c as u64));
-    }
+fn dims_wire(dims: &[usize]) -> Vec<i64> {
+    dims.iter().map(|&d| d as i64).collect()
 }
 
-/// Map one catalog row to its OpenAPI wire object. `uri` and `data_hash` are
-/// both derived from the row's own `data_hash` via [`crate::hash::hash_hex`]
-/// — infrastore never accepts a caller-supplied locator for its own rows.
-fn ts_row_to_json(meta: &TimeSeriesMetadata) -> Value {
-    let mut row = Map::new();
-    row.insert("owner_id".into(), Value::from(meta.owner_id));
-    row.insert("owner_type".into(), Value::from(meta.owner_type.clone()));
-    row.insert(
-        "owner_category".into(),
-        Value::from(meta.owner_category.as_str()),
-    );
-    row.insert(
-        "time_series_type".into(),
-        Value::from(meta.time_series_type.as_str()),
-    );
-    row.insert("name".into(), Value::from(meta.name.clone()));
-    row.insert(
-        "features".into(),
-        Value::Object(features_to_plain(&meta.features)),
-    );
+/// A field the row's type requires. A catalog row always has it, so its
+/// absence is a malformed row, not an optional field.
+fn required<T>(value: Option<T>, field: &str, meta: &TimeSeriesMetadata) -> Result<T> {
+    value.ok_or_else(|| {
+        TimeSeriesError::InvalidParameter(format!(
+            "cannot export series {} ('{}'): a {} row requires {field}, and this one has none",
+            meta.id.map_or(-1, |id| id.0),
+            meta.name,
+            meta.time_series_type.as_str(),
+        ))
+    })
+}
+
+fn shared_wire(meta: &TimeSeriesMetadata) -> Result<Shared> {
     let hash_hex = crate::hash::hash_hex(&meta.data_hash);
-    row.insert("uri".into(), Value::from(hash_hex.clone()));
-    row.insert("data_hash".into(), Value::from(hash_hex));
-    // Required by the schema, so a row without one is a row that never came
-    // from a catalog — which nothing exports.
-    if let Some(id) = meta.id {
-        row.insert("association_id".into(), Value::from(id.get()));
-    }
-    row.insert(
-        "element_type".into(),
-        Value::from(meta.element_type.to_string()),
-    );
-    row.insert(
-        "element_shape".into(),
-        Value::from(wire_element_shape(meta).to_vec()),
-    );
     // The native shape, so the import reproduces the catalog row exactly
     // (module docs). `length` is the array's first axis for every type.
-    if let Some(length) = meta.length {
-        let mut array_shape = Vec::with_capacity(meta.element_shape.len() + 1);
-        array_shape.push(length);
-        array_shape.extend_from_slice(&meta.element_shape);
-        row.insert("array_shape".into(), Value::from(array_shape));
-    }
-    if let Some(reference) = &meta.time_reference {
-        row.insert(
-            "time_reference".into(),
-            Value::from(reference.as_storage_string()),
-        );
+    let array_shape = meta.length.map(|length| {
+        let mut shape = vec![length as i64];
+        shape.extend(dims_wire(&meta.element_shape));
+        shape
+    });
+    Ok(Shared {
+        association_id: required(meta.id, "an association_id", meta)?.get(),
+        owner_id: meta.owner_id,
+        owner_type: meta.owner_type.clone(),
+        owner_category: owner_category_wire(meta.owner_category),
+        name: meta.name.clone(),
+        features: features_wire(&meta.features),
+        uri: hash_hex.clone(),
+        data_hash: Some(hash_hex),
+        element_type: meta.element_type.to_string(),
+        element_shape: dims_wire(wire_element_shape(meta)),
+        array_shape,
+        units: meta.units.clone(),
+        quantity_kind: meta.quantity_kind.clone(),
+        unit_system: meta.unit_system.map(unit_system_wire),
+        time_reference: meta
+            .time_reference
+            .as_ref()
+            .map(TimeReference::as_storage_string),
+        component_field: meta.component_field.clone(),
+        application_data: meta.application_data.clone(),
+    })
+}
+
+/// Map one catalog row to its OpenAPI wire row. `uri` and `data_hash` are
+/// both derived from the row's own `data_hash` via [`crate::hash::hash_hex`]
+/// — infrastore never accepts a caller-supplied locator for its own rows.
+fn ts_row_to_wire(meta: &TimeSeriesMetadata) -> Result<TimeSeriesAssociation> {
+    let shared = shared_wire(meta)?;
+    let initial_timestamp =
+        || required(meta.initial_timestamp, "initial_timestamp", meta).map(floor_to_millis);
+    let period =
+        |value: Option<Period>, field| required(value, field, meta).map(|p| p.to_iso8601());
+    let length = || required(meta.length, "length", meta).map(|l| l as i64);
+    let count = || required(meta.count, "count", meta).map(|c| c as i64);
+
+    macro_rules! forecast_row {
+        ($variant:ident { $($field:ident: $value:expr),* $(,)? }) => {
+            wire_row!($variant, shared, {
+                interval_alignment: wire::IntervalAlignment::PeriodEnding,
+                initial_timestamp: initial_timestamp()?,
+                resolution: period(meta.resolution, "resolution")?,
+                horizon: period(meta.horizon, "horizon")?,
+                interval: period(meta.interval, "interval")?,
+                count: count()?,
+                $($field: $value,)*
+            })
+        };
     }
 
-    if let Some(units) = &meta.units {
-        row.insert("units".into(), Value::from(units.clone()));
-    }
-    if let Some(quantity_kind) = &meta.quantity_kind {
-        row.insert("quantity_kind".into(), Value::from(quantity_kind.clone()));
-    }
-    if let Some(component_field) = &meta.component_field {
-        row.insert(
-            "component_field".into(),
-            Value::from(component_field.clone()),
-        );
-    }
-    if let Some(application_data) = &meta.application_data {
-        row.insert(
-            "application_data".into(),
-            Value::from(application_data.clone()),
-        );
-    }
-    if let Some(unit_system) = meta.unit_system {
-        row.insert(
-            "unit_system".into(),
-            Value::from(unit_system_wire(unit_system)),
-        );
-    }
-    if let Some(ts) = meta.initial_timestamp {
-        row.insert(
-            "initial_timestamp".into(),
-            Value::from(format_initial_timestamp(ts)),
-        );
-    }
-
-    match meta.time_series_type {
-        TimeSeriesType::SingleTimeSeries => {
-            if let Some(r) = meta.resolution {
-                row.insert("resolution".into(), Value::from(r.to_iso8601()));
-            }
-            if let Some(l) = meta.length {
-                row.insert("length".into(), Value::from(l as u64));
-            }
+    Ok(match meta.time_series_type {
+        TimeSeriesType::SingleTimeSeries => wire_row!(SingleTimeSeries, shared, {
+            interval_alignment: wire::IntervalAlignment::PeriodEnding,
+            initial_timestamp: initial_timestamp()?,
+            resolution: period(meta.resolution, "resolution")?,
+            length: length()?,
+        }),
+        // The axis locator, filled from the axis's own content hash exactly as
+        // `uri` is filled from the array's.
+        TimeSeriesType::NonSequentialTimeSeries => wire_row!(NonSequentialTimeSeries, shared, {
+            timestamps_uri: Some(crate::hash::hash_hex(&crate::hash::timestamps_hash(
+                required(meta.timestamps.as_deref(), "timestamps", meta)?,
+            ))),
+            length: length()?,
+        }),
+        // An infrastore-local extension with no schema; [`export_ts_rows`]
+        // drops these rows before this mapping runs.
+        TimeSeriesType::PersistentTimeSeries => {
+            return Err(TimeSeriesError::InvalidParameter(
+                "a PersistentTimeSeries has no OpenAPI row".into(),
+            ));
         }
-        // The two irregular types share an arm because they share a shape —
-        // both are static series on an explicit time axis, so `length` is the
-        // only shape field either has — but only one of them ever reaches it.
-        // `PersistentTimeSeries` is an **infrastore-local extension**, not a
-        // Sienna type: the vendored `TimeSeriesAssociation.json` is a `oneOf`
-        // over a closed set of six canonical types, there is no upstream schema
-        // for a seventh, and inventing one would misrepresent the vendored
-        // contract. So the document does not carry the type at all —
-        // [`export_ts_rows`] drops persistent rows before this mapping runs,
-        // and the arm covers the type only to keep the match total.
-        TimeSeriesType::NonSequentialTimeSeries | TimeSeriesType::PersistentTimeSeries => {
-            if let Some(l) = meta.length {
-                row.insert("length".into(), Value::from(l as u64));
-            }
-            // The axis locator, filled from the axis's own content hash exactly
-            // as `uri` is filled from the array's. Absent only for a row that
-            // reached here without its axis, which `export_ts_rows`'s listing
-            // always supplies.
-            if let Some(timestamps) = &meta.timestamps {
-                row.insert(
-                    "timestamps_uri".into(),
-                    Value::from(crate::hash::hash_hex(&crate::hash::timestamps_hash(
-                        timestamps,
-                    ))),
-                );
-            }
+        TimeSeriesType::Deterministic => forecast_row!(Deterministic {}),
+        TimeSeriesType::DeterministicSingleTimeSeries => {
+            forecast_row!(DeterministicSingleTimeSeries {})
         }
-        TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => {
-            insert_forecast_fields(&mut row, meta);
-        }
-        TimeSeriesType::Probabilistic => {
-            insert_forecast_fields(&mut row, meta);
-            if let Some(percentiles) = &meta.percentiles {
-                row.insert("percentiles".into(), Value::from(percentiles.clone()));
-            }
-        }
-        TimeSeriesType::Scenarios => {
-            insert_forecast_fields(&mut row, meta);
-            if let Some(l) = meta.length {
-                row.insert("scenario_count".into(), Value::from(l as u64));
-            }
-        }
-    }
-
-    Value::Object(row)
+        TimeSeriesType::Probabilistic => forecast_row!(Probabilistic {
+            percentiles: required(meta.percentiles.clone(), "percentiles", meta)?,
+        }),
+        TimeSeriesType::Scenarios => forecast_row!(Scenarios {
+            scenario_count: length()?,
+        }),
+    })
 }
 
 /// Export `time_series_associations` as a sorted OpenAPI-row JSON array. Pure
@@ -393,9 +473,9 @@ fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
     }
     let rows = store.list_with_timestamps(filter.clone())?;
     // Persistent rows are dropped first, so they are never checked. The store
-    // keeps an infinite float feature, but JSON cannot spell one:
-    // `features_to_plain` would write `null`, which the import then refuses.
-    // Refuse the export instead of emitting a document that cannot come back.
+    // keeps an infinite float feature, but JSON cannot spell one: serde_json
+    // would write `null`, which the import then refuses. Refuse the export
+    // instead of emitting a document that cannot come back.
     let rows: Vec<_> = rows
         .iter()
         .filter(|meta| meta.time_series_type != TimeSeriesType::PersistentTimeSeries)
@@ -414,101 +494,22 @@ fn export_ts_rows(store: &Store, filter: &ListFilter) -> Result<String> {
             )));
         }
     }
-    let mut keyed: Vec<(SortKey, Value)> = rows
+    let mut keyed = rows
         .iter()
-        .map(|meta| (sort_key(meta), ts_row_to_json(meta)))
-        .collect();
+        .map(|meta| Ok((sort_key(meta), ts_row_to_wire(meta)?)))
+        .collect::<Result<Vec<_>>>()?;
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
-    let array: Vec<Value> = keyed.into_iter().map(|(_, row)| row).collect();
+    let array: Vec<TimeSeriesAssociation> = keyed.into_iter().map(|(_, row)| row).collect();
     serde_json::to_string(&array).map_err(Into::into)
-}
-
-/// One incoming time-series row. Every field the wire form can carry, with the
-/// per-type ones optional, and unknown keys denied so a typo fails loudly
-/// rather than vanishing — the same contract [`RawSaRow`] holds.
-///
-/// `uri` and `data_hash` are both accepted: they are the same hex string on
-/// anything this crate exported, but the schema makes `data_hash` optional and
-/// specifies `uri` only as a locator with no required format, so a document
-/// from another producer may carry a `uri` that is not a hash.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawTsRow {
-    owner_id: i64,
-    owner_type: String,
-    owner_category: String,
-    time_series_type: String,
-    name: String,
-    features: Map<String, Value>,
-    uri: String,
-    /// The axis locator a `NonSequentialTimeSeries` carries; absent on every
-    /// other type, which has no explicit axis.
-    #[serde(default)]
-    timestamps_uri: Option<String>,
-    #[serde(default)]
-    data_hash: Option<String>,
-    element_type: String,
-    element_shape: Vec<usize>,
-    /// The native `[length, *element_shape]` (module docs); absent in a
-    /// document from a producer that predates it.
-    #[serde(default)]
-    array_shape: Option<Vec<usize>>,
-    #[serde(default)]
-    time_reference: Option<String>,
-    /// The store's `id`, under the schema's spelling.
-    #[serde(default)]
-    association_id: Option<i64>,
-    #[serde(default)]
-    units: Option<String>,
-    #[serde(default)]
-    quantity_kind: Option<String>,
-    #[serde(default)]
-    unit_system: Option<String>,
-    #[serde(default)]
-    component_field: Option<String>,
-    #[serde(default)]
-    application_data: Option<String>,
-    #[serde(default)]
-    initial_timestamp: Option<String>,
-    #[serde(default)]
-    resolution: Option<String>,
-    #[serde(default)]
-    length: Option<usize>,
-    #[serde(default)]
-    horizon: Option<String>,
-    #[serde(default)]
-    interval: Option<String>,
-    /// Accepted only as `PERIOD_ENDING`, the schema's default: the catalog has
-    /// no column for it, so any other value would be dropped on import.
-    #[serde(default)]
-    interval_alignment: Option<String>,
-    #[serde(default)]
-    count: Option<usize>,
-    #[serde(default)]
-    percentiles: Option<Vec<f64>>,
-    #[serde(default)]
-    scenario_count: Option<usize>,
 }
 
 fn wire_err(msg: impl Into<String>) -> crate::error::TimeSeriesError {
     crate::error::TimeSeriesError::InvalidParameter(msg.into())
 }
 
-fn parse_period(s: &str, field: &str) -> Result<crate::types::period::Period> {
-    crate::types::period::Period::from_iso8601(s)
+fn parse_period(s: &str, field: &str) -> Result<Period> {
+    Period::from_iso8601(s)
         .map_err(|e| wire_err(format!("{field} {s:?} is not an ISO-8601 duration: {e}")))
-}
-
-/// The inverse of [`unit_system_wire`]. The schema's spelling is SCREAMING_CASE
-/// and the store's is snake_case, so this is not `UnitSystem::parse`.
-fn unit_system_from_wire(s: &str) -> Result<UnitSystem> {
-    match s {
-        "NATURAL_UNITS" => Ok(UnitSystem::NaturalUnits),
-        "COMPONENT_BASE" => Ok(UnitSystem::ComponentBase),
-        other => Err(wire_err(format!(
-            "unknown unit_system {other:?}; expected NATURAL_UNITS or COMPONENT_BASE"
-        ))),
-    }
 }
 
 /// The inverse of [`features_to_plain`]: a plain scalar map back into the
@@ -543,7 +544,7 @@ pub fn features_from_plain(map: &Map<String, Value>) -> Result<Features> {
 /// One decoded row, plus the time axis its `timestamps_uri` named.
 ///
 /// The axis travels beside the row rather than in it because only the store can
-/// turn a locator into a vector, and [`RawTsRow::into_metadata`] has no store.
+/// turn a locator into a vector, and [`ts_row_from_wire`] has no store.
 /// `None` for every type but `NonSequentialTimeSeries`, which is the only one
 /// with an explicit axis.
 struct DecodedTsRow {
@@ -551,181 +552,249 @@ struct DecodedTsRow {
     time_axis: Option<[u8; 32]>,
 }
 
-impl RawTsRow {
-    /// The 32-byte hash of the time axis this row names, for the one type that
-    /// has one.
-    ///
-    /// Required there, and required to be a hash: unlike `uri` — which the
-    /// schema leaves as a free-form locator, and whose value this crate can
-    /// fall back to `data_hash` for — there is no second field carrying the
-    /// axis. A locator this store cannot resolve is a row it cannot file.
-    fn resolve_time_axis(&self, ts_type: TimeSeriesType) -> Result<Option<[u8; 32]>> {
-        if ts_type != TimeSeriesType::NonSequentialTimeSeries {
-            return Ok(None);
-        }
-        let Some(locator) = self.timestamps_uri.as_deref() else {
-            return Err(wire_err(format!(
-                "row '{}': a NonSequentialTimeSeries carries its time axis as timestamps_uri, \
-                 and this row has none — without it the document does not say which of the \
-                 store's axes the row sits on",
-                self.name,
-            )));
-        };
-        crate::hash::hash_from_hex(locator)
-            .map(Some)
-            .ok_or_else(|| {
-                wire_err(format!(
-                    "row '{}': timestamps_uri {locator:?} is not a 64-character hex hash, and this \
-                 import resolves time axes by content hash",
-                    self.name,
-                ))
-            })
-    }
+/// The fields whose presence depends on a row's type.
+#[derive(Default)]
+struct Timing {
+    initial_timestamp: Option<DateTime<Utc>>,
+    resolution: Option<String>,
+    horizon: Option<String>,
+    interval: Option<String>,
+    length: Option<i64>,
+    count: Option<i64>,
+    percentiles: Option<Vec<f64>>,
+    interval_alignment: Option<wire::IntervalAlignment>,
+    timestamps_uri: Option<String>,
+}
 
-    /// The 32-byte array hash this row names.
-    ///
-    /// `data_hash` first, `uri` second: the schema treats the former as the
-    /// content hash and the latter as an opaque locator, so preferring the
-    /// declared hash is right even though this crate writes both the same.
-    fn resolve_hash(&self) -> Result<[u8; 32]> {
-        for (field, value) in [
-            ("data_hash", self.data_hash.as_deref()),
-            ("uri", Some(&*self.uri)),
-        ] {
-            let Some(value) = value else { continue };
-            if let Some(hash) = crate::hash::hash_from_hex(value) {
-                return Ok(hash);
-            }
-            if field == "data_hash" {
-                return Err(wire_err(format!(
-                    "row '{}': data_hash {value:?} is not a 64-character hex hash",
-                    self.name
-                )));
-            }
-        }
-        Err(wire_err(format!(
-            "row '{}': neither data_hash nor uri names a stored array; uri {:?} is not a hash, \
-             and this import resolves arrays by content hash",
-            self.name, self.uri,
-        )))
-    }
+/// The 32-byte hash of the time axis a `NonSequentialTimeSeries` names.
+///
+/// Required there, and required to be a hash: unlike `uri` — which the
+/// schema leaves as a free-form locator, and whose value this crate can
+/// fall back to `data_hash` for — there is no second field carrying the
+/// axis. A locator this store cannot resolve is a row it cannot file.
+fn resolve_time_axis(name: &str, timestamps_uri: Option<&str>) -> Result<[u8; 32]> {
+    let Some(locator) = timestamps_uri else {
+        return Err(wire_err(format!(
+            "row '{name}': a NonSequentialTimeSeries carries its time axis as timestamps_uri, \
+             and this row has none — without it the document does not say which of the \
+             store's axes the row sits on",
+        )));
+    };
+    crate::hash::hash_from_hex(locator).ok_or_else(|| {
+        wire_err(format!(
+            "row '{name}': timestamps_uri {locator:?} is not a 64-character hex hash, and this \
+             import resolves time axes by content hash",
+        ))
+    })
+}
 
-    fn into_metadata(self) -> Result<DecodedTsRow> {
-        if let Some(a) = self
-            .interval_alignment
-            .as_deref()
-            .filter(|a| *a != "PERIOD_ENDING")
-        {
-            return Err(wire_err(format!(
-                "row '{}': interval_alignment {a:?} is not storable; the store records only \
-                 the default PERIOD_ENDING",
-                self.name
-            )));
-        }
-        let data_hash = self.resolve_hash()?;
-        let ts_type = TimeSeriesType::parse(&self.time_series_type).ok_or_else(|| {
+/// The 32-byte array hash a row names.
+///
+/// `data_hash` first, `uri` second: the schema treats the former as the
+/// content hash and the latter as an opaque locator, so preferring the
+/// declared hash is right even though this crate writes both the same.
+fn resolve_hash(name: &str, data_hash: Option<&str>, uri: &str) -> Result<[u8; 32]> {
+    if let Some(value) = data_hash {
+        return crate::hash::hash_from_hex(value).ok_or_else(|| {
             wire_err(format!(
-                "unknown time_series_type {:?}",
-                self.time_series_type
+                "row '{name}': data_hash {value:?} is not a 64-character hex hash"
             ))
-        })?;
-        let owner_category = crate::types::metadata::OwnerCategory::parse(&self.owner_category)
-            .ok_or_else(|| wire_err(format!("unknown owner_category {:?}", self.owner_category)))?;
-        let element_type = crate::types::element_type::ElementType::parse(&self.element_type)
-            .ok_or_else(|| wire_err(format!("unknown element_type {:?}", self.element_type)))?;
-        let initial_timestamp = match &self.initial_timestamp {
-            Some(t) => Some(
-                DateTime::parse_from_rfc3339(t)
-                    .map_err(|e| wire_err(format!("initial_timestamp {t:?}: {e}")))?
-                    .with_timezone(&Utc),
-            ),
-            None => None,
-        };
-        let unit_system = match &self.unit_system {
-            Some(u) => Some(unit_system_from_wire(u)?),
-            None => None,
-        };
-        let resolution = match &self.resolution {
-            Some(r) => Some(parse_period(r, "resolution")?),
-            None => None,
-        };
-        let horizon = match &self.horizon {
-            Some(h) => Some(parse_period(h, "horizon")?),
-            None => None,
-        };
-        let interval = match &self.interval {
-            Some(i) => Some(parse_period(i, "interval")?),
-            None => None,
-        };
-        let time_reference = match &self.time_reference {
-            Some(t) => Some(
-                TimeReference::parse(t)
-                    .map_err(|e| wire_err(format!("row '{}': time_reference: {e}", self.name)))?,
-            ),
-            None => None,
-        };
-        let time_axis = self.resolve_time_axis(ts_type)?;
-        // The native shape when the document carries it; the schema's own
-        // fields otherwise (module docs).
-        let (length, element_shape) = match self.array_shape {
-            Some(shape) => {
-                let Some((&length, element_shape)) = shape.split_first() else {
-                    return Err(wire_err(format!(
-                        "row '{}': array_shape must have at least the time axis",
-                        self.name
-                    )));
-                };
-                (Some(length), element_shape.to_vec())
-            }
-            // A `Scenarios` row spells its array length `scenario_count`.
-            None => (self.length.or(self.scenario_count), self.element_shape),
-        };
-        Ok(DecodedTsRow {
-            time_axis,
-            meta: TimeSeriesMetadata {
-                owner_id: self.owner_id,
-                owner_type: self.owner_type,
-                owner_category,
-                time_series_type: ts_type,
-                name: self.name,
-                data_hash,
-                initial_timestamp,
-                resolution,
-                length,
-                horizon,
-                interval,
-                count: self.count,
-                timestamps: None,
-                features: features_from_plain(&self.features)?,
-                units: self.units,
-                quantity_kind: self.quantity_kind,
-                unit_system,
-                time_reference,
-                component_field: self.component_field,
-                percentiles: self.percentiles,
-                element_type,
-                element_shape,
-                application_data: self.application_data,
-                id: self.association_id.map(TimeSeriesId),
-            },
-        })
+        });
     }
+    crate::hash::hash_from_hex(uri).ok_or_else(|| {
+        wire_err(format!(
+            "row '{name}': neither data_hash nor uri names a stored array; uri {uri:?} is not \
+             a hash, and this import resolves arrays by content hash",
+        ))
+    })
+}
+
+fn to_usize(value: i64, field: &str, name: &str) -> Result<usize> {
+    usize::try_from(value)
+        .map_err(|_| wire_err(format!("row '{name}': {field} {value} is negative")))
+}
+
+fn dims_from_wire(dims: &[i64], field: &str, name: &str) -> Result<Vec<usize>> {
+    dims.iter().map(|&d| to_usize(d, field, name)).collect()
+}
+
+fn ts_row_from_wire(row: TimeSeriesAssociation) -> Result<DecodedTsRow> {
+    let (ts_type, shared, timing) = match row {
+        TimeSeriesAssociation::SingleTimeSeries(r) => (
+            TimeSeriesType::SingleTimeSeries,
+            shared_of!(r),
+            Timing {
+                initial_timestamp: Some(r.initial_timestamp),
+                resolution: Some(r.resolution),
+                length: Some(r.length),
+                interval_alignment: Some(r.interval_alignment),
+                ..Timing::default()
+            },
+        ),
+        TimeSeriesAssociation::NonSequentialTimeSeries(r) => (
+            TimeSeriesType::NonSequentialTimeSeries,
+            shared_of!(r),
+            Timing {
+                length: Some(r.length),
+                timestamps_uri: r.timestamps_uri,
+                ..Timing::default()
+            },
+        ),
+        TimeSeriesAssociation::Deterministic(r) => (
+            TimeSeriesType::Deterministic,
+            shared_of!(r),
+            Timing {
+                initial_timestamp: Some(r.initial_timestamp),
+                resolution: Some(r.resolution),
+                horizon: Some(r.horizon),
+                interval: Some(r.interval),
+                count: Some(r.count),
+                interval_alignment: Some(r.interval_alignment),
+                ..Timing::default()
+            },
+        ),
+        TimeSeriesAssociation::DeterministicSingleTimeSeries(r) => (
+            TimeSeriesType::DeterministicSingleTimeSeries,
+            shared_of!(r),
+            Timing {
+                initial_timestamp: Some(r.initial_timestamp),
+                resolution: Some(r.resolution),
+                horizon: Some(r.horizon),
+                interval: Some(r.interval),
+                count: Some(r.count),
+                interval_alignment: Some(r.interval_alignment),
+                ..Timing::default()
+            },
+        ),
+        TimeSeriesAssociation::Probabilistic(r) => (
+            TimeSeriesType::Probabilistic,
+            shared_of!(r),
+            Timing {
+                initial_timestamp: Some(r.initial_timestamp),
+                resolution: Some(r.resolution),
+                horizon: Some(r.horizon),
+                interval: Some(r.interval),
+                count: Some(r.count),
+                percentiles: Some(r.percentiles),
+                interval_alignment: Some(r.interval_alignment),
+                ..Timing::default()
+            },
+        ),
+        // A `Scenarios` row spells its array length `scenario_count`.
+        TimeSeriesAssociation::Scenarios(r) => (
+            TimeSeriesType::Scenarios,
+            shared_of!(r),
+            Timing {
+                initial_timestamp: Some(r.initial_timestamp),
+                resolution: Some(r.resolution),
+                horizon: Some(r.horizon),
+                interval: Some(r.interval),
+                count: Some(r.count),
+                length: Some(r.scenario_count),
+                interval_alignment: Some(r.interval_alignment),
+                ..Timing::default()
+            },
+        ),
+    };
+    let name = shared.name;
+
+    if let Some(a) = timing
+        .interval_alignment
+        .filter(|a| *a != wire::IntervalAlignment::PeriodEnding)
+    {
+        return Err(wire_err(format!(
+            "row '{name}': interval_alignment {a} is not storable; the store records only the \
+             default PERIOD_ENDING"
+        )));
+    }
+    let data_hash = resolve_hash(&name, shared.data_hash.as_deref(), &shared.uri)?;
+    let time_axis = match ts_type {
+        TimeSeriesType::NonSequentialTimeSeries => {
+            Some(resolve_time_axis(&name, timing.timestamps_uri.as_deref())?)
+        }
+        _ => None,
+    };
+    let element_type = crate::types::element_type::ElementType::parse(&shared.element_type)
+        .ok_or_else(|| wire_err(format!("unknown element_type {:?}", shared.element_type)))?;
+    let parse_optional_period =
+        |value: Option<String>, field| value.map(|p| parse_period(&p, field)).transpose();
+    let time_reference = shared
+        .time_reference
+        .map(|t| {
+            TimeReference::parse(&t)
+                .map_err(|e| wire_err(format!("row '{name}': time_reference: {e}")))
+        })
+        .transpose()?;
+    // The native shape when the document carries it; the schema's own fields
+    // otherwise (module docs).
+    let (length, element_shape) = match shared.array_shape {
+        Some(shape) => {
+            let Some((&length, element_shape)) = shape.split_first() else {
+                return Err(wire_err(format!(
+                    "row '{name}': array_shape must have at least the time axis"
+                )));
+            };
+            (
+                Some(to_usize(length, "array_shape", &name)?),
+                dims_from_wire(element_shape, "array_shape", &name)?,
+            )
+        }
+        None => (
+            timing
+                .length
+                .map(|l| to_usize(l, "length", &name))
+                .transpose()?,
+            dims_from_wire(&shared.element_shape, "element_shape", &name)?,
+        ),
+    };
+    Ok(DecodedTsRow {
+        time_axis,
+        meta: TimeSeriesMetadata {
+            owner_id: shared.owner_id,
+            owner_type: shared.owner_type,
+            owner_category: owner_category_from_wire(shared.owner_category),
+            time_series_type: ts_type,
+            data_hash,
+            initial_timestamp: timing.initial_timestamp,
+            resolution: parse_optional_period(timing.resolution, "resolution")?,
+            length,
+            horizon: parse_optional_period(timing.horizon, "horizon")?,
+            interval: parse_optional_period(timing.interval, "interval")?,
+            count: timing
+                .count
+                .map(|c| to_usize(c, "count", &name))
+                .transpose()?,
+            timestamps: None,
+            features: features_from_wire(shared.features),
+            units: shared.units,
+            quantity_kind: shared.quantity_kind,
+            unit_system: shared.unit_system.map(unit_system_from_wire),
+            time_reference,
+            component_field: shared.component_field,
+            percentiles: timing.percentiles,
+            element_type,
+            element_shape,
+            application_data: shared.application_data,
+            id: Some(TimeSeriesId(shared.association_id)),
+            name,
+        },
+    })
 }
 
 /// Parse a JSON array of OpenAPI time-series rows and insert them verbatim.
 ///
-/// Every row is checked against the vendored SiennaSchemas contract
+/// Every row is checked against the SiennaSchemas contract
 /// ([`schema::check_time_series_row`]) *before* it is decoded, so a document
 /// that drifted is reported in the schema's own terms — which field, on which
-/// row — rather than as whatever `RawTsRow` happens to notice first. The schema
-/// is also the stronger of the two: it knows the `oneOf` over the six types and
-/// the closed enums, where the struct only knows names and Rust types.
+/// row — rather than as whatever the generated type happens to notice first.
+/// The schema is also the stronger of the two: it knows the bounds and the
+/// reserved feature names, where the type only knows names and Rust types.
 ///
 /// Rows only: the values are not on the wire and are never reconstructed here.
 /// See [`Store::import_association_rows`] for the invariants each row is
 /// checked against before anything is written.
 fn import_ts_rows(store: &mut Store, json: &str) -> Result<usize> {
-    let decoded = decode_rows(json, schema::check_time_series_row, RawTsRow::into_metadata)?;
+    let decoded = decode_rows(json, schema::check_time_series_row, ts_row_from_wire)?;
     // The one field the document locates rather than carries. Resolved here
     // because this is the first point that has both the locator and the store,
     // and setting `timestamps` is what makes the ordinary insert path hash the
@@ -756,9 +825,8 @@ fn import_ts_rows(store: &mut Store, json: &str) -> Result<usize> {
 /// `convert`.
 ///
 /// The two halves stay in this order for every table: the schema is the
-/// published contract and the `Raw*` struct is this crate's reading of it, so a
-/// document is judged against the contract first, and the struct never gets to
-/// reject something the contract allows without saying so.
+/// published contract and the generated type is a weaker reading of it, so a
+/// document is judged against the contract first.
 fn decode_rows<Raw, Out>(
     json: &str,
     check: fn(&Value, usize) -> Result<()>,
@@ -771,9 +839,10 @@ where
     let mut out = Vec::with_capacity(values.len());
     for (index, value) in values.into_iter().enumerate() {
         check(&value, index)?;
-        // Parsing to `Value` first loses serde_json's line/column, and the row
-        // schemas are open objects, so an unknown field reaches this call as the
-        // first thing that rejects it. Without the index it would name no row.
+        // Parsing to `Value` first loses serde_json's line/column, and the
+        // schema check does not check formats, so a malformed timestamp reaches
+        // this call as the first thing that rejects it. Without the index it
+        // would name no row.
         let raw: Raw =
             serde_json::from_value(value).map_err(|e| wire_err(format!("row {index}: {e}")))?;
         out.push(convert(raw)?);
@@ -786,69 +855,24 @@ where
 // ============================================================================
 
 /// Export `supplemental_attribute_associations` as a JSON array sorted by
-/// `(component_id, attribute_id)`. The row struct's own `#[derive(Serialize)]`
-/// already produces exactly the wire shape
-/// (`SupplementalAttributeAssociation.json`), so this is a listing plus a
-/// sort, nothing more.
+/// `(component_id, attribute_id)`.
+///
+/// The `id` is deliberately absent — nothing references an attachment — so ids
+/// do not survive an export/import cycle here; the importer assigns fresh ones.
 fn export_sa_rows(store: &Store) -> Result<String> {
     let mut rows =
         store.list_supplemental_attribute_associations(&SupplementalAttributeFilter::default())?;
     rows.sort_by_key(|row| (row.component_id, row.attribute_id));
-    let wire: Vec<SaWireRow> = rows.iter().map(SaWireRow::from).collect();
-    serde_json::to_string(&wire).map_err(Into::into)
-}
-
-/// The four fields the schema defines, named explicitly rather than serialized
-/// off [`SupplementalAttributeAssociation`] directly.
-///
-/// Naming them explicitly keeps a field added to the struct from silently
-/// becoming a wire change. The `id` is deliberately absent — nothing
-/// references an attachment — so ids do not survive an export/import cycle
-/// here; the importer assigns fresh ones.
-#[derive(Debug, Serialize)]
-struct SaWireRow<'a> {
-    component_id: i64,
-    component_type: &'a str,
-    attribute_id: i64,
-    attribute_type: &'a str,
-}
-
-impl<'a> From<&'a SupplementalAttributeAssociation> for SaWireRow<'a> {
-    fn from(row: &'a SupplementalAttributeAssociation) -> Self {
-        Self {
-            component_id: row.component_id,
-            component_type: &row.component_type,
-            attribute_id: row.attribute_id,
-            attribute_type: &row.attribute_type,
-        }
-    }
-}
-
-/// One row of the incoming SA-association JSON, denying unknown fields so a
-/// typo'd column name fails loudly rather than silently vanishing. A straight
-/// bulk insert: the row shape already matches
-/// [`SupplementalAttributeAssociation`] exactly, with no `uri` field to
-/// tolerate.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawSaRow {
-    component_id: i64,
-    component_type: String,
-    attribute_id: i64,
-    attribute_type: String,
-}
-
-impl From<RawSaRow> for SupplementalAttributeAssociation {
-    fn from(row: RawSaRow) -> Self {
-        SupplementalAttributeAssociation {
+    let wire: Vec<WireSaRow> = rows
+        .into_iter()
+        .map(|row| WireSaRow {
             component_id: row.component_id,
             component_type: row.component_type,
             attribute_id: row.attribute_id,
             attribute_type: row.attribute_type,
-            // The wire form carries no id, so an import is always assigned one.
-            id: None,
-        }
-    }
+        })
+        .collect();
+    serde_json::to_string(&wire).map_err(Into::into)
 }
 
 /// Bulk-ingest a JSON array of SA-association rows through the existing
@@ -859,7 +883,16 @@ fn import_sa_rows(store: &mut Store, json: &str) -> Result<usize> {
     let associations: Vec<SupplementalAttributeAssociation> = decode_rows(
         json,
         schema::check_supplemental_attribute_row,
-        |raw: RawSaRow| Ok(raw.into()),
+        |row: WireSaRow| {
+            Ok(SupplementalAttributeAssociation {
+                component_id: row.component_id,
+                component_type: row.component_type,
+                attribute_id: row.attribute_id,
+                attribute_type: row.attribute_type,
+                // The wire form carries no id, so an import is always assigned one.
+                id: None,
+            })
+        },
     )?;
     // The public import surface reports a count, not ids: the wire form carries
     // no id, so the ones assigned here are this store's own and mean nothing to
@@ -967,24 +1000,11 @@ mod tests {
         )
     }
 
-    /// An unknown field passes the schema — the row schemas are open objects —
-    /// so `deny_unknown_fields` on the `Raw*` struct is what rejects it, and
-    /// that happens after the document has become a `Value` and lost its
-    /// line/column. The row index is the coordinate that survives, so the error
-    /// has to carry it.
     #[test]
     fn an_unknown_field_names_the_row_it_is_in() {
         let json = ts_row_json(",\n                \"owner_typ\": \"Typo\"");
-        let value: Vec<Value> = serde_json::from_str(&json).expect("the document parses");
-        schema::check_time_series_row(&value[1], 1)
-            .expect("the open row schema does not catch an extra field");
-
-        let Err(err) = decode_rows(
-            &json,
-            schema::check_time_series_row,
-            RawTsRow::into_metadata,
-        ) else {
-            panic!("deny_unknown_fields rejects the typo");
+        let Err(err) = decode_rows(&json, schema::check_time_series_row, ts_row_from_wire) else {
+            panic!("the closed row schema rejects the typo");
         };
         let message = err.to_string();
         assert!(message.contains("row 1"), "{message}");
@@ -996,7 +1016,7 @@ mod tests {
         let Ok(rows) = decode_rows(
             &ts_row_json(""),
             schema::check_time_series_row,
-            RawTsRow::into_metadata,
+            ts_row_from_wire,
         ) else {
             panic!("both rows conform");
         };
@@ -1009,7 +1029,7 @@ mod tests {
             decode_rows(
                 &ts_row_json(&format!(",\n\"interval_alignment\": \"{alignment}\"")),
                 schema::check_time_series_row,
-                RawTsRow::into_metadata,
+                ts_row_from_wire,
             )
         };
         assert!(decode("PERIOD_ENDING").is_ok());

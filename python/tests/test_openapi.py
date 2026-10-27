@@ -16,6 +16,10 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 import infrastore
+from power_openapi_models.infrastructure_core.models import (
+    SupplementalAttributeAssociation as SdkSupplementalAttributeAssociation,
+)
+from power_openapi_models.timeseries.models import TimeSeriesAssociation
 from infrastore import (
     NonSequentialTimeSeries,
     OwnerCategory,
@@ -377,8 +381,40 @@ class TestJsonOnlyRestore:
         store.close()
 
 
+class TestSdkReadsTheExport:
+    """The power-openapi-models Python types parse what the export writes, so
+    a second implementation of the contract reads this one's documents."""
+
+    def test_time_series_rows_parse(self):
+        store = Store.create(in_memory=True)
+        store.add_time_series(
+            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                T0, HOUR, np.zeros(4, dtype=np.float64), "load", units="MW"
+            ),
+            features={"year": 2030},
+        )
+        store.add_time_series(
+            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=NonSequentialTimeSeries(
+                [T0, T0 + 5 * HOUR], np.array([1.0, 2.0], dtype=np.float64), "events"
+            ),
+        )
+        rows = json.loads(store.export_time_series_associations_openapi())
+        parsed = [TimeSeriesAssociation.model_validate(row).root for row in rows]
+        assert sorted(type(p).__name__ for p in parsed) == [
+            "NonSequentialTimeSeries", "SingleTimeSeries",
+        ]
+
+    def test_supplemental_attribute_rows_parse(self):
+        store = Store.create(in_memory=True)
+        store.add_supplemental_attribute_associations([attached(1, 100)])
+        rows = json.loads(store.export_supplemental_attribute_associations_openapi())
+        SdkSupplementalAttributeAssociation.model_validate(rows[0])
+
+
 class TestSchemaContract:
-    """The import path holds a document to the vendored SiennaSchemas specs, so
+    """The import path holds a document to the SiennaSchemas specs, so
     a row that drifted is refused in the schema's own terms rather than by
     whatever the Rust struct happens to notice."""
 

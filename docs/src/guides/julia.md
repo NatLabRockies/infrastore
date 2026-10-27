@@ -697,13 +697,12 @@ end
 
 ### These rows do not travel in an OpenAPI document
 
-`PersistentTimeSeries` is an infrastore-local extension, and the vendored wire contract is a `oneOf`
-over six canonical Sienna types with no schema for a seventh. So
-`export_time_series_associations_openapi` **omits** persistent rows — a mixed store still exports
-its six-type rows — a filter naming the type throws `InvalidParameterError` rather than answering
-with an empty array, and an import refuses a document that carries one. The series themselves are
-unaffected: they live in the artifact, which holds them in full. Ask the catalog what a document
-leaves behind:
+`PersistentTimeSeries` is an infrastore-local extension, and the wire contract is a `oneOf` over six
+canonical Sienna types with no schema for a seventh. So `export_time_series_associations_openapi`
+**omits** persistent rows — a mixed store still exports its six-type rows — a filter naming the type
+throws `InvalidParameterError` rather than answering with an empty array, and an import refuses a
+document that carries one. The series themselves are unaffected: they live in the artifact, which
+holds them in full. Ask the catalog what a document leaves behind:
 
 ```julia
 left_behind = list_metadata(store; time_series_type = PersistentTimeSeries)
