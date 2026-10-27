@@ -103,7 +103,7 @@ fn read_file(path: &Path) -> (RecordBatch, std::collections::HashMap<String, Str
         .collect::<Result<_, _>>()
         .expect("every batch should read");
     let batch = arrow::compute::concat_batches(&schema, &batches).expect("concat");
-    (batch, schema.metadata().clone())
+    (batch, schema.metadata().clone().into())
 }
 
 /// The three file names a partition stem produces.

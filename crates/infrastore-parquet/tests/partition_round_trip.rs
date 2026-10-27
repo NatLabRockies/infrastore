@@ -717,7 +717,7 @@ fn a_file_from_a_later_format_is_refused_by_version() {
     let (schema, batch) = read_one(path);
 
     let mut metadata = schema.metadata().clone();
-    metadata.insert("infrastore.format".into(), "normalized_v99".into());
+    metadata.insert("infrastore.format", "normalized_v99");
     let bumped = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
         schema.fields().clone(),
         metadata,
@@ -739,7 +739,7 @@ fn a_v1_partition_is_refused_by_version_not_for_its_missing_arrays_file() {
     std::fs::remove_file(&written.arrays_path).expect("remove arrays file");
     let (schema, batch) = read_one(&written.values_path);
     let mut metadata = schema.metadata().clone();
-    metadata.insert("infrastore.format".into(), "normalized_v1".into());
+    metadata.insert("infrastore.format", "normalized_v1");
     let v1 = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
         schema.fields().clone(),
         metadata,
