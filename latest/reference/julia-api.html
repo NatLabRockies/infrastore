@@ -897,7 +897,7 @@ static_groups(reader)     -&gt; Vector{StaticGroup}  # each: .dtype, .element_sh
 static_read!(reader, t) -&gt; reader  # fills buffers; errors if t is off the timeline
        # t is spelled like the axis: a bare DateTime (a wall clock) for a zoneless one,
        # a ZonedDateTime (TimeZones loaded) for one recording instants or unspecified
-static_values(reader, group_index::Integer) -&gt; Array
+static_values(reader, group_index::Integer; lazy=false) -&gt; AbstractArray
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].ids[j]
 </code></pre>
 <p>All matched series must share one timeline — one grid (<code>initial_timestamp</code> + <code>length</code>) for
@@ -976,8 +976,18 @@ forecast_entries(reader)   -&gt; Vector{ForecastEntry}  # each: .dtype, .window_
 forecast_num_slots(reader) -&gt; Int                    # physical reads per timestamp (see below)
 forecast_read!(reader, t) -&gt; reader                  # fills buffers; errors if t is off the timeline
        # t is spelled like the axis, as for static_read!: DateTime only for a zoneless one
-forecast_values(reader, entry_index::Integer) -&gt; Array  # window of size .window_shape
+forecast_values(reader, entry_index::Integer; lazy=false) -&gt; AbstractArray
+       # window of size .window_shape
 </code></pre>
+<p>The values are stored row-major and returned in column-major Julia layout. For an array of more
+than one dimension, <code>static_values</code> and <code>forecast_values</code> reorder the values with a copy by default,
+returning an <code>Array</code>. With <code>lazy=true</code> they skip the copy and return a <code>PermutedDimsArray</code> over the
+values in stored order, which indexes the same way.</p>
+<p>Pass <code>lazy=true</code> when the first thing you do with the result is slice or index it along its first
+axis (time, for a <code>Deterministic</code> window) and the values need no decoding. In stored order each
+slice along that axis, such as one time step's values, is contiguous in memory. Keep the default
+when you will decode or reorder the values anyway, or when you need a plain <code>Array</code>. A
+one-dimensional result is a <code>Vector</code> either way.</p>
 <p>Valid read timestamps are <code>initial_timestamp + k·interval</code> for <code>k in 0:count-1</code> (each names the
 window forecast <em>from</em> that instant). A window's shape is <code>[H, *E]</code> for <code>Deterministic</code> /
 <code>DeterministicSingleTimeSeries</code>, <code>[num_percentiles, H, *E]</code> for <code>Probabilistic</code>, and
