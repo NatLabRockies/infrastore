@@ -1795,6 +1795,10 @@ end
     for k in 0:(count - 1)
         forecast_read!(r, t0 + Hour(3) * k)
         @test forecast_values(r, 1) == data[:, k + 1, :]
+        # `lazy` skips the reordering copy; the window indexes the same.
+        lazy_window = forecast_values(r, 1; lazy=true)
+        @test lazy_window isa PermutedDimsArray
+        @test lazy_window == data[:, k + 1, :]
     end
 
     @test_throws InfraStore.InvalidParameterError forecast_read!(r, t0 + Hour(1))
@@ -1890,6 +1894,9 @@ end
         vals = static_values(r, 1)                    # (ncols=1, 2, 3)
         @test size(vals) == (1, 2, 3)
         @test vals[1, :, :] == full.data[i + 1, :, :] # reader reshape == get_time_series
+        lazy_vals = static_values(r, 1; lazy=true)
+        @test lazy_vals isa PermutedDimsArray
+        @test lazy_vals == vals
     end
 
     # Probabilistic window reshape (P, H) — count axis (2) removed.
@@ -1912,6 +1919,7 @@ end
         w = forecast_values(fr, 1)                    # (P, H)
         @test size(w) == (P, H)
         @test w == full_p.data[:, :, k + 1]
+        @test forecast_values(fr, 1; lazy=true) == w
     end
 end
 

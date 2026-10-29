@@ -25,8 +25,16 @@ end
 # Copy `byte_len` bytes at `ptr` into a fresh `T` array and reshape from the
 # stored row-major `dims` to canonical column-major Julia layout. The pointer is
 # reader-owned (valid only until the next read), so we always copy.
+#
+# Reshaping the row-major bytes is free but reverses the axes; restoring the
+# canonical order either moves every value (`permutedims`) or, with `lazy`, only
+# reorders the strides (`PermutedDimsArray`), leaving the values in stored order.
 function _reader_values(
-    ptr::Ptr{UInt8}, byte_len::UInt64, ::Type{T}, dims::AbstractVector{<:Integer}
+    ptr::Ptr{UInt8},
+    byte_len::UInt64,
+    ::Type{T},
+    dims::AbstractVector{<:Integer};
+    lazy::Bool=false,
 ) where {T}
     n = byte_len == 0 ? 0 : Int(byte_len) ÷ sizeof(T)
     flat = Vector{T}(undef, n)
@@ -35,7 +43,16 @@ function _reader_values(
     end
     nd = length(dims)
     nd <= 1 && return flat
-    return permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
+    stored = reshape(flat, reverse(dims)...)
+    lazy && return _stored_order_view(stored)
+    return permutedims(stored, reverse(ntuple(identity, nd)))
+end
+
+# The column-major view over row-major `stored`, built behind a barrier on the rank so the
+# permutation is a compile-time constant. With a runtime permutation the wrapper's type
+# parameters are worked out on every call, which costs more than the copy it replaces.
+function _stored_order_view(stored::Array{T, N}) where {T, N}
+    return PermutedDimsArray(stored, ntuple(i -> N + 1 - i, Val(N)))
 end
 
 # ---- StaticReader ---------------------------------------------------------
@@ -398,14 +415,21 @@ function _check_point_spelling(
 end
 
 """
-    static_values(reader, group_index::Integer) -> Array
+    static_values(reader, group_index::Integer; lazy=false) -> AbstractArray
 
 The values from the most recent [`static_read!`] for group `group_index`
 (1-based), as a column-major array of size `(num_columns, element_shape...)`.
 Column `j` corresponds to `static_groups(reader)[group_index].ids[j]`; resolve it
 with [`get_metadata_by_id`](@ref) to recover the series it came from.
+
+The stored values are row-major, so a group with an element shape is reordered to
+that column-major layout. By default that is a copy (an `Array`). With
+`lazy=true` it is a `PermutedDimsArray` over the values in stored order, which
+indexes the same way without the copy. Pass it when you will slice the values by
+column and need no decoding: in stored order each column's values are contiguous.
+A group without an element shape is a `Vector` either way.
 """
-function static_values(reader::StaticReader, group_index::Integer)
+function static_values(reader::StaticReader, group_index::Integer; lazy::Bool=false)
     group = reader.groups[group_index]
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
@@ -418,7 +442,7 @@ function static_values(reader::StaticReader, group_index::Integer)
         )::Int32
     )
     dims = vcat(length(group.ids), group.element_shape)
-    return _reader_values(out_ptr[], out_len[], group.dtype, dims)
+    return _reader_values(out_ptr[], out_len[], group.dtype, dims; lazy=lazy)
 end
 
 # ---- ForecastReader -------------------------------------------------------
@@ -712,12 +736,20 @@ function forecast_read!(reader::ForecastReader, t)
 end
 
 """
-    forecast_values(reader, entry_index::Integer) -> Array
+    forecast_values(reader, entry_index::Integer; lazy=false) -> AbstractArray
 
 The window from the most recent [`forecast_read!`] for entry `entry_index`
 (1-based), as a column-major array of size `window_shape`.
+
+The stored window is row-major, so a window of more than one dimension is
+reordered to that column-major layout. By default that is a copy (an `Array`).
+With `lazy=true` it is a `PermutedDimsArray` over the values in stored order,
+which indexes the same way without the copy. Pass it when you will slice the
+window along its first axis (time, for a `Deterministic` window) and need no
+decoding: in stored order each time step's values are contiguous. A
+one-dimensional window is a `Vector` either way.
 """
-function forecast_values(reader::ForecastReader, entry_index::Integer)
+function forecast_values(reader::ForecastReader, entry_index::Integer; lazy::Bool=false)
     entry = reader.entries[entry_index]
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
@@ -729,5 +761,5 @@ function forecast_values(reader::ForecastReader, entry_index::Integer)
             out_len::Ref{UInt64},
         )::Int32
     )
-    return _reader_values(out_ptr[], out_len[], entry.dtype, entry.window_shape)
+    return _reader_values(out_ptr[], out_len[], entry.dtype, entry.window_shape; lazy=lazy)
 end

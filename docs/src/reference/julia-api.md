@@ -863,7 +863,7 @@ static_groups(reader)     -> Vector{StaticGroup}  # each: .dtype, .element_shape
 static_read!(reader, t) -> reader  # fills buffers; errors if t is off the timeline
        # t is spelled like the axis: a bare DateTime (a wall clock) for a zoneless one,
        # a ZonedDateTime (TimeZones loaded) for one recording instants or unspecified
-static_values(reader, group_index::Integer) -> Array
+static_values(reader, group_index::Integer; lazy=false) -> AbstractArray
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].ids[j]
 ```
 
@@ -962,8 +962,20 @@ forecast_entries(reader)   -> Vector{ForecastEntry}  # each: .dtype, .window_sha
 forecast_num_slots(reader) -> Int                    # physical reads per timestamp (see below)
 forecast_read!(reader, t) -> reader                  # fills buffers; errors if t is off the timeline
        # t is spelled like the axis, as for static_read!: DateTime only for a zoneless one
-forecast_values(reader, entry_index::Integer) -> Array  # window of size .window_shape
+forecast_values(reader, entry_index::Integer; lazy=false) -> AbstractArray
+       # window of size .window_shape
 ```
+
+The values are stored row-major and returned in column-major Julia layout. For an array of more
+than one dimension, `static_values` and `forecast_values` reorder the values with a copy by default,
+returning an `Array`. With `lazy=true` they skip the copy and return a `PermutedDimsArray` over the
+values in stored order, which indexes the same way.
+
+Pass `lazy=true` when the first thing you do with the result is slice or index it along its first
+axis (time, for a `Deterministic` window) and the values need no decoding. In stored order each
+slice along that axis, such as one time step's values, is contiguous in memory. Keep the default
+when you will decode or reorder the values anyway, or when you need a plain `Array`. A
+one-dimensional result is a `Vector` either way.
 
 Valid read timestamps are `initial_timestamp + k·interval` for `k in 0:count-1` (each names the
 window forecast _from_ that instant). A window's shape is `[H, *E]` for `Deterministic` /
