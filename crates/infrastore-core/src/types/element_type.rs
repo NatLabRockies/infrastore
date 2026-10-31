@@ -20,7 +20,15 @@
 //! quadratic_function
 //! piecewise_linear
 //! piecewise_step
+//! input_output(F)         F: linear_function | quadratic_function | piecewise_linear
+//! incremental(F)          F: linear_function | piecewise_step
+//! average_rate(F)         F: linear_function | piecewise_step
 //! ```
+//!
+//! A value curve is its function's row with the curve's optional scalars in
+//! front — `input_at_zero` for `input_output`, `initial_input, input_at_zero`
+//! for the other two — where `NaN` means the scalar is absent. The header comes
+//! first because a ragged function body leaves no fixed slot after it.
 
 use std::fmt;
 use std::str::FromStr;
@@ -60,6 +68,97 @@ pub enum ElementType {
     /// Ragged x-coordinates plus step y-values, laid out as `[max(1, 2 * w)]`:
     /// `n, x1 ... xn, y1 ... y(n-1)`, zero-padded to the row width.
     PiecewiseStep,
+    /// A complete value curve per timestep: the curve's optional scalars (see
+    /// [`CurveKind::header_names`]), then `function`'s row. Only the pairings
+    /// [`CurveKind::accepts`] allows are valid; `parse` refuses the rest and
+    /// `validate_element_dims` rejects one built directly.
+    ValueCurve {
+        kind: CurveKind,
+        function: FunctionKind,
+    },
+}
+
+/// Which value curve a [`ElementType::ValueCurve`] holds. The names follow the
+/// curve the function describes, not any one binding's type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CurveKind {
+    InputOutput,
+    Incremental,
+    AverageRate,
+}
+
+impl CurveKind {
+    pub const ALL: [CurveKind; 3] = [
+        CurveKind::InputOutput,
+        CurveKind::Incremental,
+        CurveKind::AverageRate,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CurveKind::InputOutput => "input_output",
+            CurveKind::Incremental => "incremental",
+            CurveKind::AverageRate => "average_rate",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// The optional scalars in front of the function row, in slot order.
+    pub fn header_names(self) -> &'static [&'static str] {
+        match self {
+            CurveKind::InputOutput => &["input_at_zero"],
+            CurveKind::Incremental | CurveKind::AverageRate => &["initial_input", "input_at_zero"],
+        }
+    }
+
+    /// Whether this curve can be built over `function`.
+    pub fn accepts(self, function: FunctionKind) -> bool {
+        match self {
+            CurveKind::InputOutput => function != FunctionKind::PiecewiseStep,
+            CurveKind::Incremental | CurveKind::AverageRate => matches!(
+                function,
+                FunctionKind::LinearFunction | FunctionKind::PiecewiseStep
+            ),
+        }
+    }
+}
+
+/// The function a value curve is built over: the four function-data element
+/// types, named apart so a curve can hold one without recursion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FunctionKind {
+    LinearFunction,
+    QuadraticFunction,
+    PiecewiseLinear,
+    PiecewiseStep,
+}
+
+impl FunctionKind {
+    /// The standalone element type with this function's row layout.
+    pub fn element_type(self) -> ElementType {
+        match self {
+            FunctionKind::LinearFunction => ElementType::LinearFunction,
+            FunctionKind::QuadraticFunction => ElementType::QuadraticFunction,
+            FunctionKind::PiecewiseLinear => ElementType::PiecewiseLinear,
+            FunctionKind::PiecewiseStep => ElementType::PiecewiseStep,
+        }
+    }
+
+    /// The inverse of [`Self::element_type`]; `None` for anything that is not a
+    /// function-data kind.
+    pub fn of(element_type: ElementType) -> Option<Self> {
+        Some(match element_type {
+            ElementType::LinearFunction => FunctionKind::LinearFunction,
+            ElementType::QuadraticFunction => FunctionKind::QuadraticFunction,
+            ElementType::PiecewiseLinear => FunctionKind::PiecewiseLinear,
+            ElementType::PiecewiseStep => FunctionKind::PiecewiseStep,
+            _ => return None,
+        })
+    }
 }
 
 impl Default for ElementType {
@@ -79,15 +178,34 @@ impl ElementType {
             ElementType::LinearFunction
             | ElementType::QuadraticFunction
             | ElementType::PiecewiseLinear
-            | ElementType::PiecewiseStep => Dtype::F64,
+            | ElementType::PiecewiseStep
+            | ElementType::ValueCurve { .. } => Dtype::F64,
+        }
+    }
+
+    /// How many leading slots of a row are a value curve's scalars; 0 for
+    /// everything else.
+    pub fn header_len(self) -> usize {
+        match self {
+            ElementType::ValueCurve { kind, .. } => kind.header_names().len(),
+            _ => 0,
+        }
+    }
+
+    /// The element type laid out after the header: a value curve's function,
+    /// or the element type itself.
+    pub fn body(self) -> ElementType {
+        match self {
+            ElementType::ValueCurve { function, .. } => function.element_type(),
+            other => other,
         }
     }
 
     /// Whether one timestep's values occupy a variable number of the row's
-    /// slots, with the used count stored in the row's leading element.
+    /// slots, with the used count stored in the first slot after the header.
     pub fn is_ragged(self) -> bool {
         matches!(
-            self,
+            self.body(),
             ElementType::PiecewiseLinear | ElementType::PiecewiseStep
         )
     }
@@ -102,6 +220,10 @@ impl ElementType {
             ElementType::LinearFunction => Some(vec![2]),
             ElementType::QuadraticFunction => Some(vec![3]),
             ElementType::PiecewiseLinear | ElementType::PiecewiseStep => None,
+            ElementType::ValueCurve { function, .. } => function
+                .element_type()
+                .fixed_element_dims()
+                .map(|dims| vec![dims[0] + self.header_len()]),
         }
     }
 
@@ -115,7 +237,7 @@ impl ElementType {
             "quadratic_function" => ElementType::QuadraticFunction,
             "piecewise_linear" => ElementType::PiecewiseLinear,
             "piecewise_step" => ElementType::PiecewiseStep,
-            _ => return parse_tuple(s),
+            _ => return parse_tuple(s).or_else(|| parse_value_curve(s)),
         })
     }
 
@@ -125,6 +247,31 @@ impl ElementType {
     /// the time axis and, for a forecast, after the count (and percentile /
     /// scenario) axes.
     pub fn validate_element_dims(self, element_dims: &[usize]) -> Result<()> {
+        if let ElementType::ValueCurve { kind, function } = self {
+            if !kind.accepts(function) {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "element_type {self} is not a value curve: {} cannot be built over {}",
+                    kind.as_str(),
+                    function.element_type()
+                )));
+            }
+            let header = self.header_len();
+            return match element_dims {
+                [width] if *width > header => self
+                    .body()
+                    .validate_element_dims(&[width - header])
+                    .map_err(|e| {
+                        TimeSeriesError::InvalidParameter(format!(
+                            "element_type {self} has {header} header slot(s) before its \
+                             function row, and that row is invalid: {e}"
+                        ))
+                    }),
+                _ => Err(TimeSeriesError::InvalidParameter(format!(
+                    "element_type {self} requires one per-step element dim wider than its \
+                     {header} header slot(s), got {element_dims:?}"
+                ))),
+            };
+        }
         if let Some(expected) = self.fixed_element_dims() {
             if element_dims != expected.as_slice() {
                 return Err(TimeSeriesError::InvalidParameter(format!(
@@ -210,8 +357,16 @@ impl ElementType {
     fn validate_ragged_rows(self, array: &TypedArray, width: usize) -> Result<()> {
         debug_assert_eq!(array.dtype, Dtype::F64);
         let stride = width * Dtype::F64.size();
+        // A value curve's count follows its header, and the body owns the rest.
+        let header = self.header_len();
+        let width = width - header;
+        let at = header * Dtype::F64.size();
         for (row, chunk) in array.bytes.chunks_exact(stride).enumerate() {
-            let raw = f64::from_le_bytes(chunk[..8].try_into().expect("f64 row is at least 8B"));
+            let raw = f64::from_le_bytes(
+                chunk[at..at + 8]
+                    .try_into()
+                    .expect("validate_element_dims left a count slot"),
+            );
             if !(raw.is_finite() && raw >= 0.0 && raw.fract() == 0.0) {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "element_type {self}: row {row} leading count is {raw}, which is not a \
@@ -226,7 +381,7 @@ impl ElementType {
             // wrapped `needed` of 0 satisfies the width test, so the row would
             // be *accepted*, and `codec::decode` then indexes it unchecked on
             // this function's promise that every count was validated.
-            let needed = match self {
+            let needed = match self.body() {
                 ElementType::PiecewiseLinear => n.checked_mul(2).and_then(|k| k.checked_add(1)),
                 // `n` x-coords and `n - 1` y-values, plus the count itself.
                 _ if n == 0 => Some(1),
@@ -247,6 +402,14 @@ impl ElementType {
         }
         Ok(())
     }
+}
+
+fn parse_value_curve(s: &str) -> Option<ElementType> {
+    let (kind, rest) = s.split_once('(')?;
+    let kind = CurveKind::parse(kind)?;
+    let function = FunctionKind::of(ElementType::parse(rest.strip_suffix(')')?)?)?;
+    kind.accepts(function)
+        .then_some(ElementType::ValueCurve { kind, function })
 }
 
 fn parse_tuple(s: &str) -> Option<ElementType> {
@@ -271,6 +434,9 @@ impl fmt::Display for ElementType {
             ElementType::QuadraticFunction => f.write_str("quadratic_function"),
             ElementType::PiecewiseLinear => f.write_str("piecewise_linear"),
             ElementType::PiecewiseStep => f.write_str("piecewise_step"),
+            ElementType::ValueCurve { kind, function } => {
+                write!(f, "{}({})", kind.as_str(), function.element_type())
+            }
         }
     }
 }
@@ -281,7 +447,10 @@ impl FromStr for ElementType {
         Self::parse(s).ok_or_else(|| {
             TimeSeriesError::InvalidParameter(format!(
                 "unknown element_type {s:?}; expected a dtype ({}), tuple(N,dtype), \
-                 linear_function, quadratic_function, piecewise_linear, or piecewise_step",
+                 linear_function, quadratic_function, piecewise_linear, piecewise_step, or a \
+                 value curve: input_output(linear_function|quadratic_function|piecewise_linear), \
+                 incremental(linear_function|piecewise_step), \
+                 average_rate(linear_function|piecewise_step)",
                 Dtype::ALL
                     .iter()
                     .map(|d| d.as_str())
@@ -334,6 +503,27 @@ mod tests {
             (ElementType::QuadraticFunction, "quadratic_function"),
             (ElementType::PiecewiseLinear, "piecewise_linear"),
             (ElementType::PiecewiseStep, "piecewise_step"),
+            (
+                ElementType::ValueCurve {
+                    kind: CurveKind::InputOutput,
+                    function: FunctionKind::QuadraticFunction,
+                },
+                "input_output(quadratic_function)",
+            ),
+            (
+                ElementType::ValueCurve {
+                    kind: CurveKind::Incremental,
+                    function: FunctionKind::PiecewiseStep,
+                },
+                "incremental(piecewise_step)",
+            ),
+            (
+                ElementType::ValueCurve {
+                    kind: CurveKind::AverageRate,
+                    function: FunctionKind::LinearFunction,
+                },
+                "average_rate(linear_function)",
+            ),
         ];
         for (element_type, spelling) in cases {
             assert_eq!(element_type.to_string(), spelling);
@@ -383,6 +573,14 @@ mod tests {
             "tuple(3,f64",
             "Tuple(3,f64)",
             "piecewise",
+            "incremental",
+            "incremental()",
+            "incremental(piecewise_linear)",
+            "input_output(piecewise_step)",
+            "average_rate(f64)",
+            "incremental(incremental(piecewise_step))",
+            "incremental(piecewise_step",
+            "Incremental(piecewise_step)",
         ] {
             assert!(
                 ElementType::parse(bad).is_none(),
@@ -548,6 +746,42 @@ mod tests {
             .validate_array(&array, 4)
             .unwrap_err();
         assert!(err.to_string().contains("fewer than the 4 leading dims"));
+    }
+
+    #[test]
+    fn value_curves_put_their_header_before_the_function_row() {
+        let io_linear = ElementType::parse("input_output(linear_function)").unwrap();
+        assert_eq!(io_linear.fixed_element_dims(), Some(vec![3]));
+        assert!(io_linear.validate_element_dims(&[3]).is_ok());
+        assert!(io_linear.validate_element_dims(&[2]).is_err());
+
+        let inc_step = ElementType::parse("incremental(piecewise_step)").unwrap();
+        assert!(inc_step.is_ragged());
+        assert_eq!(inc_step.header_len(), 2);
+        // Header 2 + a step row of 1 (all empty) or an even width.
+        for width in [3usize, 4, 6] {
+            assert!(inc_step.validate_element_dims(&[width]).is_ok(), "{width}");
+        }
+        for width in [0usize, 1, 2, 5] {
+            assert!(inc_step.validate_element_dims(&[width]).is_err(), "{width}");
+        }
+
+        // The count is read after the header, which may hold NaN (absent).
+        let ok = TypedArray::from_f64(vec![1, 6], &[f64::NAN, 5.0, 2.0, 0.0, 10.0, 3.0]);
+        assert!(inc_step.validate_array(&ok, 1).is_ok());
+        let overflowing = TypedArray::from_f64(vec![1, 6], &[1.0, 5.0, 3.0, 0.0, 10.0, 3.0]);
+        let err = inc_step.validate_array(&overflowing, 1).unwrap_err();
+        assert!(err.to_string().contains("row 0 declares 3 points"), "{err}");
+    }
+
+    #[test]
+    fn a_value_curve_over_a_function_it_cannot_hold_is_rejected() {
+        let bad = ElementType::ValueCurve {
+            kind: CurveKind::Incremental,
+            function: FunctionKind::QuadraticFunction,
+        };
+        let err = bad.validate_element_dims(&[5]).unwrap_err();
+        assert!(err.to_string().contains("cannot be built over"), "{err}");
     }
 
     #[test]

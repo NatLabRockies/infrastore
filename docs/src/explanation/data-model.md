@@ -329,10 +329,10 @@ Each association can also carry:
 - **`element_type`** — what the array's elements _mean_, in the store's own language-neutral
   vocabulary: a dtype spelling (`f64`, `i64`, …) for plain numbers, else `tuple(N,dtype)` or one of
   the function-data kinds (`linear_function`, `quadratic_function`, `piecewise_linear`,
-  `piecewise_step`). It supersedes a separate physical `dtype`: the dtype of the stored bytes is
-  derived from it. Unlike `units` and `application_data` it is _not_ inert — the write path
-  validates the array's dtype and per-step shape against it. See
-  [Element types](../reference/element-types.md).
+  `piecewise_step`), or a value curve over one (`incremental(piecewise_step)`). It supersedes a
+  separate physical `dtype`: the dtype of the stored bytes is derived from it. Unlike `units` and
+  `application_data` it is _not_ inert — the write path validates the array's dtype and per-step
+  shape against it. See [Element types](../reference/element-types.md).
 
 `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`, and `application_data`
 are recorded in metadata and returned on read, but they do not affect identity or storage: they are

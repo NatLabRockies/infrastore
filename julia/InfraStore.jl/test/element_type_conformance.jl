@@ -15,7 +15,8 @@ const _VECTORS_PATH = normpath(
 # the reshape and permuted back.
 function _storage_array(vector)
     shape = Int.(vector["shape"])
-    values = Float64.(vector["values"])
+    # A value curve's absent scalar is `NaN`, which JSON spells `null`.
+    values = Float64[something(v, NaN) for v in vector["values"]]
     n = length(shape)
     n == 1 && return values
     return permutedims(reshape(values, reverse(shape)...), reverse(ntuple(identity, n)))
@@ -30,9 +31,26 @@ end
 
 # The values a vector's `decoded` payload describes, as this package builds them.
 function _expected(vector)
-    kind = vector["decoded"]["kind"]
-    steps = vector["decoded"]["timesteps"]
-    if kind == "linear_function"
+    return _expected_values(vector["decoded"]["kind"], vector["decoded"]["timesteps"])
+end
+
+function _expected_values(kind, steps)
+    if kind == "value_curve"
+        # Column-wise in the corpus; one curve per timestep here.
+        functions = _expected_values(
+            steps["function"]["kind"], steps["function"]["timesteps"]
+        )
+        scalar(x) = x === nothing ? nothing : Float64(x)
+        return if steps["curve"] == "input_output"
+            [InputOutput(f, scalar(z)) for (f, z) in zip(functions, steps["input_at_zero"])]
+        else
+            T = steps["curve"] == "incremental" ? Incremental : AverageRate
+            [
+                T(f, scalar(i), scalar(z)) for
+                (f, i, z) in zip(functions, steps["initial_input"], steps["input_at_zero"])
+            ]
+        end
+    elseif kind == "linear_function"
         return [IS_LinearFunction(s["proportional"], s["constant"]) for s in steps]
     elseif kind == "quadratic_function"
         return [
@@ -99,7 +117,7 @@ end
         encoded, tag = encode_element_values(values)
         @test tag == vector["element_type"]
         @test size(encoded) == size(array)
-        @test encoded == array
+        @test isequal(encoded, array)  # NaN marks an absent curve scalar
     end
 end
 
@@ -135,6 +153,71 @@ end
     )
     @test mine isa Vector{MyCurve}
     @test [p.pts for p in mine] == [c.points for c in curves]
+end
+
+@testset "a value curve decodes into a consumer's own curve and function types" begin
+    # InfrastructureSystems.jl's `IncrementalCurve(function_data, initial_input,
+    # input_at_zero)` has this shape; the function nests through `types` too.
+    struct MyStep
+        x::Vector{Float64}
+        y::Vector{Float64}
+    end
+    struct MyIncremental
+        f::MyStep
+        initial_input::Union{Nothing, Float64}
+        input_at_zero::Union{Nothing, Float64}
+    end
+
+    curves = [
+        Incremental(InfraStore.PiecewiseStep([0.0, 1.0], [2.0]), 5.0, nothing),
+        Incremental(InfraStore.PiecewiseStep([0.0, 1.0, 2.0], [2.0, 3.0]), nothing, 1.5),
+    ]
+    array, tag = encode_element_values(curves)
+    @test tag == "incremental(piecewise_step)"
+    @test size(array) == (2, 8)
+    mine = decode_element_values(
+        array, tag;
+        types=merge(
+            DEFAULT_ELEMENT_TYPES, (incremental=MyIncremental, piecewise_step=MyStep)
+        ),
+    )
+    @test mine isa Vector{MyIncremental}
+    @test [m.f.x for m in mine] == [c.function_data.x for c in curves]
+    @test [m.initial_input for m in mine] == [5.0, nothing]
+    @test [m.input_at_zero for m in mine] == [nothing, 1.5]
+
+    # A curve over a function it cannot hold has no element type.
+    @test_throws InfraStore.InvalidParameterError encode_element_values([
+        Incremental(InfraStore.QuadraticFunction(1.0, 2.0, 3.0))
+    ])
+
+    # The documented two-argument forms set `initial_input` alone.
+    lf = InfraStore.LinearFunction(1.0, 2.0)
+    @test Incremental(lf, 3.0) == Incremental(lf, 3.0, nothing)
+    @test AverageRate(lf, 3.0) == AverageRate(lf, 3.0, nothing)
+
+    # `NaN` is the absent sentinel, so a present NaN would read back as `nothing`.
+    @test_throws InfraStore.InvalidParameterError encode_element_values([
+        InputOutput(lf, NaN)
+    ])
+
+    # A curve over values with no encoding of their own is not element values,
+    # so a write refuses it up front rather than failing inside the encoder.
+    @test !InfraStore.is_element_values([Incremental(1.0)])
+    @test_throws InfraStore.InvalidParameterError encode_element_values([
+        Incremental(1.0)
+    ])
+
+    # An empty series still decodes to the consumer's type, not `Vector{Any}`.
+    empty_array, empty_tag = encode_element_values(curves[1:0])
+    @test empty_tag == "incremental(piecewise_step)"
+    empty = decode_element_values(
+        empty_array, empty_tag;
+        types=merge(
+            DEFAULT_ELEMENT_TYPES, (incremental=MyIncremental, piecewise_step=MyStep)
+        ),
+    )
+    @test empty isa Vector{MyIncremental}
 end
 
 @testset "the codec rejects rows it cannot describe" begin
@@ -231,6 +314,22 @@ end
             "piecewise_step",
         ),
         ("tup", [(i, 2i, 3i) for i in 1.0:4.0], "tuple(3,f64)"),
+        (
+            "inc",
+            [
+                Incremental(
+                    InfraStore.PiecewiseStep(collect(0.0:i), fill(i, Int(i))),
+                    isodd(Int(i)) ? i : nothing,
+                    nothing,
+                ) for i in 1.0:4.0
+            ],
+            "incremental(piecewise_step)",
+        ),
+        (
+            "io",
+            [InputOutput(InfraStore.LinearFunction(i, 2i), i) for i in 1.0:4.0],
+            "input_output(linear_function)",
+        ),
     )
 
     for (name, values, tag) in cases

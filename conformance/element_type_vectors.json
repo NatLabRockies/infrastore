@@ -708,6 +708,378 @@
         0.0,
         0.0
       ]
+    },
+    {
+      "bytes_hex": "00000000000010400000000000000040000000000000f03f000000000000f87f000000000000e0bf0000000000000000",
+      "decoded": {
+        "kind": "value_curve",
+        "timesteps": {
+          "curve": "input_output",
+          "function": {
+            "kind": "linear_function",
+            "timesteps": [
+              {
+                "constant": 1.0,
+                "proportional": 2.0
+              },
+              {
+                "constant": 0.0,
+                "proportional": -0.5
+              }
+            ]
+          },
+          "initial_input": [
+            null,
+            null
+          ],
+          "input_at_zero": [
+            4.0,
+            null
+          ]
+        }
+      },
+      "element_type": "input_output(linear_function)",
+      "leading_dims": 1,
+      "name": "input_output_linear_function_static",
+      "shape": [
+        2,
+        3
+      ],
+      "time_series_type": "SingleTimeSeries",
+      "values": [
+        4.0,
+        2.0,
+        1.0,
+        null,
+        -0.5,
+        0.0
+      ]
+    },
+    {
+      "bytes_hex": "000000000000d03f9a9999999999b93f00000000000000400000000000000840",
+      "decoded": {
+        "kind": "value_curve",
+        "timesteps": {
+          "curve": "input_output",
+          "function": {
+            "kind": "quadratic_function",
+            "timesteps": [
+              {
+                "constant": 3.0,
+                "proportional": 2.0,
+                "quadratic": 0.1
+              }
+            ]
+          },
+          "initial_input": [
+            null
+          ],
+          "input_at_zero": [
+            0.25
+          ]
+        }
+      },
+      "element_type": "input_output(quadratic_function)",
+      "leading_dims": 1,
+      "name": "input_output_quadratic_function_static",
+      "shape": [
+        1,
+        4
+      ],
+      "time_series_type": "SingleTimeSeries",
+      "values": [
+        0.25,
+        0.1,
+        2.0,
+        3.0
+      ]
+    },
+    {
+      "bytes_hex": "000000000000f87f00000000000000400000000000000000000000000000000000000000000024400000000000004940000000000000f03f00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "decoded": {
+        "kind": "value_curve",
+        "timesteps": {
+          "curve": "input_output",
+          "function": {
+            "kind": "piecewise_linear",
+            "timesteps": [
+              [
+                {
+                  "x": 0.0,
+                  "y": 0.0
+                },
+                {
+                  "x": 10.0,
+                  "y": 50.0
+                }
+              ],
+              []
+            ]
+          },
+          "initial_input": [
+            null,
+            null
+          ],
+          "input_at_zero": [
+            null,
+            1.0
+          ]
+        }
+      },
+      "element_type": "input_output(piecewise_linear)",
+      "leading_dims": 1,
+      "name": "input_output_piecewise_linear_ragged",
+      "shape": [
+        2,
+        6
+      ],
+      "time_series_type": "SingleTimeSeries",
+      "values": [
+        null,
+        2.0,
+        0.0,
+        0.0,
+        10.0,
+        50.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "bytes_hex": "0000000000001440000000000000f87f000000000000004000000000000000000000000000002440000000000000084000000000000000000000000000000000000000000000f87f000000000000f83f000000000000084000000000000000000000000000002440000000000000344000000000000008400000000000001040",
+      "decoded": {
+        "kind": "value_curve",
+        "timesteps": {
+          "curve": "incremental",
+          "function": {
+            "kind": "piecewise_step",
+            "timesteps": [
+              {
+                "x": [
+                  0.0,
+                  10.0
+                ],
+                "y": [
+                  3.0
+                ]
+              },
+              {
+                "x": [
+                  0.0,
+                  10.0,
+                  20.0
+                ],
+                "y": [
+                  3.0,
+                  4.0
+                ]
+              }
+            ]
+          },
+          "initial_input": [
+            5.0,
+            null
+          ],
+          "input_at_zero": [
+            null,
+            1.5
+          ]
+        }
+      },
+      "element_type": "incremental(piecewise_step)",
+      "leading_dims": 1,
+      "name": "incremental_piecewise_step_ragged",
+      "shape": [
+        2,
+        8
+      ],
+      "time_series_type": "SingleTimeSeries",
+      "values": [
+        5.0,
+        null,
+        2.0,
+        0.0,
+        10.0,
+        3.0,
+        0.0,
+        0.0,
+        null,
+        1.5,
+        3.0,
+        0.0,
+        10.0,
+        20.0,
+        3.0,
+        4.0
+      ]
+    },
+    {
+      "bytes_hex": "00000000000000400000000000000840000000000000e03f0000000000002440",
+      "decoded": {
+        "kind": "value_curve",
+        "timesteps": {
+          "curve": "incremental",
+          "function": {
+            "kind": "linear_function",
+            "timesteps": [
+              {
+                "constant": 10.0,
+                "proportional": 0.5
+              }
+            ]
+          },
+          "initial_input": [
+            2.0
+          ],
+          "input_at_zero": [
+            3.0
+          ]
+        }
+      },
+      "element_type": "incremental(linear_function)",
+      "leading_dims": 1,
+      "name": "incremental_linear_function_static",
+      "shape": [
+        1,
+        4
+      ],
+      "time_series_type": "SingleTimeSeries",
+      "values": [
+        2.0,
+        3.0,
+        0.5,
+        10.0
+      ]
+    },
+    {
+      "bytes_hex": "0000000000000000000000000000f87f00000000000000000000000000003440000000000000f03f000000000000f03f000000000000e03f00000000000033400000000000000040000000000000f87f000000000000f03f000000000000324000000000000008400000000000000040000000000000f83f0000000000003140",
+      "decoded": {
+        "kind": "value_curve",
+        "timesteps": {
+          "curve": "average_rate",
+          "function": {
+            "kind": "linear_function",
+            "timesteps": [
+              {
+                "constant": 20.0,
+                "proportional": 0.0
+              },
+              {
+                "constant": 19.0,
+                "proportional": 0.5
+              },
+              {
+                "constant": 18.0,
+                "proportional": 1.0
+              },
+              {
+                "constant": 17.0,
+                "proportional": 1.5
+              }
+            ]
+          },
+          "initial_input": [
+            0.0,
+            1.0,
+            2.0,
+            3.0
+          ],
+          "input_at_zero": [
+            null,
+            1.0,
+            null,
+            2.0
+          ]
+        }
+      },
+      "element_type": "average_rate(linear_function)",
+      "leading_dims": 2,
+      "name": "average_rate_linear_function_deterministic",
+      "shape": [
+        2,
+        2,
+        4
+      ],
+      "time_series_type": "Deterministic",
+      "values": [
+        0.0,
+        null,
+        0.0,
+        20.0,
+        1.0,
+        1.0,
+        0.5,
+        19.0,
+        2.0,
+        null,
+        1.0,
+        18.0,
+        3.0,
+        2.0,
+        1.5,
+        17.0
+      ]
+    },
+    {
+      "bytes_hex": "000000000000f87f000000000000f87f00000000000000000000000000000000000000000000000000000000000000000000000000001c40000000000000f87f0000000000000040000000000000f03f00000000000000400000000000002240",
+      "decoded": {
+        "kind": "value_curve",
+        "timesteps": {
+          "curve": "average_rate",
+          "function": {
+            "kind": "piecewise_step",
+            "timesteps": [
+              {
+                "x": [],
+                "y": []
+              },
+              {
+                "x": [
+                  1.0,
+                  2.0
+                ],
+                "y": [
+                  9.0
+                ]
+              }
+            ]
+          },
+          "initial_input": [
+            null,
+            7.0
+          ],
+          "input_at_zero": [
+            null,
+            null
+          ]
+        }
+      },
+      "element_type": "average_rate(piecewise_step)",
+      "leading_dims": 1,
+      "name": "average_rate_piecewise_step_ragged",
+      "shape": [
+        2,
+        6
+      ],
+      "time_series_type": "SingleTimeSeries",
+      "values": [
+        null,
+        null,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        7.0,
+        null,
+        2.0,
+        1.0,
+        2.0,
+        9.0
+      ]
     }
   ]
 }

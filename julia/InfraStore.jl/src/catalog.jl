@@ -103,6 +103,10 @@ end
 # numbers, which is what a read of it hands back.
 function _decoded_value_type(element_type::AbstractString)
     kind = _element_kind(element_type)
+    if haskey(_CURVE_FUNCTIONS, kind)
+        inner = _decoded_value_type(match(_CURVE_TAG, element_type).captures[2])
+        return DEFAULT_ELEMENT_TYPES[kind]{inner}
+    end
     kind === :tuple || return get(DEFAULT_ELEMENT_TYPES, kind, nothing)
     m = match(_TUPLE_TAG, element_type)
     return m === nothing ? nothing : NTuple{parse(Int, m.captures[1]), Float64}
