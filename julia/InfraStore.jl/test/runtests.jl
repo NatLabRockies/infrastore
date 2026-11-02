@@ -2655,7 +2655,7 @@ function _openapi_fixture(name)
 end
 
 @testset "OpenAPI-row association serde" begin
-    @testset "export_time_series_associations_openapi reproduces the single_time_series fixture" begin
+    @testset "export_time_series_associations_openapi reproduces the single_time_series_zoneless fixture" begin
         store = Store(in_memory=true)
         single = SingleTimeSeries(
             DateTime(2030, 1, 1), Hour(1), fill(0.0, 8760), "max_active_power";
@@ -2664,7 +2664,7 @@ end
         )
         add_time_series!(
             store, 7, "ThermalStandard", Component, single;
-            features=Dict("scenario" => "high_load", "year" => 2030),
+            features=Dict("scenario" => "zoneless_load"),
         )
 
         json = export_time_series_associations_openapi(store)
@@ -2676,13 +2676,10 @@ end
         # rows were written first. Presence is asserted here and the value
         # dropped from both sides.
         @test row["association_id"] == 1
-        want = _openapi_fixture("single_time_series")
-        # A bare `DateTime` is a wall clock, so the export carries the
-        # `zoneless` reference the fixture (built by the Rust core, which
-        # infers nothing) leaves unspecified. Right value, not the fixture's.
-        @test row["time_reference"] == "zoneless"
-        drop_id(d) =
-            Dict(k => v for (k, v) in d if k ∉ ("association_id", "time_reference"))
+        # A bare `DateTime` is a wall clock, so the export carries `zoneless`
+        # and a `date-time-local`, which the zoneless fixture spells out.
+        want = _openapi_fixture("single_time_series_zoneless")
+        drop_id(d) = Dict(k => v for (k, v) in d if k != "association_id")
         @test drop_id(row) == drop_id(want)
 
         close!(store)
@@ -5182,6 +5179,23 @@ if (
 else
     @warn "TimeZones is not loadable here, so the ZonedDateTime tests were SKIPPED. " *
         "Run them with: julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'"
+end
+
+# The power-openapi-models SDKs are test-only dependencies, so like TimeZones
+# they load only under `Pkg.test()`.
+if (
+    try
+        @eval import InfrastructureCoreOpenAPIModels as CoreModels
+        @eval import InfrastructureTimeSeriesOpenAPIModels as TimeSeriesModels
+        true
+    catch
+        false
+    end
+)
+    include("openapi_sdk_tests.jl")
+else
+    @warn "The OpenAPI model packages are not loadable here, so the SDK decode tests " *
+        "were SKIPPED. Run them with: julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.test()'"
 end
 
 @testset "association ids: the handle a caller stores in its own model" begin

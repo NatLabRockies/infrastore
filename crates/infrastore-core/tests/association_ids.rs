@@ -1738,7 +1738,7 @@ fn an_irregular_row_carries_its_axis_and_its_id() {
 /// admitting the type is not on the wire than carrying a row nothing takes back.
 /// The import refuses it independently, because a document from anywhere else
 /// can still name the type: it is an infrastore-local extension, outside the six
-/// the vendored `TimeSeriesAssociation.json` is a `oneOf` over, so there is no
+/// the SiennaSchemas `TimeSeriesAssociation.json` is a `oneOf` over, so there is no
 /// schema to check the row against and the discriminator check refuses it by
 /// name.
 #[test]

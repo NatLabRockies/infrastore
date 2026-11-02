@@ -178,12 +178,12 @@ store never interprets. infrastore records breakpoints and values, and nothing e
 catalog columns for expansion policy and there will not be.
 
 **It is an infrastore-local extension, not a Sienna type, and does not travel in an OpenAPI
-document.** The vendored `sienna_schemas/TimeSeries/TimeSeriesAssociation.json` is a `oneOf` over a
-closed set of six canonical types owned by the data layer, and there is no upstream schema for a
-seventh — so the wire form has no way to spell one. The export therefore **omits** persistent rows:
-an unfiltered export of a mixed store emits its six-type rows and drops these, and an export whose
-filter names the type is refused rather than answered with an empty array. The import refuses the
-type independently, since a document from elsewhere can still name it: every incoming row is checked
+document.** The SiennaSchemas `TimeSeries/TimeSeriesAssociation.json` is a `oneOf` over a closed set
+of six canonical types owned by the data layer, and there is no upstream schema for a seventh — so
+the wire form has no way to spell one. The export therefore **omits** persistent rows: an unfiltered
+export of a mixed store emits its six-type rows and drops these, and an export whose filter names
+the type is refused rather than answered with an empty array. The import refuses the type
+independently, since a document from elsewhere can still name it: every incoming row is checked
 against the schema its own `time_series_type` selects, and none selects this one.
 
 Ask the catalog what an export leaves behind — `list_metadata` filtered to `PersistentTimeSeries` —
