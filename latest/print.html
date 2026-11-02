@@ -1522,12 +1522,12 @@ whether a curve should be expanded to a full series or evaluated once at a midpo
 store never interprets. infrastore records breakpoints and values, and nothing else; there are no
 catalog columns for expansion policy and there will not be.</p>
 <p><strong>It is an infrastore-local extension, not a Sienna type, and does not travel in an OpenAPI
-document.</strong> The vendored <code>sienna_schemas/TimeSeries/TimeSeriesAssociation.json</code> is a <code>oneOf</code> over a
-closed set of six canonical types owned by the data layer, and there is no upstream schema for a
-seventh — so the wire form has no way to spell one. The export therefore <strong>omits</strong> persistent rows:
-an unfiltered export of a mixed store emits its six-type rows and drops these, and an export whose
-filter names the type is refused rather than answered with an empty array. The import refuses the
-type independently, since a document from elsewhere can still name it: every incoming row is checked
+document.</strong> The SiennaSchemas <code>TimeSeries/TimeSeriesAssociation.json</code> is a <code>oneOf</code> over a closed set
+of six canonical types owned by the data layer, and there is no upstream schema for a seventh — so
+the wire form has no way to spell one. The export therefore <strong>omits</strong> persistent rows: an unfiltered
+export of a mixed store emits its six-type rows and drops these, and an export whose filter names
+the type is refused rather than answered with an empty array. The import refuses the type
+independently, since a document from elsewhere can still name it: every incoming row is checked
 against the schema its own <code>time_series_type</code> selects, and none selects this one.</p>
 <p>Ask the catalog what an export leaves behind — <code>list_metadata</code> filtered to <code>PersistentTimeSeries</code> —
 and carry those series in the artifact itself, which holds them in full.</p>
@@ -1864,15 +1864,13 @@ door, the guarantee holds there too: a supplied id must sit above the destinatio
 (<code>DuplicateAssociationId</code> otherwise, so a document's ids fit a fresh store but not one that has
 issued ids of its own), and a document supplies one for every row or for none. Neither association
 catalog's wire form carries an id at all, so both always assign.</p>
-<p>The same round trip carries two fields the schema gained late
-(<code>crates/infrastore-core/sienna_schemas/SOURCE.md</code> records the upstream commit vendored here):
-<code>array_shape</code>, the stored array's full native shape (<code>[length, *element_shape]</code> in the catalog's
-terms, where the schema's <code>element_shape</code> is only the per-step trailing shape), and
-<code>time_reference</code>. Both exist so an imported row is <em>identical</em> to the exported one — the forecast
-layouts above are conventions the caller owns, so the native shape cannot be rebuilt from <code>horizon</code>
-and <code>count</code>. Neither is required: a producer predating them writes rows without them, a reader that
-does not know them ignores them, and an import that finds them absent falls back to the schema's own
-fields.</p>
+<p>The same round trip carries two fields the schema gained late: <code>array_shape</code>, the stored array's
+full native shape (<code>[length, *element_shape]</code> in the catalog's terms, where the schema's
+<code>element_shape</code> is only the per-step trailing shape), and <code>time_reference</code>. Both exist so an
+imported row is <em>identical</em> to the exported one — the forecast layouts above are conventions the
+caller owns, so the native shape cannot be rebuilt from <code>horizon</code> and <code>count</code>. Neither is required:
+a producer predating them writes rows without them, a reader that does not know them ignores them,
+and an import that finds them absent falls back to the schema's own fields.</p>
 <h3 id="reading-an-artifact-back-from-arrays-plus-a-document"><a class="header" href="#reading-an-artifact-back-from-arrays-plus-a-document">Reading an artifact back from arrays plus a document</a></h3>
 <p>Those two fields exist so that a document can stand in for the catalog entirely. A consumer that
 already ships the association rows in JSON of its own — PowerSystems writes a <code>system.json</code> beside a
@@ -1884,7 +1882,7 @@ array file's <em>own</em> generation stamp, so the rebuilt pair opens normally e
 save the paired-stamp check exists to catch.</p>
 <p>All six of the types the wire contract defines make the trip, including <code>NonSequentialTimeSeries</code> —
 which needs one field the others do not. (A <code>PersistentTimeSeries</code> does not: it is an
-infrastore-local extension outside the vendored <code>oneOf</code>, so the export omits its rows and the import
+infrastore-local extension outside the six-type <code>oneOf</code>, so the export omits its rows and the import
 refuses them. A store holding them still exports the rest, but a restore from arrays plus a document
 alone will not carry them.) Its timestamp vector lives in the store rather than the document,
 content-addressed so a cohort sharing one axis stores it once, and the values cannot imply which
@@ -1896,12 +1894,18 @@ a locator rather than the vector itself precisely because the axis is shared, wh
 would repeat the whole vector on every row of the cohort. The axis ships in the array file alongside
 the arrays, so the import resolves the locator against the store; a row missing it, or naming an
 axis the store does not hold, is refused.</p>
-<p>Both imports validate every incoming row against those vendored schemas before decoding it, so a
-document that drifted from the contract is refused in the schema's own terms — the row, the field,
-and what was expected — rather than by whatever the Rust struct happens to notice first. A
-time-series row is checked against the per-type schema its own <code>time_series_type</code> selects, which is
-what the wrapper's <code>discriminator</code> prescribes and what keeps the error specific: a failed <code>oneOf</code>
-can only report that nothing matched.</p>
+<p>Both imports validate every incoming row against the schema bundle the <code>power-openapi-models</code> crate
+carries before decoding it, so a document that drifted from the contract is refused in the schema's
+own terms — the row, the field, and what was expected — rather than by whatever the generated type
+happens to notice first. A failed <code>oneOf</code> reports its closest branch, which keeps the error
+specific.</p>
+<p><code>initial_timestamp</code> takes one of two RFC 3339 forms, and the row's <code>time_reference</code> fixes which. A
+<code>zoneless</code> series is written as a <code>date-time-local</code> (no offset); a <code>utc</code>, zoned, or unspecified
+series is written as a <code>date-time</code> with <code>Z</code>; a <code>FixedOffset</code> series is written at its own offset. A
+<code>Zone</code> series is also written with <code>Z</code>, because the core never resolves a zone name; the row's
+<code>time_reference</code> still names the zone. The import is the inverse. A <code>date-time-local</code> is never read
+as UTC: with no <code>time_reference</code> it makes a <code>zoneless</code> series. A form that contradicts the
+<code>time_reference</code> — no offset with <code>utc</code>, or an offset with <code>zoneless</code> — is refused.</p>
 <p>Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
 alongside the table it came from.</p>
 <p>Writes report the id they used, and reads take one:</p>
@@ -2109,7 +2113,7 @@ writing an "empty" store would drop them with no error.</li>
 <p>They live in the catalog, so they travel with <code>persist_to</code> and <code>persist_catalog</code>, survive <code>compact</code>
 (which rewrites only the array half), and come across with <code>open_copy</code>. <code>open_without_catalog</code> mints
 an empty set, since there is nowhere else for them to have been. They are <strong>not</strong> carried by the
-OpenAPI export or import: the vendored schema has no place for them.</p>
+OpenAPI export or import: the schema has no place for them.</p>
 <p>Available in the Rust core, the C ABI, Julia, Python, and the CLI (<code>store-attr</code>, plus
 <code>store_attributes</code> in <code>store-info</code>); the read-only gRPC server carries the read half
 (<code>ListStoreAttributes</code>, <code>GetStoreAttribute</code>).</p>
@@ -3815,7 +3819,7 @@ everything else here, and nothing but that one method uses it:</p>
 the active virtual environment:</p>
 <pre><code class="language-sh">cd crates/infrastore-py
 python3 -m venv .venv &amp;&amp; source .venv/bin/activate
-pip install maturin pytest numpy tzdata  # tzdata: zoneinfo on Windows
+pip install maturin pytest numpy tzdata "power-openapi-models==0.4.*"  # tzdata: zoneinfo on Windows
 pip install netCDF4 h5py                 # only for the HDF5-interop tests
 maturin develop
 
@@ -4252,13 +4256,12 @@ simulation's own clock — works and is usually what an application wants:</p>
     store.static_read(reader, at)          # each fuel price, held forward to this hour
 </code></pre>
 <h3 id="these-rows-do-not-travel-in-an-openapi-document"><a class="header" href="#these-rows-do-not-travel-in-an-openapi-document">These rows do not travel in an OpenAPI document</a></h3>
-<p><code>PersistentTimeSeries</code> is an infrastore-local extension, and the vendored wire contract is a <code>oneOf</code>
-over six canonical Sienna types with no schema for a seventh. So
-<code>export_time_series_associations_openapi</code> <strong>omits</strong> persistent rows — a mixed store still exports
-its six-type rows — a filter naming the type raises <code>InvalidParameterError</code> rather than answering
-with an empty array, and an import refuses a document that carries one. The series themselves are
-unaffected: they live in the artifact, which holds them in full. Ask the catalog what a document
-leaves behind:</p>
+<p><code>PersistentTimeSeries</code> is an infrastore-local extension, and the wire contract is a <code>oneOf</code> over six
+canonical Sienna types with no schema for a seventh. So <code>export_time_series_associations_openapi</code>
+<strong>omits</strong> persistent rows — a mixed store still exports its six-type rows — a filter naming the type
+raises <code>InvalidParameterError</code> rather than answering with an empty array, and an import refuses a
+document that carries one. The series themselves are unaffected: they live in the artifact, which
+holds them in full. Ask the catalog what a document leaves behind:</p>
 <pre><code class="language-python">left_behind = store.list_metadata(time_series_type=TimeSeriesType.PersistentTimeSeries)
 </code></pre>
 <h2 id="custom-element-types"><a class="header" href="#custom-element-types">Custom Element Types</a></h2>
@@ -5164,13 +5167,12 @@ simulation's own clock — works and is usually what an application wants:</p>
 end
 </code></pre>
 <h3 id="these-rows-do-not-travel-in-an-openapi-document-1"><a class="header" href="#these-rows-do-not-travel-in-an-openapi-document-1">These rows do not travel in an OpenAPI document</a></h3>
-<p><code>PersistentTimeSeries</code> is an infrastore-local extension, and the vendored wire contract is a <code>oneOf</code>
-over six canonical Sienna types with no schema for a seventh. So
-<code>export_time_series_associations_openapi</code> <strong>omits</strong> persistent rows — a mixed store still exports
-its six-type rows — a filter naming the type throws <code>InvalidParameterError</code> rather than answering
-with an empty array, and an import refuses a document that carries one. The series themselves are
-unaffected: they live in the artifact, which holds them in full. Ask the catalog what a document
-leaves behind:</p>
+<p><code>PersistentTimeSeries</code> is an infrastore-local extension, and the wire contract is a <code>oneOf</code> over six
+canonical Sienna types with no schema for a seventh. So <code>export_time_series_associations_openapi</code>
+<strong>omits</strong> persistent rows — a mixed store still exports its six-type rows — a filter naming the type
+throws <code>InvalidParameterError</code> rather than answering with an empty array, and an import refuses a
+document that carries one. The series themselves are unaffected: they live in the artifact, which
+holds them in full. Ask the catalog what a document leaves behind:</p>
 <pre><code class="language-julia">left_behind = list_metadata(store; time_series_type = PersistentTimeSeries)
 </code></pre>
 <h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
@@ -8275,8 +8277,8 @@ the arrays and shared across a cohort. It cannot be left out and inferred, becau
 content-addressed — two irregular series with byte-identical values on <em>different</em> axes share one
 stored array, and only the catalog's <code>timestamps_hash</code> tells them apart, so an import that guessed
 would hand back another series' timestamps.</p>
-<p>Incoming rows are validated against the vendored <a href="reference/rust-api.html#the-wire-contract">SiennaSchemas</a> specs before
-anything is decoded, so a document that drifted is refused in the schema's own terms.</p>
+<p>Incoming rows are validated against the <a href="reference/rust-api.html#the-wire-contract">SiennaSchemas</a> specs before anything is
+decoded, so a document that drifted is refused in the schema's own terms.</p>
 <p><strong>What does not travel.</strong> A <code>PersistentTimeSeries</code> is an infrastore-local extension, and the wire
 contract is a <code>oneOf</code> over six canonical types with no schema for a seventh — so the export omits
 those rows and the import refuses one a foreign document carries. A store holding them still exports
@@ -8286,13 +8288,14 @@ directly, so the gap is in the document round trip, not in the store: ask
 <code>list_metadata(ListFilter::new().time_series_type(TimeSeriesType::PersistentTimeSeries))</code> for what a
 restore would leave behind.</p>
 <h3 id="the-wire-contract"><a class="header" href="#the-wire-contract">The wire contract</a></h3>
-<p>The JSON spelling both directions use is SiennaSchemas' own, vendored at
-<code>crates/infrastore-core/sienna_schemas/</code> (its <code>SOURCE.md</code> records the upstream commit; refresh with
-<code>scripts/sync_sienna_schemas.sh</code>). Those files are compiled into the crate and are what the import
-path validates against — no filesystem access, no network. A time-series row is checked against the
-per-type schema its own <code>time_series_type</code> selects, which is how the wrapper's <code>discriminator</code> says
-to read it and what makes an error name the offending field rather than only reporting that a
-<code>oneOf</code> matched nothing.</p>
+<p>The JSON spelling both directions use is SiennaSchemas' own, through the <code>power-openapi-models</code>
+crate: its generated types are the rows, and its <code>validate::Validator</code> holds the schema bundle the
+import path validates against — compiled in, no filesystem access, no network. The schema release is
+<code>power_openapi_models::SCHEMA_VERSION</code>. A failed <code>oneOf</code> reports its closest branch, so an error
+names the offending field rather than only reporting that a <code>oneOf</code> matched nothing.</p>
+<p><code>initial_timestamp</code> is a <code>date-time-local</code> for a <code>Zoneless</code> series and a <code>date-time</code> for every other
+reference. The import refuses a form that contradicts <code>time_reference</code>, and never reads a
+<code>date-time-local</code> as UTC.</p>
 <h2 id="types"><a class="header" href="#types">Types</a></h2>
 <h3 id="timeseriesid-and-keyidentity"><a class="header" href="#timeseriesid-and-keyidentity"><code>TimeSeriesId</code> and <code>KeyIdentity</code></a></h3>
 <p><code>TimeSeriesId</code> is the catalog id of one association — the only way to address a stored series. It is
@@ -10664,8 +10667,8 @@ document naming one is rejected by the discriminator check. Any of those, or an 
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
-<p>Incoming rows are validated against the vendored SiennaSchemas specs before anything is decoded, so
-a document that drifted from the contract is refused in the schema's own terms — naming the row and
+<p>Incoming rows are validated against the SiennaSchemas specs before anything is decoded, so a
+document that drifted from the contract is refused in the schema's own terms — naming the row and
 the field.</p>
 <h3 id="reading-a-bundle-back-with-no-catalog"><a class="header" href="#reading-a-bundle-back-with-no-catalog">Reading a bundle back with no catalog</a></h3>
 <p><code>Store.open_without_catalog</code> opens the array half of an artifact whose <code>.sqlite</code> is <strong>absent</strong>,
@@ -11900,8 +11903,8 @@ document naming one is rejected by the discriminator check. Any of those, or an 
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
-<p>Incoming rows are validated against the vendored SiennaSchemas specs before anything is decoded, so
-a document that drifted from the contract is refused in the schema's own terms — naming the row and
+<p>Incoming rows are validated against the SiennaSchemas specs before anything is decoded, so a
+document that drifted from the contract is refused in the schema's own terms — naming the row and
 the field.</p>
 <h3 id="reading-a-bundle-back-with-no-catalog-1"><a class="header" href="#reading-a-bundle-back-with-no-catalog-1">Reading a bundle back with no catalog</a></h3>
 <p><code>open_store_without_catalog</code> opens the array half of an artifact whose <code>.sqlite</code> is <strong>absent</strong>,

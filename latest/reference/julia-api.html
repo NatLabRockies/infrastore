@@ -1318,8 +1318,8 @@ document naming one is rejected by the discriminator check. Any of those, or an 
 <p>Infrastore never modifies the data to make an incoming document agree with what it already holds. A
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (<code>InvalidParameterError</code>), loudly and without writing anything.</p>
-<p>Incoming rows are validated against the vendored SiennaSchemas specs before anything is decoded, so
-a document that drifted from the contract is refused in the schema's own terms — naming the row and
+<p>Incoming rows are validated against the SiennaSchemas specs before anything is decoded, so a
+document that drifted from the contract is refused in the schema's own terms — naming the row and
 the field.</p>
 <h3 id="reading-a-bundle-back-with-no-catalog"><a class="header" href="#reading-a-bundle-back-with-no-catalog">Reading a bundle back with no catalog</a></h3>
 <p><code>open_store_without_catalog</code> opens the array half of an artifact whose <code>.sqlite</code> is <strong>absent</strong>,

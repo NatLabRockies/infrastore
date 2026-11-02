@@ -1053,8 +1053,8 @@ the arrays and shared across a cohort. It cannot be left out and inferred, becau
 content-addressed — two irregular series with byte-identical values on <em>different</em> axes share one
 stored array, and only the catalog's <code>timestamps_hash</code> tells them apart, so an import that guessed
 would hand back another series' timestamps.</p>
-<p>Incoming rows are validated against the vendored <a href="#the-wire-contract">SiennaSchemas</a> specs before
-anything is decoded, so a document that drifted is refused in the schema's own terms.</p>
+<p>Incoming rows are validated against the <a href="#the-wire-contract">SiennaSchemas</a> specs before anything is
+decoded, so a document that drifted is refused in the schema's own terms.</p>
 <p><strong>What does not travel.</strong> A <code>PersistentTimeSeries</code> is an infrastore-local extension, and the wire
 contract is a <code>oneOf</code> over six canonical types with no schema for a seventh — so the export omits
 those rows and the import refuses one a foreign document carries. A store holding them still exports
@@ -1064,13 +1064,14 @@ directly, so the gap is in the document round trip, not in the store: ask
 <code>list_metadata(ListFilter::new().time_series_type(TimeSeriesType::PersistentTimeSeries))</code> for what a
 restore would leave behind.</p>
 <h3 id="the-wire-contract"><a class="header" href="#the-wire-contract">The wire contract</a></h3>
-<p>The JSON spelling both directions use is SiennaSchemas' own, vendored at
-<code>crates/infrastore-core/sienna_schemas/</code> (its <code>SOURCE.md</code> records the upstream commit; refresh with
-<code>scripts/sync_sienna_schemas.sh</code>). Those files are compiled into the crate and are what the import
-path validates against — no filesystem access, no network. A time-series row is checked against the
-per-type schema its own <code>time_series_type</code> selects, which is how the wrapper's <code>discriminator</code> says
-to read it and what makes an error name the offending field rather than only reporting that a
-<code>oneOf</code> matched nothing.</p>
+<p>The JSON spelling both directions use is SiennaSchemas' own, through the <code>power-openapi-models</code>
+crate: its generated types are the rows, and its <code>validate::Validator</code> holds the schema bundle the
+import path validates against — compiled in, no filesystem access, no network. The schema release is
+<code>power_openapi_models::SCHEMA_VERSION</code>. A failed <code>oneOf</code> reports its closest branch, so an error
+names the offending field rather than only reporting that a <code>oneOf</code> matched nothing.</p>
+<p><code>initial_timestamp</code> is a <code>date-time-local</code> for a <code>Zoneless</code> series and a <code>date-time</code> for every other
+reference. The import refuses a form that contradicts <code>time_reference</code>, and never reads a
+<code>date-time-local</code> as UTC.</p>
 <h2 id="types"><a class="header" href="#types">Types</a></h2>
 <h3 id="timeseriesid-and-keyidentity"><a class="header" href="#timeseriesid-and-keyidentity"><code>TimeSeriesId</code> and <code>KeyIdentity</code></a></h3>
 <p><code>TimeSeriesId</code> is the catalog id of one association — the only way to address a stored series. It is

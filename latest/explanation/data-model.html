@@ -311,15 +311,13 @@ door, the guarantee holds there too: a supplied id must sit above the destinatio
 (<code>DuplicateAssociationId</code> otherwise, so a document's ids fit a fresh store but not one that has
 issued ids of its own), and a document supplies one for every row or for none. Neither association
 catalog's wire form carries an id at all, so both always assign.</p>
-<p>The same round trip carries two fields the schema gained late
-(<code>crates/infrastore-core/sienna_schemas/SOURCE.md</code> records the upstream commit vendored here):
-<code>array_shape</code>, the stored array's full native shape (<code>[length, *element_shape]</code> in the catalog's
-terms, where the schema's <code>element_shape</code> is only the per-step trailing shape), and
-<code>time_reference</code>. Both exist so an imported row is <em>identical</em> to the exported one — the forecast
-layouts above are conventions the caller owns, so the native shape cannot be rebuilt from <code>horizon</code>
-and <code>count</code>. Neither is required: a producer predating them writes rows without them, a reader that
-does not know them ignores them, and an import that finds them absent falls back to the schema's own
-fields.</p>
+<p>The same round trip carries two fields the schema gained late: <code>array_shape</code>, the stored array's
+full native shape (<code>[length, *element_shape]</code> in the catalog's terms, where the schema's
+<code>element_shape</code> is only the per-step trailing shape), and <code>time_reference</code>. Both exist so an
+imported row is <em>identical</em> to the exported one — the forecast layouts above are conventions the
+caller owns, so the native shape cannot be rebuilt from <code>horizon</code> and <code>count</code>. Neither is required:
+a producer predating them writes rows without them, a reader that does not know them ignores them,
+and an import that finds them absent falls back to the schema's own fields.</p>
 <h3 id="reading-an-artifact-back-from-arrays-plus-a-document"><a class="header" href="#reading-an-artifact-back-from-arrays-plus-a-document">Reading an artifact back from arrays plus a document</a></h3>
 <p>Those two fields exist so that a document can stand in for the catalog entirely. A consumer that
 already ships the association rows in JSON of its own — PowerSystems writes a <code>system.json</code> beside a
@@ -331,7 +329,7 @@ array file's <em>own</em> generation stamp, so the rebuilt pair opens normally e
 save the paired-stamp check exists to catch.</p>
 <p>All six of the types the wire contract defines make the trip, including <code>NonSequentialTimeSeries</code> —
 which needs one field the others do not. (A <code>PersistentTimeSeries</code> does not: it is an
-infrastore-local extension outside the vendored <code>oneOf</code>, so the export omits its rows and the import
+infrastore-local extension outside the six-type <code>oneOf</code>, so the export omits its rows and the import
 refuses them. A store holding them still exports the rest, but a restore from arrays plus a document
 alone will not carry them.) Its timestamp vector lives in the store rather than the document,
 content-addressed so a cohort sharing one axis stores it once, and the values cannot imply which
@@ -343,12 +341,18 @@ a locator rather than the vector itself precisely because the axis is shared, wh
 would repeat the whole vector on every row of the cohort. The axis ships in the array file alongside
 the arrays, so the import resolves the locator against the store; a row missing it, or naming an
 axis the store does not hold, is refused.</p>
-<p>Both imports validate every incoming row against those vendored schemas before decoding it, so a
-document that drifted from the contract is refused in the schema's own terms — the row, the field,
-and what was expected — rather than by whatever the Rust struct happens to notice first. A
-time-series row is checked against the per-type schema its own <code>time_series_type</code> selects, which is
-what the wrapper's <code>discriminator</code> prescribes and what keeps the error specific: a failed <code>oneOf</code>
-can only report that nothing matched.</p>
+<p>Both imports validate every incoming row against the schema bundle the <code>power-openapi-models</code> crate
+carries before decoding it, so a document that drifted from the contract is refused in the schema's
+own terms — the row, the field, and what was expected — rather than by whatever the generated type
+happens to notice first. A failed <code>oneOf</code> reports its closest branch, which keeps the error
+specific.</p>
+<p><code>initial_timestamp</code> takes one of two RFC 3339 forms, and the row's <code>time_reference</code> fixes which. A
+<code>zoneless</code> series is written as a <code>date-time-local</code> (no offset); a <code>utc</code>, zoned, or unspecified
+series is written as a <code>date-time</code> with <code>Z</code>; a <code>FixedOffset</code> series is written at its own offset. A
+<code>Zone</code> series is also written with <code>Z</code>, because the core never resolves a zone name; the row's
+<code>time_reference</code> still names the zone. The import is the inverse. A <code>date-time-local</code> is never read
+as UTC: with no <code>time_reference</code> it makes a <code>zoneless</code> series. A form that contradicts the
+<code>time_reference</code> — no offset with <code>utc</code>, or an offset with <code>zoneless</code> — is refused.</p>
 <p>Each of the three catalog tables keeps its own independent counter, so an id is only meaningful
 alongside the table it came from.</p>
 <p>Writes report the id they used, and reads take one:</p>
@@ -556,7 +560,7 @@ writing an "empty" store would drop them with no error.</li>
 <p>They live in the catalog, so they travel with <code>persist_to</code> and <code>persist_catalog</code>, survive <code>compact</code>
 (which rewrites only the array half), and come across with <code>open_copy</code>. <code>open_without_catalog</code> mints
 an empty set, since there is nowhere else for them to have been. They are <strong>not</strong> carried by the
-OpenAPI export or import: the vendored schema has no place for them.</p>
+OpenAPI export or import: the schema has no place for them.</p>
 <p>Available in the Rust core, the C ABI, Julia, Python, and the CLI (<code>store-attr</code>, plus
 <code>store_attributes</code> in <code>store-info</code>); the read-only gRPC server carries the read half
 (<code>ListStoreAttributes</code>, <code>GetStoreAttribute</code>).</p>

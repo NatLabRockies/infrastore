@@ -729,13 +729,12 @@ simulation's own clock — works and is usually what an application wants:</p>
 end
 </code></pre>
 <h3 id="these-rows-do-not-travel-in-an-openapi-document"><a class="header" href="#these-rows-do-not-travel-in-an-openapi-document">These rows do not travel in an OpenAPI document</a></h3>
-<p><code>PersistentTimeSeries</code> is an infrastore-local extension, and the vendored wire contract is a <code>oneOf</code>
-over six canonical Sienna types with no schema for a seventh. So
-<code>export_time_series_associations_openapi</code> <strong>omits</strong> persistent rows — a mixed store still exports
-its six-type rows — a filter naming the type throws <code>InvalidParameterError</code> rather than answering
-with an empty array, and an import refuses a document that carries one. The series themselves are
-unaffected: they live in the artifact, which holds them in full. Ask the catalog what a document
-leaves behind:</p>
+<p><code>PersistentTimeSeries</code> is an infrastore-local extension, and the wire contract is a <code>oneOf</code> over six
+canonical Sienna types with no schema for a seventh. So <code>export_time_series_associations_openapi</code>
+<strong>omits</strong> persistent rows — a mixed store still exports its six-type rows — a filter naming the type
+throws <code>InvalidParameterError</code> rather than answering with an empty array, and an import refuses a
+document that carries one. The series themselves are unaffected: they live in the artifact, which
+holds them in full. Ask the catalog what a document leaves behind:</p>
 <pre><code class="language-julia">left_behind = list_metadata(store; time_series_type = PersistentTimeSeries)
 </code></pre>
 <h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
