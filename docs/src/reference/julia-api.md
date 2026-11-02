@@ -966,8 +966,8 @@ forecast_values(reader, entry_index::Integer; lazy=false) -> AbstractArray
        # window of size .window_shape
 ```
 
-The values are stored row-major and returned in column-major Julia layout. For an array of more
-than one dimension, `static_values` and `forecast_values` reorder the values with a copy by default,
+The values are stored row-major and returned in column-major Julia layout. For an array of more than
+one dimension, `static_values` and `forecast_values` reorder the values with a copy by default,
 returning an `Array`. With `lazy=true` they skip the copy and return a `PermutedDimsArray` over the
 values in stored order, which indexes the same way.
 
