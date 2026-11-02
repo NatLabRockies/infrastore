@@ -11561,8 +11561,8 @@ forecast_read!(reader, t) -&gt; reader                  # fills buffers; errors 
 forecast_values(reader, entry_index::Integer; lazy=false) -&gt; AbstractArray
        # window of size .window_shape
 </code></pre>
-<p>The values are stored row-major and returned in column-major Julia layout. For an array of more
-than one dimension, <code>static_values</code> and <code>forecast_values</code> reorder the values with a copy by default,
+<p>The values are stored row-major and returned in column-major Julia layout. For an array of more than
+one dimension, <code>static_values</code> and <code>forecast_values</code> reorder the values with a copy by default,
 returning an <code>Array</code>. With <code>lazy=true</code> they skip the copy and return a <code>PermutedDimsArray</code> over the
 values in stored order, which indexes the same way.</p>
 <p>Pass <code>lazy=true</code> when the first thing you do with the result is slice or index it along its first
