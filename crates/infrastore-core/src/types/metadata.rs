@@ -296,6 +296,7 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "id",
     "initial_timestamp",
     "interval",
+    "interval_alignment",
     "length",
     "name",
     "owner_category",

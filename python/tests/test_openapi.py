@@ -16,6 +16,10 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 import infrastore
+from power_openapi_models.infrastructure_core.models import (
+    SupplementalAttributeAssociation as SdkSupplementalAttributeAssociation,
+)
+from power_openapi_models.timeseries.models import TimeSeriesAssociation
 from infrastore import (
     NonSequentialTimeSeries,
     OwnerCategory,
@@ -377,8 +381,82 @@ class TestJsonOnlyRestore:
         store.close()
 
 
+class TestSdkReadsTheExport:
+    """The power-openapi-models Python types parse what the export writes, so
+    a second implementation of the contract reads this one's documents."""
+
+    def test_time_series_rows_parse(self):
+        store = Store.create(in_memory=True)
+        store.add_time_series(
+            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                T0, HOUR, np.zeros(4, dtype=np.float64), "load", units="MW"
+            ),
+            features={"year": 2030},
+        )
+        store.add_time_series(
+            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=NonSequentialTimeSeries(
+                [T0, T0 + 5 * HOUR], np.array([1.0, 2.0], dtype=np.float64), "events"
+            ),
+        )
+        rows = json.loads(store.export_time_series_associations_openapi())
+        parsed = [TimeSeriesAssociation.model_validate(row).root for row in rows]
+        assert sorted(type(p).__name__ for p in parsed) == [
+            "NonSequentialTimeSeries", "SingleTimeSeries",
+        ]
+
+    def test_zoneless_series_exports_a_local_timestamp(self):
+        store = Store.create(in_memory=True)
+        store.add_time_series(
+            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                datetime(2030, 1, 1), HOUR, np.zeros(4, dtype=np.float64), "load"
+            ),
+        )
+        row = json.loads(store.export_time_series_associations_openapi())[0]
+        assert row["time_reference"] == "zoneless"
+        assert row["initial_timestamp"] == "2030-01-01T00:00:00"
+        parsed = TimeSeriesAssociation.model_validate(row).root
+        assert parsed.initial_timestamp == datetime(2030, 1, 1)
+        assert parsed.initial_timestamp.tzinfo is None
+
+    def test_zoneless_series_round_trips_without_becoming_utc(self):
+        source = Store.create(in_memory=True)
+        source.add_time_series(
+            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                datetime(2030, 1, 1), HOUR, np.zeros(4, dtype=np.float64), "load"
+            ),
+        )
+        document = source.export_time_series_associations_openapi()
+        target = Store.create(in_memory=True)
+        # Same values, so the target already holds the array the row names.
+        target.add_time_series(
+            owner_id=2, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=SingleTimeSeries(
+                datetime(2030, 1, 1), HOUR, np.zeros(4, dtype=np.float64), "other"
+            ),
+        )
+        rows = json.loads(document)
+        rows[0]["association_id"] = 1000
+        target.import_time_series_associations_openapi(json.dumps(rows))
+        imported = [
+            r for r in json.loads(target.export_time_series_associations_openapi())
+            if r["association_id"] == 1000
+        ][0]
+        assert imported["time_reference"] == "zoneless"
+        assert imported["initial_timestamp"] == "2030-01-01T00:00:00"
+
+    def test_supplemental_attribute_rows_parse(self):
+        store = Store.create(in_memory=True)
+        store.add_supplemental_attribute_associations([attached(1, 100)])
+        rows = json.loads(store.export_supplemental_attribute_associations_openapi())
+        SdkSupplementalAttributeAssociation.model_validate(rows[0])
+
+
 class TestSchemaContract:
-    """The import path holds a document to the vendored SiennaSchemas specs, so
+    """The import path holds a document to the SiennaSchemas specs, so
     a row that drifted is refused in the schema's own terms rather than by
     whatever the Rust struct happens to notice."""
 

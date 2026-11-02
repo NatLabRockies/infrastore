@@ -2994,7 +2994,7 @@ impl Store {
     ///   [`Self::import_time_series_associations_openapi`] resolves before
     ///   calling this. A `PersistentTimeSeries` reaches this rows-only entry
     ///   point only from a native caller: it is an infrastore-local extension,
-    ///   outside the six types the vendored contract defines, so a document
+    ///   outside the six types the wire contract defines, so a document
     ///   naming one is refused before it is decoded.
     /// - A `DeterministicSingleTimeSeries` is a view of a `SingleTimeSeries`,
     ///   so its source must be present — in this batch or already stored. Views

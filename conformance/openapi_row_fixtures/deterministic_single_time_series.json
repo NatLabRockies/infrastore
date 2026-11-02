@@ -16,6 +16,7 @@
   "units": "MW",
   "quantity_kind": "ActivePower",
   "unit_system": "NATURAL_UNITS",
+  "interval_alignment": "PERIOD_ENDING",
   "initial_timestamp": "2030-01-01T00:00:00Z",
   "resolution": "PT1H",
   "horizon": "PT2H",

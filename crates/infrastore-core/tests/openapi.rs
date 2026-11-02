@@ -296,11 +296,54 @@ fn export_reproduces_every_time_series_fixture() {
     }
 }
 
+/// The zoneless fixture: a `date-time-local` and `time_reference: zoneless`.
+#[test]
+fn export_reproduces_the_zoneless_fixture() {
+    let mut store = Store::create(None, true).expect("in-memory store should initialize");
+    let single = SingleTimeSeries::new(
+        ts(2030, 1, 1, 0, 0, 0),
+        Duration::hours(1),
+        zeros(vec![8760]),
+        "max_active_power",
+    )
+    .with_units("MW")
+    .with_quantity_kind("ActivePower")
+    .with_unit_system(UnitSystem::NaturalUnits)
+    .with_component_field("max_active_power")
+    .with_time_reference(TimeReference::Zoneless);
+    store
+        .add_time_series(
+            7,
+            "ThermalStandard",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(single),
+            features_of(&[("scenario", FeatureValue::Str("zoneless_load".into()))]),
+        )
+        .expect("zoneless fixture row should add");
+    let json = store
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let mut rows: Vec<serde_json::Value> =
+        serde_json::from_str(&json).expect("export is a JSON array");
+    assert_eq!(rows.len(), 1);
+    let mut got = rows.pop().expect("one row");
+    let mut want = fixture("single_time_series_zoneless");
+    for row in [&mut got, &mut want] {
+        assert!(
+            row.as_object_mut()
+                .expect("a row is an object")
+                .remove("association_id")
+                .is_some()
+        );
+    }
+    assert_eq!(got, want);
+}
+
 /// A `PersistentTimeSeries` does not travel in an OpenAPI document at all.
 ///
-/// The vendored `TimeSeriesAssociation.json` is a `oneOf` over a closed set of
+/// The SiennaSchemas `TimeSeriesAssociation.json` is a `oneOf` over a closed set of
 /// six canonical Sienna types, and there is no upstream schema for a seventh;
-/// inventing one would misrepresent the vendored contract. So the type is not a
+/// inventing one would misrepresent the wire contract. So the type is not a
 /// fixture in `build_fixture_store`, `openapi_schema_conformance.rs::time_series_cases`
 /// stays at exactly six entries, and an export emits nothing for it — a
 /// document that carried a row no import would take back is worse than one that
@@ -1073,8 +1116,11 @@ fn the_full_surface_export_spells_every_optional_field() {
         r#""element_type":"f32""#,
         // A calendar period, which no fixture carries.
         r#""resolution":"P1M""#,
-        // The millisecond branch of `format_initial_timestamp`.
-        r#""initial_timestamp":"2030-06-15T12:00:00.250Z""#,
+        // The millisecond branch of `format_initial_timestamp`, written at the
+        // series' fixed offset.
+        r#""initial_timestamp":"2030-06-15T05:00:00.250-07:00""#,
+        // The zoneless series writes a `date-time-local`: no `Z`, no offset.
+        r#""initial_timestamp":"2030-01-01T00:00:00""#,
         // Per-type geometry.
         r#""percentiles":[5.0,50.0,95.0]"#,
         r#""scenario_count":5"#,
@@ -1177,6 +1223,114 @@ fn the_full_surface_round_trips_byte_equal_with_identical_metadata() {
             .unwrap_or_else(|| panic!("id {id} did not survive the import"));
         assert_eq!(imported, original, "row {id} changed across the round trip");
     }
+}
+
+// ---- the time zone mapping of `initial_timestamp` ---------------------------
+
+/// The exported row named `name`, from the full-surface store.
+fn exported_row(name: &str) -> serde_json::Value {
+    let json = full_surface_source()
+        .export_time_series_associations_openapi(&ListFilter::new())
+        .expect("export should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("export is an array");
+    rows.into_iter()
+        .find(|r| r["name"] == name)
+        .unwrap_or_else(|| panic!("row {name} is in the export"))
+}
+
+/// Import `row` alone into a store that holds the arrays.
+fn import_row(row: &serde_json::Value) -> (Store, infrastore_core::Result<usize>) {
+    let mut target = full_surface_anchor_target();
+    let document = serde_json::to_string(&vec![row]).expect("the row serializes");
+    let result = target.import_time_series_associations_openapi(&document);
+    (target, result)
+}
+
+/// A `Zoneless` series writes a `date-time-local`; the zoned spellings write
+/// a `date-time`.
+#[test]
+fn a_zoneless_export_writes_no_offset() {
+    let zoneless = exported_row("monthly_outage");
+    assert_eq!(zoneless["time_reference"], "zoneless");
+    assert_eq!(zoneless["initial_timestamp"], "2030-01-01T00:00:00");
+
+    let utc = exported_row("cost_forecast");
+    assert_eq!(utc["time_reference"], "utc");
+    assert_eq!(utc["initial_timestamp"], "2030-01-01T00:00:00Z");
+
+    let zone = exported_row("max_active_power");
+    assert_eq!(zone["time_reference"], "America/Denver");
+    assert_eq!(zone["initial_timestamp"], "2030-01-01T00:00:00Z");
+}
+
+/// A `date-time-local` with no `time_reference` makes a zoneless series. It
+/// is never read as UTC.
+#[test]
+fn a_local_timestamp_without_a_reference_imports_as_zoneless() {
+    let mut row = exported_row("monthly_outage");
+    row.as_object_mut()
+        .expect("a row is an object")
+        .remove("time_reference");
+    let (target, result) = import_row(&row);
+    result.expect("a date-time-local imports");
+    let id = TimeSeriesId(row["association_id"].as_i64().expect("an id"));
+    let imported = target
+        .get_metadata_by_id(id)
+        .expect("lookup should succeed")
+        .expect("the row landed");
+    assert_eq!(imported.time_reference, Some(TimeReference::Zoneless));
+    assert_eq!(imported.initial_timestamp, Some(ts(2030, 1, 1, 0, 0, 0)));
+}
+
+/// An offset on the wire is an instant: `-07:00` names 12:00 UTC.
+#[test]
+fn an_offset_timestamp_imports_as_its_instant() {
+    let mut row = exported_row("reactive_power");
+    assert_eq!(row["initial_timestamp"], "2030-06-15T05:00:00.250-07:00");
+    row["time_reference"] = "utc".into();
+    row["initial_timestamp"] = "2030-06-15T05:00:00.250+00:00".into();
+    let (target, result) = import_row(&row);
+    result.expect("a zero offset imports under utc");
+    let id = TimeSeriesId(row["association_id"].as_i64().expect("an id"));
+    let imported = target
+        .get_metadata_by_id(id)
+        .expect("lookup should succeed")
+        .expect("the row landed");
+    assert_eq!(
+        imported.initial_timestamp,
+        Some(ts(2030, 6, 15, 5, 0, 0) + Duration::milliseconds(250))
+    );
+}
+
+/// A `date-time-local` contradicts `time_reference: utc`: an error, not a fix.
+#[test]
+fn a_local_timestamp_with_a_utc_reference_is_rejected() {
+    let mut row = exported_row("monthly_outage");
+    row["time_reference"] = "utc".into();
+    let (target, result) = import_row(&row);
+    let message = result
+        .expect_err("a no-offset timestamp under utc is refused")
+        .to_string();
+    assert!(message.contains("/initial_timestamp"), "{message}");
+    assert!(
+        target
+            .get_metadata_by_id(TimeSeriesId(row["association_id"].as_i64().expect("an id")))
+            .expect("lookup should succeed")
+            .is_none(),
+        "a refused row is not stored"
+    );
+}
+
+/// A `date-time` contradicts `time_reference: zoneless`: an error, not a fix.
+#[test]
+fn an_offset_timestamp_with_a_zoneless_reference_is_rejected() {
+    let mut row = exported_row("monthly_outage");
+    row["initial_timestamp"] = "2030-01-01T00:00:00Z".into();
+    let (_, result) = import_row(&row);
+    let message = result
+        .expect_err("an offset timestamp under zoneless is refused")
+        .to_string();
+    assert!(message.contains("/initial_timestamp"), "{message}");
 }
 
 // ---- the wire-form paths an infrastore-produced document never takes --------

@@ -1580,8 +1580,8 @@ Infrastore never modifies the data to make an incoming document agree with what 
 geometry disagreement between an added series and its own association row is likewise rejected at
 the add boundary (`InvalidParameterError`), loudly and without writing anything.
 
-Incoming rows are validated against the vendored SiennaSchemas specs before anything is decoded, so
-a document that drifted from the contract is refused in the schema's own terms — naming the row and
+Incoming rows are validated against the SiennaSchemas specs before anything is decoded, so a
+document that drifted from the contract is refused in the schema's own terms — naming the row and
 the field.
 
 ### Reading a bundle back with no catalog
