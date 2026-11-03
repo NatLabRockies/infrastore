@@ -56,9 +56,12 @@ def test_unit_descriptors_round_trip():
         time_series=_sts(
             "load", 10.0, units="MW", quantity_kind="ActivePower",
             unit_system="component_base", component_field="max_active_power",
+            per_unit_of="base_power",
         ),
     )
     meta = store.get_metadata_by_id(key)
+    assert meta["per_unit_of"] == "base_power"
+    assert store.read_by_id(key).per_unit_of == "base_power"
     assert meta["quantity_kind"] == "ActivePower"
     assert meta["unit_system"] == "component_base"
     assert meta["component_field"] == "max_active_power"
@@ -119,6 +122,7 @@ def test_unit_system_unset_is_unspecified_not_natural_units():
     assert meta["unit_system"] is None
     assert meta["quantity_kind"] is None
     assert meta["component_field"] is None
+    assert meta["per_unit_of"] is None
 
 
 def test_unknown_unit_system_is_rejected():
@@ -328,7 +332,7 @@ def test_list_time_series_new_fields_and_interval_filter():
     row = rows[0]
     for field in ("initial_timestamp", "horizon", "interval", "count",
                   "percentiles", "element_type", "element_shape", "application_data",
-                  "quantity_kind", "unit_system", "component_field"):
+                  "quantity_kind", "unit_system", "component_field", "per_unit_of"):
         assert field in row
     assert row["interval"] == "PT1H"
     # No forecast at a different interval.

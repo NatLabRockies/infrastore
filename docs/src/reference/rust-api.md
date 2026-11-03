@@ -1000,6 +1000,7 @@ pub struct SingleTimeSeries {
     pub unit_system: Option<UnitSystem>,
     pub time_reference: Option<TimeReference>,
     pub component_field: Option<String>,
+    pub per_unit_of: Option<String>,
     pub application_data: Option<String>,
 }
 
@@ -1014,6 +1015,7 @@ impl SingleTimeSeries {
     pub fn with_unit_system(self, unit_system: UnitSystem) -> Self;
     pub fn with_time_reference(self, time_reference: TimeReference) -> Self;
     pub fn with_component_field(self, component_field: impl Into<String>) -> Self;
+    pub fn with_per_unit_of(self, per_unit_of: impl Into<String>) -> Self;
     pub fn with_application_data(self, application_data: impl Into<String>) -> Self;
 
     pub fn timestamp_at(&self, index: usize) -> Result<DateTime<Utc>>;
@@ -1524,10 +1526,10 @@ The full record returned by `list_metadata` and `get_metadata_by_id`: owner fiel
 (`initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`, `timestamps`),
 `features`, the descriptors (`units`, `quantity_kind: Option<String>`,
 `unit_system: Option<UnitSystem>`, `time_reference: Option<TimeReference>`,
-`component_field: Option<String>`, `application_data: Option<String>`),
-`percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
-`element_shape: Vec<usize>`. The span fields (`resolution`, `horizon`, `interval`) are
-`Option<Period>`.
+`component_field: Option<String>`, `per_unit_of: Option<String>`,
+`application_data: Option<String>`), `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and
+the array typing: `dtype: Dtype`, `element_shape: Vec<usize>`. The span fields (`resolution`,
+`horizon`, `interval`) are `Option<Period>`.
 
 ### `UnitSystem`
 
@@ -1604,13 +1606,14 @@ pub struct Descriptors {
     pub unit_system: Option<UnitSystem>,
     pub time_reference: Option<TimeReference>,
     pub component_field: Option<String>,
+    pub per_unit_of: Option<String>,
     pub application_data: Option<String>,
 }
 ```
 
-It is a struct rather than a positional argument list because four of the seven fields are
-`Option<String>`: as bare parameters, `units`, `quantity_kind`, `component_field`, and
-`application_data` would be silently interchangeable at every call site.
+It is a struct rather than a positional argument list because five of the eight fields are
+`Option<String>`: as bare parameters, `units`, `quantity_kind`, `component_field`, `per_unit_of`,
+and `application_data` would be silently interchangeable at every call site.
 
 ### `ListFilter`
 
