@@ -1894,6 +1894,7 @@ dependencies = [
 [[package]]
 name = "power-openapi-models"
 version = "0.4.0"
+source = "git+https://github.com/Sienna-Platform/power-openapi-models?branch=lk%2Fper-unit-of#fbb45de01596143a7e68283af2959daca57536df"
 dependencies = [
  "chrono",
  "jsonschema",
