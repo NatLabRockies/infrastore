@@ -847,6 +847,10 @@ fn ts_row_from_wire(row: TimeSeriesAssociation) -> Result<DecodedTsRow> {
             unit_system: shared.unit_system.map(unit_system_from_wire),
             time_reference,
             component_field: shared.component_field,
+            // ponytail: the wire row has no `per_unit_of` until SiennaSchemas adds
+            // it and `power-openapi-models` is released with it, so a document
+            // round trip drops it; the SQLite catalog keeps it.
+            per_unit_of: None,
             percentiles: timing.percentiles,
             element_type,
             element_shape,

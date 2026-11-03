@@ -53,6 +53,7 @@ fn descriptors_of(data: &TimeSeriesData) -> infrastore_core::Descriptors {
         unit_system: None,
         time_reference: data.time_reference().cloned(),
         component_field: None,
+        per_unit_of: None,
         application_data: None,
     }
 }
@@ -170,6 +171,7 @@ fn every_descriptor_comes_back() {
     inner.quantity_kind = Some("ActivePower".into());
     inner.unit_system = Some(infrastore_core::UnitSystem::NaturalUnits);
     inner.component_field = Some("max_active_power".into());
+    inner.per_unit_of = Some("base_power".into());
     inner.application_data = Some(r#"{"k":1}"#.into());
     inner.time_reference = Some(TimeReference::Utc);
 
@@ -194,6 +196,7 @@ fn every_descriptor_comes_back() {
         Some(infrastore_core::UnitSystem::NaturalUnits)
     );
     assert_eq!(s.component_field.as_deref(), Some("max_active_power"));
+    assert_eq!(s.per_unit_of.as_deref(), Some("base_power"));
     assert_eq!(s.application_data.as_deref(), Some(r#"{"k":1}"#));
 }
 
@@ -209,6 +212,7 @@ fn an_absent_descriptor_stays_absent() {
     assert_eq!(s.quantity_kind, None);
     assert_eq!(s.unit_system, None);
     assert_eq!(s.component_field, None);
+    assert_eq!(s.per_unit_of, None);
     assert_eq!(s.application_data, None);
 }
 

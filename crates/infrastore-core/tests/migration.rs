@@ -189,7 +189,7 @@ fn fresh_store_stamps_the_current_revision() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let store = Store::create(Some(path.as_path()), false).unwrap();
-    assert_eq!(store.catalog_schema_revision().unwrap(), 2);
+    assert_eq!(store.catalog_schema_revision().unwrap(), 3);
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn a_revision_1_catalog_upgrades_in_place_on_a_writable_open() {
     let format_before = format_version_on_disk(&path);
 
     let mut store = Store::open(path.as_path(), false).unwrap();
-    assert_eq!(store.catalog_schema_revision().unwrap(), 2);
+    assert_eq!(store.catalog_schema_revision().unwrap(), 3);
 
     // Both pre-existing series survived, byte for byte.
     let rows = store
@@ -253,7 +253,7 @@ fn a_revision_1_catalog_upgrades_in_place_on_a_writable_open() {
     // constants are equal -- assert it is *unchanged*, which is the claim this
     // fixture can actually make.
     assert_eq!(format_version_on_disk(&path), format_before);
-    assert_eq!(revision_on_disk(&path), 2);
+    assert_eq!(revision_on_disk(&path), 3);
     // Migration is not a save: the paired generation stamps are untouched.
     assert_eq!(generation_stamps(&path), before);
 }
@@ -275,7 +275,7 @@ fn a_read_only_open_of_a_stale_catalog_reports_migration_required() {
     let (_dir, path) = stale_store();
     match Store::open(path.as_path(), true) {
         Err(TimeSeriesError::CatalogMigrationRequired { found, expected }) => {
-            assert_eq!((found, expected), (1, 2));
+            assert_eq!((found, expected), (1, 3));
             // The message has to name the remedy, not just the numbers: this is
             // the error a read-only consumer (the gRPC server) surfaces.
             let rendered =
@@ -315,7 +315,7 @@ fn a_stale_catalog_can_still_be_copied_and_the_copy_migrates() {
     .expect("a stale catalog must still be copyable");
     // The copy is writable, so it climbed the ladder on the way in, and carries
     // every row the source had.
-    assert_eq!(copy.catalog_schema_revision().unwrap(), 2);
+    assert_eq!(copy.catalog_schema_revision().unwrap(), 3);
     assert_eq!(
         copy.list_metadata(infrastore_core::ListFilter::new())
             .unwrap()
@@ -333,16 +333,16 @@ fn a_migrated_store_reopens_without_migrating_again() {
     let (_dir, path) = stale_store();
     {
         let store = Store::open(path.as_path(), false).unwrap();
-        assert_eq!(store.catalog_schema_revision().unwrap(), 2);
+        assert_eq!(store.catalog_schema_revision().unwrap(), 3);
     }
     // A second writable open finds nothing to do, and a read-only open — which
     // could not migrate even if there were — now succeeds.
     {
         let store = Store::open(path.as_path(), false).unwrap();
-        assert_eq!(store.catalog_schema_revision().unwrap(), 2);
+        assert_eq!(store.catalog_schema_revision().unwrap(), 3);
     }
     let store = Store::open(path.as_path(), true).unwrap();
-    assert_eq!(store.catalog_schema_revision().unwrap(), 2);
+    assert_eq!(store.catalog_schema_revision().unwrap(), 3);
     assert_eq!(
         store
             .list_metadata(infrastore_core::ListFilter::new())
@@ -372,7 +372,7 @@ fn a_catalog_from_a_newer_build_is_refused_rather_than_downgraded() {
     for read_only in [false, true] {
         match Store::open(path.as_path(), read_only) {
             Err(TimeSeriesError::CatalogTooNew { found, expected }) => {
-                assert_eq!((found, expected), (99, 2));
+                assert_eq!((found, expected), (99, 3));
             }
             Err(other) => panic!("expected CatalogTooNew (read_only={read_only}), got {other:?}"),
             Ok(_) => {

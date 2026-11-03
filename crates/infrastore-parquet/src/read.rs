@@ -645,6 +645,7 @@ fn read_series_rows(
     let quantity_kind = text_column(batch, schema::QUANTITY_KIND)?;
     let unit_system = text_column(batch, schema::UNIT_SYSTEM)?;
     let component_field = text_column(batch, schema::COMPONENT_FIELD)?;
+    let per_unit_of = text_column(batch, schema::PER_UNIT_OF)?;
     let application_data = text_column(batch, schema::APPLICATION_DATA)?;
 
     (0..batch.num_rows())
@@ -671,6 +672,7 @@ fn read_series_rows(
                 quantity_kind: cell(&quantity_kind, i),
                 unit_system: cell(&unit_system, i),
                 component_field: cell(&component_field, i),
+                per_unit_of: cell(&per_unit_of, i),
                 application_data: cell(&application_data, i),
             })
         })

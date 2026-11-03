@@ -141,6 +141,7 @@ class TimeSeriesMetadata(TypedDict):
     unit_system: UnitSystemName | None
     time_reference: str | None
     component_field: str | None
+    per_unit_of: str | None
     application_data: str | None
 
 class TimeSeriesAddItem(TypedDict):
@@ -154,10 +155,10 @@ class TimeSeriesAddItem(TypedDict):
 
 # ---- Time-series value types ----------------------------------------------
 #
-# Every value type carries the same seven descriptive attributes as keyword-only
+# Every value type carries the same eight descriptive attributes as keyword-only
 # constructor arguments and read-only properties: `application_data`,
-# `element_type`, `units`, `quantity_kind`, `unit_system`, `component_field`, and
-# `time_reference`. They describe the values without addressing them, so none is
+# `element_type`, `units`, `quantity_kind`, `unit_system`, `component_field`,
+# `per_unit_of`, and `time_reference`. They describe the values without addressing them, so none is
 # part of a series' identity, and `Store.add_time_series` does not take them --
 # they belong to the object, which is what makes a read-then-re-add lossless.
 
@@ -176,6 +177,7 @@ class SingleTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,  # "natural_units" | "component_base"
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
     @classmethod
@@ -191,6 +193,7 @@ class SingleTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> SingleTimeSeries: ...
     @classmethod
@@ -207,6 +210,7 @@ class SingleTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> SingleTimeSeries: ...
     @classmethod
@@ -222,6 +226,7 @@ class SingleTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> SingleTimeSeries: ...
     def decoded_values(self) -> list[Any] | None: ...
@@ -250,6 +255,8 @@ class SingleTimeSeries:
     @property
     def component_field(self) -> str | None: ...
     @property
+    def per_unit_of(self) -> str | None: ...
+    @property
     def timestamps(self) -> list[datetime]: ...
     def to_arrow(self) -> ArrowTable: ...
     def __eq__(self, value: object) -> bool: ...
@@ -269,6 +276,7 @@ class NonSequentialTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
     @classmethod
@@ -284,6 +292,7 @@ class NonSequentialTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> NonSequentialTimeSeries: ...
     def decoded_values(self) -> list[Any] | None: ...
@@ -309,6 +318,8 @@ class NonSequentialTimeSeries:
     def unit_system(self) -> str | None: ...
     @property
     def component_field(self) -> str | None: ...
+    @property
+    def per_unit_of(self) -> str | None: ...
     @classmethod
     def from_arrow(
         cls,
@@ -321,6 +332,7 @@ class NonSequentialTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> NonSequentialTimeSeries: ...
     def to_arrow(self) -> ArrowTable: ...
@@ -341,6 +353,7 @@ class PersistentTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
     @classmethod
@@ -356,6 +369,7 @@ class PersistentTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> PersistentTimeSeries: ...
     def decoded_values(self) -> list[Any] | None: ...
@@ -381,6 +395,8 @@ class PersistentTimeSeries:
     def unit_system(self) -> str | None: ...
     @property
     def component_field(self) -> str | None: ...
+    @property
+    def per_unit_of(self) -> str | None: ...
     def value_at(self, at: datetime) -> Any: ...
     def index_at(self, at: datetime) -> int: ...
     def breakpoint_at(self, at: datetime) -> datetime: ...
@@ -396,6 +412,7 @@ class PersistentTimeSeries:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> PersistentTimeSeries: ...
     def to_arrow(self) -> ArrowTable: ...
@@ -420,6 +437,7 @@ class Deterministic:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
     @classmethod
@@ -439,6 +457,7 @@ class Deterministic:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> Deterministic: ...
     def decoded_values(self) -> list[Any] | None: ...
@@ -470,6 +489,8 @@ class Deterministic:
     def unit_system(self) -> str | None: ...
     @property
     def component_field(self) -> str | None: ...
+    @property
+    def per_unit_of(self) -> str | None: ...
     def to_arrow_windows(self) -> dict[datetime, ArrowTable]: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
@@ -493,6 +514,7 @@ class Probabilistic:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
     @classmethod
@@ -513,6 +535,7 @@ class Probabilistic:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> Probabilistic: ...
     def decoded_values(self) -> list[Any] | None: ...
@@ -546,6 +569,8 @@ class Probabilistic:
     def unit_system(self) -> str | None: ...
     @property
     def component_field(self) -> str | None: ...
+    @property
+    def per_unit_of(self) -> str | None: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 
@@ -567,6 +592,7 @@ class Scenarios:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> None: ...
     @classmethod
@@ -587,6 +613,7 @@ class Scenarios:
         quantity_kind: str | None = None,
         unit_system: str | None = None,
         component_field: str | None = None,
+        per_unit_of: str | None = None,
         time_reference: str | None = None,
     ) -> Scenarios: ...
     def decoded_values(self) -> list[Any] | None: ...
@@ -620,6 +647,8 @@ class Scenarios:
     def unit_system(self) -> str | None: ...
     @property
     def component_field(self) -> str | None: ...
+    @property
+    def per_unit_of(self) -> str | None: ...
     def __eq__(self, value: object) -> bool: ...
     def __len__(self) -> int: ...
 

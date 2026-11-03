@@ -240,6 +240,7 @@ pub fn required_columns(ts_type: TimeSeriesType, role: &str) -> Vec<&'static str
         schema::QUANTITY_KIND,
         schema::UNIT_SYSTEM,
         schema::COMPONENT_FIELD,
+        schema::PER_UNIT_OF,
         schema::APPLICATION_DATA,
     ]);
     names
@@ -279,6 +280,7 @@ pub fn all_columns(role: &str) -> Vec<&'static str> {
         schema::QUANTITY_KIND,
         schema::UNIT_SYSTEM,
         schema::COMPONENT_FIELD,
+        schema::PER_UNIT_OF,
         schema::APPLICATION_DATA,
     ]
 }

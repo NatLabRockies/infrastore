@@ -1268,9 +1268,9 @@ impl MetadataStore {
               initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_hash, units, quantity_kind, unit_system, time_reference,
               component_field, percentiles_json, element_type, element_shape,
-              application_data, features_hash)
+              application_data, features_hash, per_unit_of)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         )?;
         let result = insert_stmt
             .execute(params![
@@ -1300,6 +1300,7 @@ impl MetadataStore {
                 element_shape_json,
                 meta.application_data,
                 f_hash.as_slice(),
+                meta.per_unit_of,
             ])
             .map(|_| tx.last_insert_rowid());
 
@@ -1695,7 +1696,7 @@ impl MetadataStore {
                     data_hash, initial_timestamp, resolution, length, horizon,
                     interval, count, timestamps_hash, units, quantity_kind, unit_system,
                     time_reference, component_field, percentiles_json, element_type,
-                    element_shape, application_data, id
+                    element_shape, application_data, id, per_unit_of
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -3207,6 +3208,7 @@ struct MetaRow {
     unit_system: Option<UnitSystem>,
     time_reference: Option<TimeReference>,
     component_field: Option<String>,
+    per_unit_of: Option<String>,
     percentiles: Option<Vec<f64>>,
     element_type: crate::types::element_type::ElementType,
     element_shape: Vec<usize>,
@@ -3239,6 +3241,7 @@ impl MetaRow {
             unit_system: self.unit_system,
             time_reference: self.time_reference,
             component_field: self.component_field,
+            per_unit_of: self.per_unit_of,
             percentiles: self.percentiles,
             element_type: self.element_type,
             element_shape: self.element_shape,
@@ -3278,6 +3281,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let element_shape_json: Option<String> = row.get(21)?;
     let application_data: Option<String> = row.get(22)?;
     let id: i64 = row.get(23)?;
+    let per_unit_of: Option<String> = row.get(24)?;
 
     // An unrecognized basis is an error, not a silent `None`. The column has no
     // CHECK precisely so a future basis can be added without a format bump,
@@ -3452,6 +3456,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             unit_system,
             time_reference,
             component_field,
+            per_unit_of,
             percentiles,
             element_type,
             element_shape,

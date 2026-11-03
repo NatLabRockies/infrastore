@@ -30,6 +30,7 @@ fn spelled(data: TimeSeriesData, reference: Option<TimeReference>) -> TimeSeries
         unit_system: None,
         time_reference: reference,
         component_field: Some("max_active_power".to_string()),
+        per_unit_of: Some("base_power".to_string()),
         application_data: None,
     };
     data.set_descriptors(descriptors);
@@ -1015,6 +1016,7 @@ fn a_whole_store_round_trips_row_for_row() {
     described.quantity_kind = Some("ActivePower".into());
     described.unit_system = Some(infrastore_core::UnitSystem::ComponentBase);
     described.component_field = Some("max_active_power".into());
+    described.per_unit_of = Some("base_power".into());
     described.application_data = Some(r#"{"k":1}"#.into());
     described.time_reference = Some(TimeReference::Zone("America/Denver".into()));
     let mut features = Features::new();

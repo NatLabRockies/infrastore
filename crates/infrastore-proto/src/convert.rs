@@ -152,6 +152,7 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
             .as_ref()
             .map(TimeReference::as_storage_string),
         component_field: m.component_field.clone(),
+        per_unit_of: m.per_unit_of.clone(),
         element_type: m.element_type.to_string(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
         application_data: m.application_data.clone(),
@@ -216,6 +217,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
             .transpose()?,
         time_reference: parse_time_reference(m.time_reference.as_deref())?,
         component_field: m.component_field,
+        per_unit_of: m.per_unit_of,
         percentiles: if m.percentiles.is_empty() {
             None
         } else {
@@ -260,6 +262,7 @@ pub fn time_series_data_to_read_resp(data: &TimeSeriesData) -> pb::ReadByIdResp 
         unit_system: data.unit_system().map(|u| u.as_str().to_owned()),
         time_reference: data.time_reference().map(TimeReference::as_storage_string),
         component_field: data.component_field().map(str::to_owned),
+        per_unit_of: data.per_unit_of().map(str::to_owned),
         name: data.name().to_owned(),
         ..Default::default()
     };
@@ -358,6 +361,7 @@ pub fn read_resp_to_time_series_data(
     let units = resp.units.take();
     let quantity_kind = resp.quantity_kind.take();
     let component_field = resp.component_field.take();
+    let per_unit_of = resp.per_unit_of.take();
     let time_reference = parse_time_reference(resp.time_reference.take().as_deref())?;
     let unit_system = resp
         .unit_system
@@ -392,6 +396,7 @@ pub fn read_resp_to_time_series_data(
                 unit_system: None,
                 time_reference: None,
                 component_field: None,
+                per_unit_of: None,
                 application_data: None,
             }))
         }
@@ -483,6 +488,7 @@ pub fn read_resp_to_time_series_data(
         unit_system,
         time_reference,
         component_field,
+        per_unit_of,
         // Not on the wire; the constructors leave it unset too.
         application_data: None,
     });
@@ -661,6 +667,7 @@ mod tests {
             quantity_kind: None,
             unit_system: None,
             component_field: None,
+            per_unit_of: None,
             time_reference: None,
             element_type: "f64".into(),
             element_shape: Vec::new(),
@@ -996,6 +1003,7 @@ mod convert_coverage_tests {
                 quantity_kind: None,
                 unit_system: None,
                 component_field: None,
+                per_unit_of: None,
                 time_reference: None,
                 percentiles: None,
                 element_type: ElementType::Scalar(dtype),
@@ -1145,6 +1153,7 @@ mod convert_coverage_tests {
             quantity_kind: None,
             unit_system: None,
             component_field: None,
+            per_unit_of: None,
             time_reference: None,
             percentiles: None,
             element_type: ElementType::default(),
@@ -1190,6 +1199,7 @@ mod convert_coverage_tests {
             quantity_kind: None,
             unit_system: None,
             component_field: None,
+            per_unit_of: None,
             time_reference: None,
             percentiles: None,
             element_type: ElementType::default(),
@@ -1368,6 +1378,7 @@ mod convert_coverage_tests {
             quantity_kind: None,
             unit_system: None,
             component_field: Some("max_active_power".into()),
+            per_unit_of: Some("base_power".into()),
             time_reference: None,
             percentiles: None,
             element_type: ElementType::default(),
@@ -1388,6 +1399,7 @@ mod convert_coverage_tests {
             Some("QuadraticFunctionData")
         );
         assert_eq!(pb.component_field.as_deref(), Some("max_active_power"));
+        assert_eq!(pb.per_unit_of.as_deref(), Some("base_power"));
         // Struct equality, so every descriptor -- `component_field` included --
         // has to survive both directions, not just the ones named above.
         assert_eq!(metadata_from_pb(pb).unwrap(), meta);
@@ -1541,6 +1553,7 @@ mod convert_coverage_tests {
             quantity_kind: None,
             unit_system: None,
             component_field: None,
+            per_unit_of: None,
             time_reference: None,
             percentiles: None,
             element_type: ElementType::default(),

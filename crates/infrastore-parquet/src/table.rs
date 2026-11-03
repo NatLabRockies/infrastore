@@ -146,6 +146,7 @@ impl PartitionSchema {
             schema::QUANTITY_KIND,
             schema::UNIT_SYSTEM,
             schema::COMPONENT_FIELD,
+            schema::PER_UNIT_OF,
             schema::APPLICATION_DATA,
         ] {
             series.push(Field::new(name, DataType::Utf8, false));

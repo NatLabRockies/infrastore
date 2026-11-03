@@ -89,6 +89,9 @@ pub struct Descriptor {
     /// The field on the owning component whose value these values are the
     /// time-varying form of (e.g. `"max_active_power"`). Free-form.
     pub component_field: Option<String>,
+    /// The field on the owning component the values are a fraction of when
+    /// `unit_system` is `component_base` (e.g. `"base_power"`). Free-form.
+    pub per_unit_of: Option<String>,
     /// Opaque, package-owned payload stored verbatim on the metadata row.
     pub application_data: Option<String>,
     /// CSV data path, relative to the descriptor file. May be overridden by `--csv`.
@@ -553,6 +556,7 @@ impl Descriptor {
             // sees it. See `Descriptor::time_reference`.
             time_reference: None,
             component_field: self.component_field.clone(),
+            per_unit_of: self.per_unit_of.clone(),
             application_data: self.application_data.clone(),
         })
     }

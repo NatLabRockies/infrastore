@@ -103,8 +103,13 @@ fn the_reserved_feature_names_match_the_schema() {
     names.sort();
     names.dedup();
 
+    // ponytail: reserved here ahead of the schema (the harmless direction, per
+    // the message below); drop this once SiennaSchemas reserves it and
+    // `power-openapi-models` is released with it.
+    let pending_upstream = ["per_unit_of"];
     let schema_allows: Vec<&String> = names
         .iter()
+        .filter(|n| !pending_upstream.contains(&n.as_str()))
         .filter(|n| {
             features
                 .violations(&serde_json::json!({ n.as_str(): 1 }))
