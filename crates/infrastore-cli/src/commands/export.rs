@@ -369,6 +369,7 @@ fn render_json(
         ),
     );
     obj.insert("component_field".into(), json!(meta.component_field));
+    obj.insert("per_unit_of".into(), json!(meta.per_unit_of));
     obj.insert("application_data".into(), json!(meta.application_data));
     obj.insert("element_type".into(), json!(meta.element_type.to_string()));
     // Features are part of identity: an export that drops them cannot describe

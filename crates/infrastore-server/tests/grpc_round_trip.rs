@@ -641,7 +641,8 @@ async fn a_value_read_carries_the_unit_descriptors() {
         .with_units("MW")
         .with_quantity_kind("ActivePower")
         .with_unit_system(infrastore_core::UnitSystem::ComponentBase)
-        .with_component_field("max_active_power");
+        .with_component_field("max_active_power")
+        .with_per_unit_of("base_power");
     store
         .add_time_series(
             42,
@@ -684,6 +685,9 @@ async fn a_value_read_carries_the_unit_descriptors() {
         Some(infrastore_core::UnitSystem::ComponentBase)
     );
     assert_eq!(remote.component_field(), Some("max_active_power"));
+    assert_eq!(remote.per_unit_of(), Some("base_power"));
+    let remote_meta = client.get_metadata_by_id(ids[0]).await.unwrap();
+    assert_eq!(remote_meta.per_unit_of.as_deref(), Some("base_power"));
 
     // Byte-for-byte the same descriptors the local read reports.
     assert_eq!(remote.units(), local_described.units());
@@ -698,6 +702,7 @@ async fn a_value_read_carries_the_unit_descriptors() {
     assert_eq!(bare.quantity_kind(), None);
     assert_eq!(bare.unit_system(), None);
     assert_eq!(bare.component_field(), None);
+    assert_eq!(bare.per_unit_of(), None);
 }
 
 #[tokio::test]

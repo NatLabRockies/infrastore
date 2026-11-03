@@ -59,7 +59,7 @@ use crate::error::{Result, TimeSeriesError};
 /// Monotonic revision of the SQLite catalog shape. Bumped by any change the
 /// idempotent DDL cannot make to an existing catalog: a new column, a changed
 /// CHECK, a rebuilt table, a backfill. See the module docs.
-pub const CATALOG_SCHEMA_REVISION: i64 = 2;
+pub const CATALOG_SCHEMA_REVISION: i64 = 3;
 
 /// The revision an unstamped catalog is taken to be at — any pre-ladder build's
 /// shape, not one particular release's. See the module docs for why this needs
@@ -78,12 +78,19 @@ struct Migration {
 }
 
 /// Ordered, append-only. Never edit a landed entry; add a new one.
-static MIGRATIONS: &[Migration] = &[Migration {
-    revision: 2,
-    description: "widen the time_series_associations time_series_type CHECK from \
-                  BETWEEN 0 AND 5 to >= 0",
-    apply: relax_time_series_type_check,
-}];
+static MIGRATIONS: &[Migration] = &[
+    Migration {
+        revision: 2,
+        description: "widen the time_series_associations time_series_type CHECK from \
+                      BETWEEN 0 AND 5 to >= 0",
+        apply: relax_time_series_type_check,
+    },
+    Migration {
+        revision: 3,
+        description: "add the time_series_associations per_unit_of column",
+        apply: add_per_unit_of,
+    },
+];
 
 /// The catalog shape revision 2 produces for `time_series_associations`.
 ///
@@ -217,6 +224,17 @@ fn relax_time_series_type_check(tx: &Transaction<'_>) -> Result<()> {
             [seq],
         )?;
     }
+    Ok(())
+}
+
+/// Revision 3: add the nullable `per_unit_of` descriptor column.
+///
+/// A plain `ADD COLUMN`, not a rebuild: SQLite appends a nullable column in
+/// place, every existing row reads it as NULL (unspecified), and no CHECK or
+/// index changes. So the `time_series_readable` view need not be dropped first
+/// either; the DDL pass that follows re-creates it naming the new column.
+fn add_per_unit_of(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch("ALTER TABLE time_series_associations ADD COLUMN per_unit_of TEXT;")?;
     Ok(())
 }
 
@@ -481,7 +499,7 @@ CREATE TABLE time_series_associations (
             .expect("a revision-1 catalog keeps a mark");
         assert_eq!(mark_before, 2);
 
-        assert_eq!(apply(&conn).expect("apply"), 1);
+        assert_eq!(apply(&conn).expect("apply"), 2);
 
         let sql: String = conn
             .query_row(
@@ -521,7 +539,7 @@ CREATE TABLE time_series_associations (
     #[test]
     fn the_rebuild_survives_the_view_and_indexes_that_name_the_table() {
         let conn = revision_1_catalog();
-        assert_eq!(apply(&conn).expect("apply"), 1);
+        assert_eq!(apply(&conn).expect("apply"), 2);
         // The DDL pass after the ladder puts both back, with current
         // definitions rather than the fixture's stand-ins.
         let objects: Vec<String> = conn
@@ -542,6 +560,46 @@ CREATE TABLE time_series_associations (
             )
             .expect("view sql");
         assert!(sql.contains("Scenarios"), "{sql}");
+    }
+
+    /// Revision 3 adds `per_unit_of` to every existing row as NULL, and the
+    /// view the DDL re-creates afterwards names it.
+    #[test]
+    fn revision_3_adds_per_unit_of_as_null() {
+        let conn = revision_1_catalog();
+        apply(&conn).expect("apply");
+        let per_unit_of: Option<String> = conn
+            .query_row(
+                "SELECT per_unit_of FROM time_series_associations WHERE owner_id = 7",
+                [],
+                |r| r.get(0),
+            )
+            .expect("the column exists on the surviving row");
+        assert_eq!(per_unit_of, None);
+        conn.query_row("SELECT per_unit_of FROM time_series_readable", [], |_| {
+            Ok(())
+        })
+        .expect("the view names the column");
+    }
+
+    /// A migrated catalog and a fresh one carry the same columns. Order may
+    /// differ (`ADD COLUMN` appends), which is cosmetic: every statement names
+    /// its columns.
+    #[test]
+    fn a_migrated_catalog_has_the_fresh_columns() {
+        let columns = |conn: &Connection| -> std::collections::BTreeSet<String> {
+            conn.prepare("SELECT name FROM pragma_table_info('time_series_associations')")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let migrated = revision_1_catalog();
+        apply(&migrated).expect("apply");
+        let fresh = Connection::open_in_memory().expect("in-memory database");
+        apply(&fresh).expect("apply");
+        assert_eq!(columns(&migrated), columns(&fresh));
     }
 
     #[test]
@@ -580,7 +638,7 @@ CREATE TABLE time_series_associations (
             "revision 1 must refuse a code-6 row"
         );
 
-        assert_eq!(apply(&conn).expect("apply"), 1);
+        assert_eq!(apply(&conn).expect("apply"), 2);
         assert_eq!(
             read_revision(&conn).expect("revision"),
             CATALOG_SCHEMA_REVISION
@@ -683,7 +741,7 @@ CREATE TABLE time_series_associations (
     #[test]
     fn a_second_apply_runs_no_migration() {
         let conn = revision_1_catalog();
-        assert_eq!(apply(&conn).expect("first apply"), 1);
+        assert_eq!(apply(&conn).expect("first apply"), 2);
         assert_eq!(apply(&conn).expect("second apply"), 0);
         assert_eq!(
             read_revision(&conn).expect("revision"),
@@ -750,7 +808,7 @@ CREATE TABLE time_series_associations (
         )
         .expect("seed row");
 
-        assert_eq!(apply(&conn).expect("apply"), 1);
+        assert_eq!(apply(&conn).expect("apply"), 2);
         assert_eq!(
             read_revision(&conn).expect("revision"),
             CATALOG_SCHEMA_REVISION

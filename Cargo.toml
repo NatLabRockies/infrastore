@@ -60,3 +60,7 @@ cbindgen = "0.29"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Temporary: the per_unit_of models, until power-openapi-models is released with them.
+[patch.crates-io]
+power-openapi-models = { git = "https://github.com/Sienna-Platform/power-openapi-models", branch = "lk/per-unit-of" }

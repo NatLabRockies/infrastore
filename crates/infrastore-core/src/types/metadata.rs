@@ -302,6 +302,7 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "owner_category",
     "owner_id",
     "owner_type",
+    "per_unit_of",
     "percentiles",
     "quantity_kind",
     "resolution",
@@ -441,6 +442,14 @@ pub struct TimeSeriesMetadata {
     /// attribute ([`OwnerCategory::SupplementalAttribute`]), in which case this
     /// names a field on that attribute.
     pub component_field: Option<String>,
+    /// The field on the owning component that the values are a fraction of
+    /// when [`Self::unit_system`] is [`UnitSystem::ComponentBase`] (e.g.
+    /// `"base_power"`, `"storage_capacity"`), or `None`.
+    ///
+    /// Free-form and never interpreted by the store, which also does not
+    /// enforce any relation to [`Self::unit_system`]. Descriptive, so it sits
+    /// outside a series' identity and outside both content hashes.
+    pub per_unit_of: Option<String>,
     /// Percentiles for a `Probabilistic` forecast; `None` for other types.
     pub percentiles: Option<Vec<f64>>,
 
@@ -579,6 +588,7 @@ mod tests {
             unit_system: None,
             time_reference: None,
             component_field: None,
+            per_unit_of: None,
             percentiles: None,
             element_type: ElementType::Scalar(single.data.dtype),
             element_shape: vec![],

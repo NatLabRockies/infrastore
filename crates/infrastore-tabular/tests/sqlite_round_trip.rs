@@ -30,6 +30,7 @@ fn spelled(data: TimeSeriesData, reference: Option<TimeReference>) -> TimeSeries
         unit_system: None,
         time_reference: reference,
         component_field: Some("max_active_power".to_string()),
+        per_unit_of: Some("base_power".to_string()),
         application_data: None,
     };
     data.set_descriptors(descriptors);
@@ -598,6 +599,38 @@ fn an_edited_value_fails_the_checksum_unless_waived() {
 }
 
 #[test]
+fn an_export_from_before_per_unit_of_imports_without_it() {
+    // SQLite exports carry no format marker, and ones written before the
+    // column existed lack it; it reads as unset rather than refusing the file.
+    let TimeSeriesData::SingleTimeSeries(mut inner) = hourly("load", &[1.0, 2.0]) else {
+        unreachable!()
+    };
+    inner.unit_system = Some(infrastore_core::UnitSystem::ComponentBase);
+    inner.per_unit_of = Some("base_power".into());
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("out.db");
+    write_sqlite(
+        &db,
+        &stored(vec![TimeSeriesData::SingleTimeSeries(inner)]),
+        "",
+    )
+    .expect("export");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "DROP VIEW all_values; DROP VIEW all_series; DROP VIEW all_arrays; \
+             ALTER TABLE SingleTimeSeries_f64_utc_series DROP COLUMN per_unit_of",
+        )
+        .unwrap();
+    let back = import(&db, "", &ImportOptions::default());
+    let TimeSeriesData::SingleTimeSeries(s) = &back[0].data else {
+        panic!("expected a SingleTimeSeries");
+    };
+    assert_eq!(s.per_unit_of, None);
+    assert_eq!(s.data.to_f64_vec().unwrap(), vec![1.0, 2.0]);
+}
+
+#[test]
 fn a_dangling_series_row_is_refused() {
     let series = stored(vec![hourly("load", &[1.0])]);
     let dir = tempfile::tempdir().unwrap();
@@ -1015,6 +1048,7 @@ fn a_whole_store_round_trips_row_for_row() {
     described.quantity_kind = Some("ActivePower".into());
     described.unit_system = Some(infrastore_core::UnitSystem::ComponentBase);
     described.component_field = Some("max_active_power".into());
+    described.per_unit_of = Some("base_power".into());
     described.application_data = Some(r#"{"k":1}"#.into());
     described.time_reference = Some(TimeReference::Zone("America/Denver".into()));
     let mut features = Features::new();

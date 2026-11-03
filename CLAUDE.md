@@ -240,9 +240,11 @@ analysis cannot, and is the only record of what per-unit values measure) and `un
 natural units). A series also carries `component_field` (free-form; names the field on the owning
 component whose value these values are the time-varying form of, e.g. `max_active_power` — it
 records what the values are _for_, where `name` only says which series they are; it is the one
-descriptor that is also a filter, in every binding). All three are descriptive, so they sit outside
-a series' `KeyIdentity` and outside both content hashes, alongside `application_data` — the opaque
-package-owned payload formerly spelled `ext`.
+descriptor that is also a filter, in every binding) and `per_unit_of` (free-form; names the field on
+the owning component that the values are a fraction of when `unit_system` is `component_base`, e.g.
+`base_power` — never interpreted, and nothing ties it to `unit_system`; not a filter). All of these
+are descriptive, so they sit outside a series' `KeyIdentity` and outside both content hashes,
+alongside `application_data` — the opaque package-owned payload formerly spelled `ext`.
 
 Every series also carries a **`time_reference`** (`TimeReference`: `Utc` | `FixedOffset(minutes)` |
 `Zone(iana_name)` | `Zoneless`; `None` means unspecified), recording how its timestamps were

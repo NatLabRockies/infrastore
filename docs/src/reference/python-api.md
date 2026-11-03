@@ -597,6 +597,7 @@ SingleTimeSeries(
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 ```
@@ -668,6 +669,7 @@ none can be filtered on except `component_field`.
 | `quantity_kind`    | What kind of physical quantity they measure, e.g. `"ActivePower"`. QUDT `QuantityKind` local names are recommended.        |
 | `unit_system`      | `"natural_units"` or `"component_base"`. Omitted leaves the basis **unspecified**, which is not the same as natural units. |
 | `component_field`  | The owning component's field these values are the time-varying form of, e.g. `"max_active_power"`. The one filterable one. |
+| `per_unit_of`      | The owning component's field `component_base` values are a fraction of, e.g. `"base_power"`. Never interpreted.            |
 | `application_data` | Opaque, package-owned payload (typically JSON) stored verbatim. End users are not expected to set it.                      |
 | `element_type`     | What the array's elements mean, e.g. `"tuple(3,f64)"`. Omit for plain numbers; the property then reports the dtype.        |
 | `time_reference`   | Overrides the spelling otherwise inferred from the timestamps. See [Time references](#time-references).                    |
@@ -807,6 +809,7 @@ NonSequentialTimeSeries(
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 ```
@@ -831,6 +834,7 @@ PersistentTimeSeries(
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 ```

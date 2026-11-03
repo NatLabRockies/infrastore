@@ -20,7 +20,7 @@
 //! required format — infrastore fills it with [`crate::hash::hash_hex`] of the
 //! row's own `data_hash`, never a caller-supplied value), `element_type`,
 //! `element_shape` — plus optional descriptive fields (`units`,
-//! `quantity_kind`, `unit_system`, `component_field`, `application_data`) and
+//! `quantity_kind`, `unit_system`, `component_field`, `per_unit_of`, `application_data`) and
 //! the optional `data_hash` (the same hex string as `uri`, exported because
 //! the schema also carries it as its own field) that are *omitted* from the
 //! JSON object when unset, never written as `null`. `unit_system` maps the
@@ -194,6 +194,7 @@ struct Shared {
     unit_system: Option<wire::UnitSystem>,
     time_reference: Option<String>,
     component_field: Option<String>,
+    per_unit_of: Option<String>,
     application_data: Option<String>,
 }
 
@@ -219,6 +220,7 @@ macro_rules! wire_row {
             unit_system: s.unit_system,
             time_reference: s.time_reference,
             component_field: s.component_field,
+            per_unit_of: s.per_unit_of,
             application_data: s.application_data,
             $($field: $value,)*
         })
@@ -245,6 +247,7 @@ macro_rules! shared_of {
             unit_system: $row.unit_system,
             time_reference: $row.time_reference,
             component_field: $row.component_field,
+            per_unit_of: $row.per_unit_of,
             application_data: $row.application_data,
         }
     };
@@ -447,6 +450,7 @@ fn shared_wire(meta: &TimeSeriesMetadata) -> Result<Shared> {
             .as_ref()
             .map(TimeReference::as_storage_string),
         component_field: meta.component_field.clone(),
+        per_unit_of: meta.per_unit_of.clone(),
         application_data: meta.application_data.clone(),
     })
 }
@@ -847,6 +851,7 @@ fn ts_row_from_wire(row: TimeSeriesAssociation) -> Result<DecodedTsRow> {
             unit_system: shared.unit_system.map(unit_system_from_wire),
             time_reference,
             component_field: shared.component_field,
+            per_unit_of: shared.per_unit_of,
             percentiles: timing.percentiles,
             element_type,
             element_shape,

@@ -2060,6 +2060,7 @@ fn series_descriptors_round_trip_on_the_struct() {
                         .with_quantity_kind("ActivePower")
                         .with_unit_system(UnitSystem::ComponentBase)
                         .with_component_field("max_active_power")
+                        .with_per_unit_of("base_power")
                         .with_application_data("Profile"),
                 ))
                 .unwrap();
@@ -2092,6 +2093,7 @@ fn series_descriptors_round_trip_on_the_struct() {
                 Some("max_active_power"),
                 "{backend}"
             );
+            assert_eq!(meta.per_unit_of.as_deref(), Some("base_power"), "{backend}");
             assert_eq!(
                 meta.application_data.as_deref(),
                 Some("Profile"),
@@ -2114,6 +2116,7 @@ fn series_descriptors_round_trip_on_the_struct() {
                 Some("max_active_power"),
                 "{backend}"
             );
+            assert_eq!(data.per_unit_of(), Some("base_power"), "{backend}");
             assert_eq!(data.application_data(), Some("Profile"), "{backend}");
             assert_eq!(data.element_type(), meta.element_type, "{backend}");
 
@@ -2134,6 +2137,7 @@ fn series_descriptors_round_trip_on_the_struct() {
                 Some("max_active_power"),
                 "{backend}"
             );
+            assert_eq!(sliced.per_unit_of(), Some("base_power"), "{backend}");
             assert_eq!(sliced.application_data(), Some("Profile"), "{backend}");
 
             // A bulk read takes the packed fast path, which builds its own
@@ -2154,6 +2158,7 @@ fn series_descriptors_round_trip_on_the_struct() {
                 Some("max_active_power"),
                 "{backend}"
             );
+            assert_eq!(bulk[0].per_unit_of(), Some("base_power"), "{backend}");
             assert_eq!(bulk[0].application_data(), Some("Profile"), "{backend}");
 
             // Unset stays unset -- the store never invents a label. In
@@ -2168,6 +2173,7 @@ fn series_descriptors_round_trip_on_the_struct() {
             assert_eq!(plain.quantity_kind(), None, "{backend}");
             assert_eq!(plain.unit_system(), None, "{backend}");
             assert_eq!(plain.component_field(), None, "{backend}");
+            assert_eq!(plain.per_unit_of(), None, "{backend}");
             assert_eq!(plain.application_data(), None, "{backend}");
             assert_eq!(
                 store

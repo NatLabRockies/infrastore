@@ -209,15 +209,15 @@ value, so even a store with a million series is a file a reader loads whole.
 
 All three files carry it.
 
-| Key                      | Value                                                                                                 |
-| ------------------------ | ----------------------------------------------------------------------------------------------------- |
-| `infrastore.format`      | `normalized_v2`. Read first, so another format is refused by version rather than by a missing column. |
-| `infrastore.role`        | `values`, `series` or `arrays`.                                                                       |
-| `time_series_type`       | The partition's type.                                                                                 |
-| `element_type`           | The partition's element type.                                                                         |
-| `element_shape`          | JSON list; a composite's is the width the partition settled on.                                       |
-| `time_reference`         | The partition's spelling, `unspecified` included.                                                     |
-| `rows_contiguous_by_key` | `true`.                                                                                               |
+| Key                      | Value                                                                                                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `infrastore.format`      | `normalized_v3`. Read first, so another format is refused by version rather than by a missing column. `normalized_v2` files, which lack the series file's `per_unit_of`, are still read, with it unset. |
+| `infrastore.role`        | `values`, `series` or `arrays`.                                                                                                                                                                         |
+| `time_series_type`       | The partition's type.                                                                                                                                                                                   |
+| `element_type`           | The partition's element type.                                                                                                                                                                           |
+| `element_shape`          | JSON list; a composite's is the width the partition settled on.                                                                                                                                         |
+| `time_reference`         | The partition's spelling, `unspecified` included.                                                                                                                                                       |
+| `rows_contiguous_by_key` | `true`.                                                                                                                                                                                                 |
 
 The three partition keys are here **exactly**, because the filename is one-way.
 
