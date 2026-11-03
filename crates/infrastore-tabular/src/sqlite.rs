@@ -1031,7 +1031,7 @@ fn check_columns(
     let columns = table_columns(conn, table)?;
     let missing: Vec<&str> = layout::required_columns(ts_type, role)
         .into_iter()
-        .filter(|c| !columns.contains(*c))
+        .filter(|c| !columns.contains(*c) && !layout::ADDED_COLUMNS.contains(c))
         .collect();
     if missing.is_empty() {
         return Ok(columns);

@@ -283,11 +283,12 @@ fn read_foreign_with(
 fn check_format(footer: &BTreeMap<String, String>, path: &Path) -> Result<()> {
     match footer.get(table::FORMAT) {
         None => Ok(()),
-        Some(v) if v == table::FORMAT_V2 => Ok(()),
+        Some(v) if v == table::FORMAT_V3 || v == table::FORMAT_V2 => Ok(()),
         Some(other) => Err(unsupported(format!(
-            "{} is {other}, which this build does not read (it reads {}); export it again \
-             with a build that matches",
+            "{} is {other}, which this build does not read (it reads {} and {}); export it \
+             again with a build that matches",
             path.display(),
+            table::FORMAT_V3,
             table::FORMAT_V2
         ))),
     }
@@ -384,9 +385,15 @@ fn check_columns(
     path: &Path,
     role: &str,
 ) -> Result<()> {
-    if !footer.contains_key(table::FORMAT) {
+    let Some(format) = footer.get(table::FORMAT) else {
         return Ok(());
-    }
+    };
+    // A v2 file predates the v3 columns; they read as unset.
+    let excused: &[&str] = if format == table::FORMAT_V2 {
+        table::V3_COLUMNS
+    } else {
+        &[]
+    };
     let Some(declared) = footer
         .get(schema::TIME_SERIES_TYPE)
         .filter(|t| !t.is_empty())
@@ -401,7 +408,7 @@ fn check_columns(
     let ts_type = schema::decode_time_series_type(declared).map_err(unsupported)?;
     let missing: Vec<&str> = table::required_columns(ts_type, role)
         .into_iter()
-        .filter(|name| arrow.field_with_name(name).is_err())
+        .filter(|name| !excused.contains(name) && arrow.field_with_name(name).is_err())
         .collect();
     if !missing.is_empty() {
         return Err(unsupported(format!(

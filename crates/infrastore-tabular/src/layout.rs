@@ -246,6 +246,12 @@ pub fn required_columns(ts_type: TimeSeriesType, role: &str) -> Vec<&'static str
     names
 }
 
+/// Columns a reader tolerates missing, reading them as unset, because files
+/// written before they existed lack them. SQLite exports carry no format
+/// marker to tell those files apart, so the SQLite reader excuses these always;
+/// Parquet excuses them only in a file marked with the format before them.
+pub const ADDED_COLUMNS: &[&str] = &[schema::PER_UNIT_OF];
+
 /// Every column a table of this role carries in **any** partition, in schema
 /// order: the superset of [`required_columns`] over the types.
 ///

@@ -27,11 +27,20 @@ use crate::{Result, unsupported};
 /// Read before anything else, so a file from a later build is refused by
 /// version rather than by whichever column it happens to be missing.
 pub const FORMAT: &str = "infrastore.format";
-/// The value [`FORMAT`] carries.
+/// The value [`FORMAT`] carries on what this build writes.
 ///
-/// `normalized_v1` repeated the array key on every values and series row and
-/// had no arrays file; this build does not read it.
+/// `normalized_v3` added the series file's `per_unit_of` column. A v2 reader
+/// would accept a v3 file and drop that column without a word, so the marker
+/// moved: an older build refuses the file by version instead.
+pub const FORMAT_V3: &str = "normalized_v3";
+/// The previous [`FORMAT`] value, still read.
+///
+/// A v2 file is a v3 file without [`V3_COLUMNS`]; those read as unset. Before it,
+/// `normalized_v1` repeated the array key on every values and series row and had
+/// no arrays file; this build does not read it.
 pub const FORMAT_V2: &str = "normalized_v2";
+/// The columns `normalized_v3` added, which a v2 file is allowed to lack.
+pub const V3_COLUMNS: &[&str] = ADDED_COLUMNS;
 /// Footer key saying which half of a partition a file is.
 pub const ROLE: &str = "infrastore.role";
 /// Footer key asserting the property the import depends on: rows are contiguous
@@ -212,7 +221,7 @@ fn footer(
         (ValueKind::Composite(_), None) => vec![],
     };
     [
-        (FORMAT.to_string(), FORMAT_V2.to_string()),
+        (FORMAT.to_string(), FORMAT_V3.to_string()),
         (ROLE.to_string(), role.to_string()),
         (ROWS_CONTIGUOUS.to_string(), "true".to_string()),
         (
