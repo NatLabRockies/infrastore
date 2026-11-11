@@ -1799,6 +1799,13 @@ end
         lazy_window = forecast_values(r, 1; lazy=true)
         @test lazy_window isa PermutedDimsArray
         @test lazy_window == data[:, k + 1, :]
+        # The vector form hands back the same windows, concretely typed.
+        @test forecast_values(r, [1]) == [data[:, k + 1, :]]
+        @test forecast_values(r, [1]) isa Vector{Matrix{Float64}}
+        lazy_windows = forecast_values(r, [1]; lazy=true)
+        @test isconcretetype(eltype(lazy_windows))
+        @test only(lazy_windows) isa PermutedDimsArray
+        @test only(lazy_windows) == data[:, k + 1, :]
     end
 
     @test_throws InfraStore.InvalidParameterError forecast_read!(r, t0 + Hour(1))
@@ -1870,6 +1877,34 @@ end
         @test forecast_values(r, 1) == forecast_values(r, 2) == forecast_values(r, 3)
         @test forecast_values(r, 1) == shared[:, k + 1]
         @test forecast_values(r, 4) == other[:, k + 1]
+        windows = forecast_values(r, 1:4)
+        @test windows isa Vector{Vector{Float64}}
+        @test windows == [forecast_values(r, i) for i in 1:4]
+    end
+    @test forecast_values(r, Int[]) == []
+end
+
+@testset "ForecastReader: vector forecast_values needs one window layout" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2031, 6, 1)
+    res = Hour(1)
+    H, count, E = 2, 3, 2
+    flat = Float64[s * 10 + k for s in 1:H, k in 1:count]
+    wide = Float64[s * 100 + k * 10 + e for s in 1:H, k in 1:count, e in 1:E]
+    add_time_series!(
+        store, 1, "Gen", Component, Deterministic(t0, res, Hour(H), res, count, flat, "pf")
+    )
+    add_time_series!(
+        store, 2, "Gen", Component, Deterministic(t0, res, Hour(H), res, count, wide, "pf")
+    )
+    r = build_forecast_reader(store, Deterministic; resolution=res)
+    forecast_read!(r, t0)
+    ranks = [length(e.window_shape) for e in forecast_entries(r)]
+    @test sort(ranks) == [1, 2]
+    @test_throws ArgumentError forecast_values(r, [1, 2])
+    # Each layout on its own reads fine.
+    for i in 1:2
+        @test only(forecast_values(r, [i])) == forecast_values(r, i)
     end
 end
 

@@ -29,6 +29,30 @@ end
 # Reshaping the row-major bytes is free but reverses the axes; restoring the
 # canonical order either moves every value (`permutedims`) or, with `lazy`, only
 # reorders the strides (`PermutedDimsArray`), leaving the values in stored order.
+#
+# The element type, rank and `lazy` are type parameters so that a caller sweeping many
+# entries of one layout (see the vector form of `forecast_values`) dispatches here once,
+# not once per entry: with a runtime `T`, every call is a dynamic dispatch and builds
+# `Vector{T}` at runtime.
+function _reader_values(
+    ptr::Ptr{UInt8},
+    byte_len::UInt64,
+    ::Type{T},
+    dims::NTuple{N, Int},
+    ::Val{lazy},
+) where {T, N, lazy}
+    n = byte_len == 0 ? 0 : Int(byte_len) ÷ sizeof(T)
+    flat = Vector{T}(undef, n)
+    if n > 0
+        GC.@preserve flat unsafe_copyto!(pointer(flat), Ptr{T}(ptr), n)
+    end
+    N <= 1 && return flat
+    stored = reshape(flat, reverse(dims))
+    lazy && return _stored_order_view(stored)
+    return permutedims(stored, ntuple(i -> N + 1 - i, Val(N)))
+end
+
+# One read whose layout is known only at runtime: dispatch into the typed form above.
 function _reader_values(
     ptr::Ptr{UInt8},
     byte_len::UInt64,
@@ -36,16 +60,7 @@ function _reader_values(
     dims::AbstractVector{<:Integer};
     lazy::Bool=false,
 ) where {T}
-    n = byte_len == 0 ? 0 : Int(byte_len) ÷ sizeof(T)
-    flat = Vector{T}(undef, n)
-    if n > 0
-        GC.@preserve flat unsafe_copyto!(pointer(flat), Ptr{T}(ptr), n)
-    end
-    nd = length(dims)
-    nd <= 1 && return flat
-    stored = reshape(flat, reverse(dims)...)
-    lazy && return _stored_order_view(stored)
-    return permutedims(stored, reverse(ntuple(identity, nd)))
+    return _reader_values(ptr, byte_len, T, Tuple(Int.(dims)), Val(lazy))
 end
 
 # The column-major view over row-major `stored`, built behind a barrier on the rank so the
@@ -751,6 +766,63 @@ one-dimensional window is a `Vector` either way.
 """
 function forecast_values(reader::ForecastReader, entry_index::Integer; lazy::Bool=false)
     entry = reader.entries[entry_index]
+    ptr, len = _forecast_entry_values(reader, entry_index)
+    return _reader_values(ptr, len, entry.dtype, entry.window_shape; lazy=lazy)
+end
+
+"""
+    forecast_values(reader, entry_indices::AbstractVector{<:Integer}; lazy=false) -> Vector
+
+The windows of several entries from the most recent [`forecast_read!`], one per index
+and in order, as a concretely typed `Vector` (e.g. `Vector{Vector{Float64}}`). The
+entries must share a dtype and a window rank; an `ArgumentError` says which do not.
+
+Returns what `[forecast_values(reader, i; lazy) for i in entry_indices]` would, but
+resolves the window type once for the whole set. Read one entry at a time, each window's
+type is worked out when it is read, which is a dynamic dispatch per entry per timestamp:
+over thousands of entries, a large share of a read. Use this to sweep entries.
+"""
+function forecast_values(
+    reader::ForecastReader,
+    entry_indices::AbstractVector{<:Integer};
+    lazy::Bool=false,
+)
+    isempty(entry_indices) && return Any[]
+    first_entry = reader.entries[first(entry_indices)]
+    T = first_entry.dtype
+    N = length(first_entry.window_shape)
+    for i in entry_indices
+        entry = reader.entries[i]
+        (entry.dtype === T && length(entry.window_shape) == N) || throw(
+            ArgumentError(
+                "forecast_values: entry $i holds $(entry.dtype) windows of rank " *
+                "$(length(entry.window_shape)), but entry $(first(entry_indices)) holds " *
+                "$T windows of rank $N; read entries of different layouts separately",
+            ),
+        )
+    end
+    return _forecast_values(reader, entry_indices, T, Val(N), Val(lazy))
+end
+
+function _forecast_values(
+    reader::ForecastReader,
+    entry_indices::AbstractVector{<:Integer},
+    ::Type{T},
+    ::Val{N},
+    lazy::Val,
+) where {T, N}
+    return [
+        _reader_values(
+            _forecast_entry_values(reader, i)...,
+            T,
+            ntuple(k -> reader.entries[i].window_shape[k], Val(N)),
+            lazy,
+        ) for i in entry_indices
+    ]
+end
+
+# The reader-owned bytes of entry `entry_index`'s window, valid until the next read.
+function _forecast_entry_values(reader::ForecastReader, entry_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
@@ -761,5 +833,5 @@ function forecast_values(reader::ForecastReader, entry_index::Integer; lazy::Boo
             out_len::Ref{UInt64},
         )::Int32
     )
-    return _reader_values(out_ptr[], out_len[], entry.dtype, entry.window_shape; lazy=lazy)
+    return out_ptr[], out_len[]
 end
