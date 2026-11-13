@@ -24,7 +24,7 @@ end
 
 # Copy `byte_len` bytes at `ptr` into a fresh `T` array and reshape from the
 # stored row-major `dims` to canonical column-major Julia layout. The pointer is
-# reader-owned (valid only until the next read), so we always copy.
+# reader-owned (valid only until the next read), so the result is always a copy.
 #
 # Reshaping the row-major bytes is free but reverses the axes; restoring the
 # canonical order either moves every value (`permutedims`) or, with `lazy`, only
@@ -42,6 +42,16 @@ function _reader_values(
     ::Val{lazy},
 ) where {T, N, lazy}
     n = byte_len == 0 ? 0 : Int(byte_len) ÷ sizeof(T)
+    if N > 1 && !lazy && n > 0
+        # Reorder straight out of the reader's buffer: the wrapper borrows it only until
+        # `permutedims` has copied it out, which saves the intermediate copy. `unsafe_wrap`
+        # checks nothing, so check the size here; `reshape` checks it on the path below.
+        prod(dims) == n || throw(
+            DimensionMismatch("reader buffer holds $n values, but its shape is $dims")
+        )
+        stored = unsafe_wrap(Array, Ptr{T}(ptr), reverse(dims))
+        return permutedims(stored, ntuple(i -> N + 1 - i, Val(N)))
+    end
     flat = Vector{T}(undef, n)
     if n > 0
         GC.@preserve flat unsafe_copyto!(pointer(flat), Ptr{T}(ptr), n)
