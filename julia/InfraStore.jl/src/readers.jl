@@ -24,29 +24,69 @@ end
 
 # Copy `byte_len` bytes at `ptr` into a fresh `T` array and reshape from the
 # stored row-major `dims` to canonical column-major Julia layout. The pointer is
-# reader-owned (valid only until the next read), so we always copy.
+# reader-owned (valid only until the next read), so the result is always a copy.
 #
 # Reshaping the row-major bytes is free but reverses the axes; restoring the
 # canonical order either moves every value (`permutedims`) or, with `lazy`, only
 # reorders the strides (`PermutedDimsArray`), leaving the values in stored order.
+#
+# The element type, rank and `lazy` are type parameters so that a caller sweeping many
+# entries of one layout (see the vector form of `forecast_values`) dispatches here once,
+# not once per entry: with a runtime `T`, every call is a dynamic dispatch and builds
+# `Vector{T}` at runtime.
 function _reader_values(
     ptr::Ptr{UInt8},
     byte_len::UInt64,
     ::Type{T},
-    dims::AbstractVector{<:Integer};
-    lazy::Bool=false,
-) where {T}
+    dims::NTuple{N, Int},
+    ::Val{lazy},
+) where {T, N, lazy}
     n = byte_len == 0 ? 0 : Int(byte_len) ÷ sizeof(T)
+    if N > 1 && !lazy && n > 0
+        # Reorder straight out of the reader's buffer: the wrapper borrows it only until
+        # `permutedims` has copied it out, which saves the intermediate copy. `unsafe_wrap`
+        # checks nothing, so check the size here; `reshape` checks it on the path below.
+        prod(dims) == n || throw(
+            DimensionMismatch("reader buffer holds $n values, but its shape is $dims")
+        )
+        stored = unsafe_wrap(Array, Ptr{T}(ptr), reverse(dims))
+        return permutedims(stored, ntuple(i -> N + 1 - i, Val(N)))
+    end
     flat = Vector{T}(undef, n)
     if n > 0
         GC.@preserve flat unsafe_copyto!(pointer(flat), Ptr{T}(ptr), n)
     end
-    nd = length(dims)
-    nd <= 1 && return flat
-    stored = reshape(flat, reverse(dims)...)
+    N <= 1 && return flat
+    stored = reshape(flat, reverse(dims))
     lazy && return _stored_order_view(stored)
-    return permutedims(stored, reverse(ntuple(identity, nd)))
+    return permutedims(stored, ntuple(i -> N + 1 - i, Val(N)))
 end
+
+# One read whose layout is known only at runtime: dispatch into the typed form above.
+function _reader_values(
+    ptr::Ptr{UInt8},
+    byte_len::UInt64,
+    ::Type{T},
+    dims::Vector{Int};
+    lazy::Bool=false,
+) where {T}
+    # Spell the common ranks as fixed-length tuples: `Tuple(dims)` alone has a length unknown
+    # to the compiler, so it allocates and dispatches dynamically on every call.
+    N = length(dims)
+    N == 1 && return _reader_values(ptr, byte_len, T, (dims[1],), Val(false))
+    N == 2 && return _reader_values(ptr, byte_len, T, (dims[1], dims[2]), _lazy_val(lazy))
+    N == 3 &&
+        return _reader_values(
+            ptr, byte_len, T, (dims[1], dims[2], dims[3]), _lazy_val(lazy)
+        )
+    return _reader_values(ptr, byte_len, T, Tuple(dims), _lazy_val(lazy))
+end
+
+# A typed reader form's `lazy`: a `Val` passes through, so its value is part of the type;
+# a `Bool` is converted at runtime, leaving the result a `Union`. The ternary matters:
+# `Val(lazy)` infers as bare `Val`, a dynamic dispatch, where this is a two-way union.
+_lazy_val(lazy::Val) = lazy
+_lazy_val(lazy::Bool) = lazy ? Val(true) : Val(false)
 
 # The column-major view over row-major `stored`, built behind a barrier on the rank so the
 # permutation is a compile-time constant. With a runtime permutation the wrapper's type
@@ -428,9 +468,49 @@ that column-major layout. By default that is a copy (an `Array`). With
 indexes the same way without the copy. Pass it when you will slice the values by
 column and need no decoding: in stored order each column's values are contiguous.
 A group without an element shape is a `Vector` either way.
+
+The return type depends on the group's dtype and rank, which are only known at runtime,
+so it cannot be inferred; name it with the typed form below when that matters.
 """
 function static_values(reader::StaticReader, group_index::Integer; lazy::Bool=false)
     group = reader.groups[group_index]
+    ptr, len = _static_group_values(reader, group_index)
+    dims = vcat(length(group.ids), group.element_shape)
+    return _reader_values(ptr, len, group.dtype, dims; lazy=lazy)
+end
+
+"""
+    static_values(reader, group_index::Integer, ::Type{Array{T,N}}; lazy=Val(false)) -> Array{T,N}
+
+As [`static_values`](@ref), with the caller naming the result type: `T` the group's dtype
+and `N` its rank, `1 + length(element_shape)` (so `Vector{Float64}` for a group of
+`Float64` scalars). The return type is then inferable, so code consuming it compiles
+against a concrete type. `lazy` is a `Val` here so that it is part of the type as well:
+`lazy=Val(true)` (with `N > 1`) returns a `PermutedDimsArray` over an `Array{T,N}`, while a
+`Bool` still works but leaves the result a `Union` of the two. An `ArgumentError` says when
+the group does not hold that layout.
+"""
+function static_values(
+    reader::StaticReader,
+    group_index::Integer,
+    ::Type{Array{T, N}};
+    lazy::Union{Bool, Val}=Val(false),
+) where {T, N}
+    group = reader.groups[group_index]
+    shape = group.element_shape
+    (group.dtype === T && 1 + length(shape) == N) || throw(
+        ArgumentError(
+            "static_values: group $group_index holds $(group.dtype) values of rank " *
+            "$(1 + length(shape)), but Array{$T, $N} was asked for",
+        ),
+    )
+    ptr, len = _static_group_values(reader, group_index)
+    dims = ntuple(k -> k == 1 ? length(group.ids) : shape[k - 1], Val(N))
+    return _reader_values(ptr, len, T, dims, _lazy_val(lazy))
+end
+
+# The reader-owned bytes of group `group_index`'s values, valid until the next read.
+@inline function _static_group_values(reader::StaticReader, group_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
@@ -441,8 +521,7 @@ function static_values(reader::StaticReader, group_index::Integer; lazy::Bool=fa
             out_len::Ref{UInt64},
         )::Int32
     )
-    dims = vcat(length(group.ids), group.element_shape)
-    return _reader_values(out_ptr[], out_len[], group.dtype, dims; lazy=lazy)
+    return out_ptr[], out_len[]
 end
 
 # ---- ForecastReader -------------------------------------------------------
@@ -751,6 +830,103 @@ one-dimensional window is a `Vector` either way.
 """
 function forecast_values(reader::ForecastReader, entry_index::Integer; lazy::Bool=false)
     entry = reader.entries[entry_index]
+    ptr, len = _forecast_entry_values(reader, entry_index)
+    return _reader_values(ptr, len, entry.dtype, entry.window_shape; lazy=lazy)
+end
+
+"""
+    forecast_values(reader, entry_indices::AbstractVector{<:Integer}; lazy=false) -> Vector
+
+The windows of several entries from the most recent [`forecast_read!`], one per index
+and in order, as a concretely typed `Vector` (e.g. `Vector{Vector{Float64}}`). The
+entries must share a dtype and a window rank; an `ArgumentError` says which do not. An
+empty `entry_indices` returns an empty `Vector` typed for the reader's first entry, or
+`Any[]` if the reader has no entries.
+
+Returns what `[forecast_values(reader, i; lazy) for i in entry_indices]` would, but
+resolves the window type once for the whole set. Read one entry at a time, each window's
+type is worked out when it is read, which is a dynamic dispatch per entry per timestamp:
+over thousands of entries, a large share of a read. Use this to sweep entries.
+
+The result's type still depends on the entries' layout, known only at runtime, so it
+cannot be inferred; name it with the typed form below when that matters.
+"""
+function forecast_values(
+    reader::ForecastReader,
+    entry_indices::AbstractVector{<:Integer};
+    lazy::Bool=false,
+)
+    isempty(entry_indices) && isempty(reader.entries) && return Any[]
+    # The entry whose layout the rest must match; for an empty selection it only names
+    # the element type of the empty result.
+    ref = isempty(entry_indices) ? 1 : Int(first(entry_indices))
+    entry = reader.entries[ref]
+    return _forecast_values(
+        reader, entry_indices, ref, entry.dtype, Val(length(entry.window_shape)), Val(lazy)
+    )
+end
+
+"""
+    forecast_values(reader, entry_indices::AbstractVector{<:Integer}, ::Type{Array{T,N}};
+                    lazy=Val(false)) -> Vector
+
+As the vector form above, with the caller naming the window type: `T` the entries' dtype
+and `N` the window rank, `length(window_shape)` (so `Vector{Float64}` for a scalar
+`Deterministic`). The return type is then inferable, and an empty `entry_indices` returns
+an empty `Vector{Array{T,N}}`. `lazy` is a `Val`, as for the typed
+[`static_values`](@ref): `lazy=Val(true)` (with `N > 1`) makes each window a
+`PermutedDimsArray` over an `Array{T,N}`. An `ArgumentError` says which entry does not
+hold that layout.
+"""
+function forecast_values(
+    reader::ForecastReader,
+    entry_indices::AbstractVector{<:Integer},
+    ::Type{Array{T, N}};
+    lazy::Union{Bool, Val}=Val(false),
+) where {T, N}
+    return _forecast_values(reader, entry_indices, nothing, T, Val(N), _lazy_val(lazy))
+end
+
+# Behind the barrier, `T`, `N` and `lazy` are constants, so the comprehension's element
+# type is inferred concretely — including for an empty `entry_indices`.
+function _forecast_values(
+    reader::ForecastReader,
+    entry_indices::AbstractVector{<:Integer},
+    ref::Union{Int, Nothing},
+    ::Type{T},
+    ::Val{N},
+    lazy::Val,
+) where {T, N}
+    return [
+        begin
+            entry = reader.entries[i]
+            (entry.dtype === T && length(entry.window_shape) == N) || throw(
+                ArgumentError(
+                    "forecast_values: entry $i holds $(entry.dtype) windows of rank " *
+                    "$(length(entry.window_shape)), but " *
+                    (
+                        if ref === nothing
+                            "Array{$T, $N} was asked for"
+                        else
+                            "entry $ref holds $T windows of rank $N; read entries of " *
+                            "different layouts separately"
+                        end
+                    ),
+                ),
+            )
+            shape = entry.window_shape
+            _reader_values(
+                _forecast_entry_values(reader, i)...,
+                T,
+                ntuple(k -> shape[k], Val(N)),
+                lazy,
+            )
+        end for i in entry_indices
+    ]
+end
+
+# The reader-owned bytes of entry `entry_index`'s window, valid until the next read.
+@inline function _forecast_entry_values(reader::ForecastReader, entry_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
@@ -761,5 +937,5 @@ function forecast_values(reader::ForecastReader, entry_index::Integer; lazy::Boo
             out_len::Ref{UInt64},
         )::Int32
     )
-    return _reader_values(out_ptr[], out_len[], entry.dtype, entry.window_shape; lazy=lazy)
+    return out_ptr[], out_len[]
 end

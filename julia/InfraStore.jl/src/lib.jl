@@ -418,7 +418,7 @@ function _audit_zone(reference)
         "time_reference names an IANA zone this session's tz database does not have; " *
             "the instants are stored either way, but rendering them in that zone needs a " *
             "database that knows it",
-        zone = reference.name,
+        zone=reference.name,
     )
     return reference
 end
@@ -653,7 +653,7 @@ function __init__()
         try
             init_logging(rust_log)
         catch e
-            @warn "InfraStore.__init__: failed to initialize tracing" exception=e
+            @warn "InfraStore.__init__: failed to initialize tracing" exception = e
         end
     end
 end
