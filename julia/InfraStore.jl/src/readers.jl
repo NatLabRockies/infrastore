@@ -60,13 +60,23 @@ function _reader_values(
     dims::Vector{Int};
     lazy::Bool=false,
 ) where {T}
-    return _reader_values(ptr, byte_len, T, Tuple(dims), Val(lazy))
+    # Spell the common ranks as fixed-length tuples: `Tuple(dims)` alone has a length unknown
+    # to the compiler, so it allocates and dispatches dynamically on every call.
+    N = length(dims)
+    N == 1 && return _reader_values(ptr, byte_len, T, (dims[1],), Val(false))
+    N == 2 && return _reader_values(ptr, byte_len, T, (dims[1], dims[2]), _lazy_val(lazy))
+    N == 3 &&
+        return _reader_values(
+            ptr, byte_len, T, (dims[1], dims[2], dims[3]), _lazy_val(lazy)
+        )
+    return _reader_values(ptr, byte_len, T, Tuple(dims), _lazy_val(lazy))
 end
 
 # A typed reader form's `lazy`: a `Val` passes through, so its value is part of the type;
-# a `Bool` is converted at runtime, leaving the result a `Union`.
+# a `Bool` is converted at runtime, leaving the result a `Union`. The ternary matters:
+# `Val(lazy)` infers as bare `Val`, a dynamic dispatch, where this is a two-way union.
 _lazy_val(lazy::Val) = lazy
-_lazy_val(lazy::Bool) = Val(lazy)
+_lazy_val(lazy::Bool) = lazy ? Val(true) : Val(false)
 
 # The column-major view over row-major `stored`, built behind a barrier on the rank so the
 # permutation is a compile-time constant. With a runtime permutation the wrapper's type
@@ -490,7 +500,7 @@ function static_values(
 end
 
 # The reader-owned bytes of group `group_index`'s values, valid until the next read.
-function _static_group_values(reader::StaticReader, group_index::Integer)
+@inline function _static_group_values(reader::StaticReader, group_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
@@ -906,7 +916,7 @@ function _forecast_values(
 end
 
 # The reader-owned bytes of entry `entry_index`'s window, valid until the next read.
-function _forecast_entry_values(reader::ForecastReader, entry_index::Integer)
+@inline function _forecast_entry_values(reader::ForecastReader, entry_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
