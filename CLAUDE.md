@@ -430,7 +430,7 @@ flags are inert.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install maturin pytest numpy tzdata "power-openapi-models==0.4.*"  # tzdata: zoneinfo on Windows
+pip install maturin pytest numpy tzdata "power-openapi-models==0.5.*"  # tzdata: zoneinfo on Windows
 maturin develop --manifest-path crates/infrastore-py/Cargo.toml
 pytest python/tests
 ```

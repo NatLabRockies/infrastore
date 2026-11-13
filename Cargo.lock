@@ -1893,8 +1893,9 @@ dependencies = [
 
 [[package]]
 name = "power-openapi-models"
-version = "0.4.0"
-source = "git+https://github.com/Sienna-Platform/power-openapi-models?branch=lk%2Fper-unit-of#fbb45de01596143a7e68283af2959daca57536df"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf3e289b3fa6f578116ea8a4cde324ebcf02eca5774ab36dea69a1703c3c87a"
 dependencies = [
  "chrono",
  "jsonschema",
