@@ -283,11 +283,12 @@ fn read_foreign_with(
 fn check_format(footer: &BTreeMap<String, String>, path: &Path) -> Result<()> {
     match footer.get(table::FORMAT) {
         None => Ok(()),
-        Some(v) if v == table::FORMAT_V2 => Ok(()),
+        Some(v) if v == table::FORMAT_V3 || v == table::FORMAT_V2 => Ok(()),
         Some(other) => Err(unsupported(format!(
-            "{} is {other}, which this build does not read (it reads {}); export it again \
-             with a build that matches",
+            "{} is {other}, which this build does not read (it reads {} and {}); export it \
+             again with a build that matches",
             path.display(),
+            table::FORMAT_V3,
             table::FORMAT_V2
         ))),
     }
@@ -384,9 +385,15 @@ fn check_columns(
     path: &Path,
     role: &str,
 ) -> Result<()> {
-    if !footer.contains_key(table::FORMAT) {
+    let Some(format) = footer.get(table::FORMAT) else {
         return Ok(());
-    }
+    };
+    // A v2 file predates the v3 columns; they read as unset.
+    let excused: &[&str] = if format == table::FORMAT_V2 {
+        table::V3_COLUMNS
+    } else {
+        &[]
+    };
     let Some(declared) = footer
         .get(schema::TIME_SERIES_TYPE)
         .filter(|t| !t.is_empty())
@@ -401,7 +408,7 @@ fn check_columns(
     let ts_type = schema::decode_time_series_type(declared).map_err(unsupported)?;
     let missing: Vec<&str> = table::required_columns(ts_type, role)
         .into_iter()
-        .filter(|name| arrow.field_with_name(name).is_err())
+        .filter(|name| !excused.contains(name) && arrow.field_with_name(name).is_err())
         .collect();
     if !missing.is_empty() {
         return Err(unsupported(format!(
@@ -645,6 +652,7 @@ fn read_series_rows(
     let quantity_kind = text_column(batch, schema::QUANTITY_KIND)?;
     let unit_system = text_column(batch, schema::UNIT_SYSTEM)?;
     let component_field = text_column(batch, schema::COMPONENT_FIELD)?;
+    let per_unit_of = text_column(batch, schema::PER_UNIT_OF)?;
     let application_data = text_column(batch, schema::APPLICATION_DATA)?;
 
     (0..batch.num_rows())
@@ -671,6 +679,7 @@ fn read_series_rows(
                 quantity_kind: cell(&quantity_kind, i),
                 unit_system: cell(&unit_system, i),
                 component_field: cell(&component_field, i),
+                per_unit_of: cell(&per_unit_of, i),
                 application_data: cell(&application_data, i),
             })
         })

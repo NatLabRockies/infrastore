@@ -116,6 +116,7 @@ pub struct ImportOptions {
     pub quantity_kind: Option<String>,
     pub unit_system: Option<UnitSystem>,
     pub component_field: Option<String>,
+    pub per_unit_of: Option<String>,
     pub application_data: Option<String>,
     /// Waive the `data_hash` comparison, leaving the pair as nothing but a join
     /// key. `--no-checksum` on the CLI; the alternative is to recompute the hash
@@ -216,6 +217,7 @@ pub struct SeriesRow {
     pub quantity_kind: String,
     pub unit_system: String,
     pub component_field: String,
+    pub per_unit_of: String,
     pub application_data: String,
 }
 
@@ -241,6 +243,7 @@ impl SeriesRow {
             quantity_kind: String::new(),
             unit_system: String::new(),
             component_field: String::new(),
+            per_unit_of: String::new(),
             application_data: String::new(),
         }
     }
@@ -285,6 +288,7 @@ pub fn build(
         },
         time_reference: reference,
         component_field: override_text(options.component_field.as_deref(), &row.component_field),
+        per_unit_of: override_text(options.per_unit_of.as_deref(), &row.per_unit_of),
         application_data: override_text(options.application_data.as_deref(), &row.application_data),
     };
     // Before canonicalizing: the constructor resolved the element type from the

@@ -19,8 +19,8 @@ TimeZones = "f269a46b-ccf7-5d73-abea-4c690281aa53"
 InfraStoreTimeZonesExt = "TimeZones"
 
 [compat]
-InfrastructureCoreOpenAPIModels = "0.4"
-InfrastructureTimeSeriesOpenAPIModels = "0.4"
+InfrastructureCoreOpenAPIModels = "0.5"
+InfrastructureTimeSeriesOpenAPIModels = "0.5"
 JSON = "0.21, 1"
 TimeZones = "1"
 julia = "1.11"

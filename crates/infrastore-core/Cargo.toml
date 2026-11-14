@@ -44,7 +44,7 @@ hdf5-metno = { version = "0.14.0", features = ["zlib"] }
 # The SiennaSchemas wire contract: the typed OpenAPI rows and, with
 # `validate`, the strict schema bundle compiled in, so the import check needs
 # no filesystem and no network.
-power-openapi-models = { version = "0.4", features = ["validate"] }
+power-openapi-models = { version = "0.5", features = ["validate"] }
 
 # `asm` selects hand-written SHA-256 kernels (and the ARMv8 crypto extensions
 # on aarch64), ~5x faster than the portable fallback for content hashing on

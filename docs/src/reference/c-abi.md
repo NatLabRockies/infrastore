@@ -33,7 +33,7 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
   `element_type`.
 - **Strings** are null-terminated UTF-8. Optional string arguments (`application_data`,
   `features_json`, `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`,
-  `name_glob`) accept `NULL`.
+  `per_unit_of`, `name_glob`) accept `NULL`.
 - **`time_reference`** records how a series' timestamps were _spelled_: `"utc"`, `"zoneless"`, a
   fixed offset (`"-07:00"`), or an IANA zone name (`"America/Denver"`). An unparseable value fails
   with `INFRASTORE_ERR_INVALID_PARAMETER` rather than degrading to unset. Zone _existence_ is not
@@ -144,7 +144,8 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                             const char *quantity_kind,        /* optional */
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                            const char *component_field);     /* optional: e.g. "max_active_power" */
+                            const char *component_field,     /* optional: e.g. "max_active_power" */
+                            const char *per_unit_of);         /* optional: e.g. "base_power" */
 
 /* All-or-nothing removal by catalog association id: an id naming no row returns
    INFRASTORE_ERR_NOT_FOUND and removes nothing. A repeated id is removed, and
@@ -191,7 +192,8 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                     const char *units,
                                     const char *quantity_kind, const char *unit_system,
                                     const char *time_reference,
-                                    const char *component_field);
+                                    const char *component_field,
+                                    const char *per_unit_of);
 /* Reads a NonSequentialTimeSeries or PersistentTimeSeries slot; any other type is
    INFRASTORE_ERR_INVALID_PARAMETER. */
 int32_t infrastore_bulk_result_get_irregular(const struct InfraStoreBulkReadHandle *result, uint64_t index,
@@ -202,7 +204,7 @@ int32_t infrastore_bulk_result_get_irregular(const struct InfraStoreBulkReadHand
                                     char **out_application_data, char **out_element_type,
                                     char **out_units, char **out_quantity_kind,
                                     char **out_unit_system, char **out_time_reference,
-                                    char **out_component_field);
+                                    char **out_component_field, char **out_per_unit_of);
 ```
 
 ## PersistentTimeSeries
@@ -261,7 +263,7 @@ int32_t infrastore_store_count_array_references(const struct InfraStore *handle,
    owner_category, time_series_type, name, data_hash (64-char hex),
    initial_timestamp_ms, resolution, horizon, interval, count, length,
    percentiles, element_type, element_shape, features, units, quantity_kind,
-   unit_system, time_reference, component_field, application_data, id -- fields
+   unit_system, time_reference, component_field, per_unit_of, application_data, id -- fields
    that do not apply to the row's type are null. One export covers every time
    series type, static and forecast alike. Probe-then-fetch: call with
    buf = NULL, cap = 0 to learn *out_len, then again with an out_len+1-byte
@@ -325,7 +327,8 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                               const char *quantity_kind,        /* optional */
                               const char *unit_system,          /* optional: "natural_units" | "component_base" */
                               const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                              const char *component_field);     /* optional: e.g. "max_active_power" */
+                              const char *component_field,     /* optional: e.g. "max_active_power" */
+                              const char *per_unit_of);         /* optional: e.g. "base_power" */
 
 int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                    int64_t owner_id, const char *owner_type,
@@ -342,7 +345,8 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                    const char *quantity_kind,        /* optional */
                                    const char *unit_system,          /* optional: "natural_units" | "component_base" */
                                    const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                                   const char *component_field);     /* optional: e.g. "max_active_power" */
+                                   const char *component_field,     /* optional: e.g. "max_active_power" */
+                                   const char *per_unit_of);         /* optional: e.g. "base_power" */
 
 int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                               const char *horizon, const char *interval,  /* ISO-8601 */

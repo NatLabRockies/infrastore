@@ -530,6 +530,13 @@ macro_rules! series_pymethods {
                 self.inner.component_field.clone()
             }
 
+            /// The owning component's field the values are a fraction of when
+            /// `unit_system` is `"component_base"`, or `None`.
+            #[getter]
+            fn per_unit_of(&self) -> Option<String> {
+                self.inner.per_unit_of.clone()
+            }
+
             /// How this series' timestamps were spelled: `"utc"`, `"zoneless"`,
             /// a fixed offset (`"-07:00"`), an IANA zone name, or `None` for
             /// unspecified.
@@ -1033,6 +1040,9 @@ macro_rules! arrow_metadata {
         if let Some(v) = &$inner.component_field {
             meta.insert("component_field".to_string(), v.clone());
         }
+        if let Some(v) = &$inner.per_unit_of {
+            meta.insert("per_unit_of".to_string(), v.clone());
+        }
         if let Some(v) = &$inner.application_data {
             meta.insert("application_data".to_string(), v.clone());
         }
@@ -1294,6 +1304,7 @@ fn arrow_descriptor_args(parts: &ArrowParts<'_>, args: DescriptorArgs) -> PyResu
         quantity_kind,
         unit_system,
         component_field,
+        per_unit_of,
         time_reference,
     } = args;
     let meta = &parts.metadata;
@@ -1328,6 +1339,7 @@ fn arrow_descriptor_args(parts: &ArrowParts<'_>, args: DescriptorArgs) -> PyResu
         quantity_kind: quantity_kind.or_else(|| meta.get("quantity_kind").cloned()),
         unit_system: unit_system.or_else(|| meta.get("unit_system").cloned()),
         component_field: component_field.or_else(|| meta.get("component_field").cloned()),
+        per_unit_of: per_unit_of.or_else(|| meta.get("per_unit_of").cloned()),
         time_reference,
     })
 }
@@ -1376,6 +1388,7 @@ struct DescriptorArgs {
     quantity_kind: Option<String>,
     unit_system: Option<String>,
     component_field: Option<String>,
+    per_unit_of: Option<String>,
     time_reference: Option<String>,
 }
 
@@ -1406,6 +1419,7 @@ impl DescriptorArgs {
                 None => inferred,
             },
             component_field: self.component_field,
+            per_unit_of: self.per_unit_of,
             application_data: self.application_data,
         })
     }
@@ -1425,6 +1439,7 @@ macro_rules! apply_descriptors {
             unit_system,
             time_reference,
             component_field,
+            per_unit_of,
             application_data,
         } = $descriptors;
         $inner.element_type = element_type;
@@ -1433,6 +1448,7 @@ macro_rules! apply_descriptors {
         $inner.unit_system = unit_system;
         $inner.time_reference = time_reference;
         $inner.component_field = component_field;
+        $inner.per_unit_of = per_unit_of;
         $inner.application_data = application_data;
     }};
 }
@@ -1460,7 +1476,7 @@ impl PyDeterministic {
     #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, data, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
+            unit_system=None, component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1478,6 +1494,7 @@ impl PyDeterministic {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
@@ -1505,6 +1522,7 @@ impl PyDeterministic {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
@@ -1524,7 +1542,7 @@ impl PyDeterministic {
     #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
+            unit_system=None, component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
@@ -1543,6 +1561,7 @@ impl PyDeterministic {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
@@ -1566,6 +1585,7 @@ impl PyDeterministic {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
@@ -1690,7 +1710,7 @@ impl PyProbabilistic {
     #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, percentiles, data, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
+            unit_system=None, component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1709,6 +1729,7 @@ impl PyProbabilistic {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
@@ -1737,6 +1758,7 @@ impl PyProbabilistic {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
@@ -1757,7 +1779,7 @@ impl PyProbabilistic {
     #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, percentiles, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
+            unit_system=None, component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
@@ -1777,6 +1799,7 @@ impl PyProbabilistic {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
@@ -1801,6 +1824,7 @@ impl PyProbabilistic {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
@@ -1853,7 +1877,7 @@ impl PyScenarios {
     #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, data, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
+            unit_system=None, component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1871,6 +1895,7 @@ impl PyScenarios {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
@@ -1902,6 +1927,7 @@ impl PyScenarios {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
@@ -1925,7 +1951,7 @@ impl PyScenarios {
     #[pyo3(signature = (
             initial_timestamp, resolution, horizon, interval, count, scenario_count, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
+            unit_system=None, component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
@@ -1945,6 +1971,7 @@ impl PyScenarios {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
@@ -1969,6 +1996,7 @@ impl PyScenarios {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
@@ -2040,7 +2068,7 @@ impl PySingleTimeSeries {
     #[pyo3(signature = (
             initial_timestamp, resolution, data, name, *, application_data=None,
             element_type=None, units=None, quantity_kind=None, unit_system=None,
-            component_field=None, time_reference=None
+            component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -2055,6 +2083,7 @@ impl PySingleTimeSeries {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
@@ -2069,6 +2098,7 @@ impl PySingleTimeSeries {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
@@ -2115,7 +2145,7 @@ impl PySingleTimeSeries {
     #[classmethod]
     #[pyo3(signature = (
             timestamps, data, name, *, application_data=None, element_type=None, units=None,
-            quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+            quantity_kind=None, unit_system=None, component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn from_timestamps(
@@ -2130,6 +2160,7 @@ impl PySingleTimeSeries {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         // One vector, one spelling -- the same rule the irregular constructors
@@ -2146,6 +2177,7 @@ impl PySingleTimeSeries {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, inferred)?;
@@ -2199,7 +2231,7 @@ impl PySingleTimeSeries {
     #[pyo3(signature = (
             initial_timestamp, resolution, values, name, *,
             application_data=None, element_type=None, units=None, quantity_kind=None,
-            unit_system=None, component_field=None, time_reference=None
+            unit_system=None, component_field=None, per_unit_of=None, time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
     fn from_values(
@@ -2215,6 +2247,7 @@ impl PySingleTimeSeries {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pyany_to_period(&resolution)?;
@@ -2233,6 +2266,7 @@ impl PySingleTimeSeries {
             quantity_kind,
             unit_system,
             component_field,
+            per_unit_of,
             time_reference,
         }
         .resolve(py, inner.element_type, Some(initial_timestamp.reference))?;
@@ -2309,7 +2343,7 @@ impl PySingleTimeSeries {
     #[classmethod]
     #[pyo3(signature = (
             table, *, name=None, resolution=None, application_data=None, element_type=None,
-            units=None, quantity_kind=None, unit_system=None, component_field=None,
+            units=None, quantity_kind=None, unit_system=None, component_field=None, per_unit_of=None,
             time_reference=None
         ))]
     #[allow(clippy::too_many_arguments)]
@@ -2325,6 +2359,7 @@ impl PySingleTimeSeries {
         quantity_kind: Option<String>,
         unit_system: Option<String>,
         component_field: Option<String>,
+        per_unit_of: Option<String>,
         time_reference: Option<String>,
     ) -> PyResult<Self> {
         let parts = arrow_parts(py, table)?;
@@ -2378,6 +2413,7 @@ impl PySingleTimeSeries {
                 quantity_kind,
                 unit_system,
                 component_field,
+                per_unit_of,
                 time_reference,
             },
         )?
@@ -2467,7 +2503,7 @@ macro_rules! irregular_pymethods {
             #[new]
             #[pyo3(signature = (
                     timestamps, data, name, *, application_data=None, element_type=None, units=None,
-                    quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+                    quantity_kind=None, unit_system=None, component_field=None, per_unit_of=None, time_reference=None
                 ))]
             #[allow(clippy::too_many_arguments)]
             fn new(
@@ -2481,6 +2517,7 @@ macro_rules! irregular_pymethods {
                 quantity_kind: Option<String>,
                 unit_system: Option<String>,
                 component_field: Option<String>,
+                per_unit_of: Option<String>,
                 time_reference: Option<String>,
             ) -> PyResult<Self> {
                 let typed = typed_array_from_numpy(data)?;
@@ -2495,6 +2532,7 @@ macro_rules! irregular_pymethods {
                     quantity_kind,
                     unit_system,
                     component_field,
+                    per_unit_of,
                     time_reference,
                 }
                 .resolve(py, inner.element_type, reference)?;
@@ -2507,7 +2545,7 @@ macro_rules! irregular_pymethods {
             #[pyo3(signature = (
                     timestamps, values, name, *,
                     application_data=None, element_type=None, units=None, quantity_kind=None,
-                    unit_system=None, component_field=None, time_reference=None
+                    unit_system=None, component_field=None, per_unit_of=None, time_reference=None
                 ))]
             #[allow(clippy::too_many_arguments)]
             fn from_values(
@@ -2522,6 +2560,7 @@ macro_rules! irregular_pymethods {
                 quantity_kind: Option<String>,
                 unit_system: Option<String>,
                 component_field: Option<String>,
+                per_unit_of: Option<String>,
                 time_reference: Option<String>,
             ) -> PyResult<Self> {
                 // One series records one spelling, so the vector has to agree on one.
@@ -2537,6 +2576,7 @@ macro_rules! irregular_pymethods {
                     quantity_kind,
                     unit_system,
                     component_field,
+                    per_unit_of,
                     time_reference,
                 }
                 .resolve(py, inner.element_type, reference)?;
@@ -2563,7 +2603,7 @@ macro_rules! irregular_pymethods {
             #[classmethod]
             #[pyo3(signature = (
                     table, *, name=None, application_data=None, element_type=None, units=None,
-                    quantity_kind=None, unit_system=None, component_field=None, time_reference=None
+                    quantity_kind=None, unit_system=None, component_field=None, per_unit_of=None, time_reference=None
                 ))]
             #[allow(clippy::too_many_arguments)]
             fn from_arrow(
@@ -2577,6 +2617,7 @@ macro_rules! irregular_pymethods {
                 quantity_kind: Option<String>,
                 unit_system: Option<String>,
                 component_field: Option<String>,
+                per_unit_of: Option<String>,
                 time_reference: Option<String>,
             ) -> PyResult<Self> {
                 let parts = arrow_parts(py, table)?;
@@ -2594,6 +2635,7 @@ macro_rules! irregular_pymethods {
                         quantity_kind,
                         unit_system,
                         component_field,
+                        per_unit_of,
                         time_reference,
                     },
                 )?
@@ -5790,6 +5832,7 @@ fn metadata_to_dict<'py>(
             .map(core_lib::TimeReference::as_storage_string),
     )?;
     d.set_item("component_field", m.component_field.clone())?;
+    d.set_item("per_unit_of", m.per_unit_of.clone())?;
     d.set_item("application_data", m.application_data.clone())?;
     Ok(d)
 }

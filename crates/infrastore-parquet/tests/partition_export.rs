@@ -387,7 +387,7 @@ fn the_catalog_row_becomes_columns() {
     assert_eq!(ints(&batch, "id"), vec![1]);
 
     // The footer states the partition exactly, since the filename does not.
-    assert_eq!(footer[table::FORMAT], table::FORMAT_V2);
+    assert_eq!(footer[table::FORMAT], table::FORMAT_V3);
     assert_eq!(footer[table::ROWS_CONTIGUOUS], "true");
     assert_eq!(footer["time_series_type"], "SingleTimeSeries");
     assert_eq!(footer["element_type"], "f64");
@@ -1330,7 +1330,7 @@ fn the_two_halves_say_which_they_are() {
     let report = write_partitions(dir.path(), &series).expect("export");
     let (_, values_footer) = read_file(&report.partitions[0].values_path);
     let (_, series_footer) = read_file(&report.partitions[0].series_path);
-    assert_eq!(values_footer[table::FORMAT], table::FORMAT_V2);
+    assert_eq!(values_footer[table::FORMAT], table::FORMAT_V3);
     assert_eq!(values_footer[table::ROLE], table::ROLE_VALUES);
     assert_eq!(series_footer[table::ROLE], table::ROLE_SERIES);
     // Both halves state the partition, so either can be opened alone.

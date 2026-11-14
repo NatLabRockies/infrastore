@@ -232,6 +232,13 @@ macro_rules! descriptor_builders {
             self
         }
 
+        /// Name the field on the owning component the values are a fraction of
+        /// when the unit system is the component base (e.g. `"base_power"`).
+        pub fn with_per_unit_of(mut self, per_unit_of: impl Into<String>) -> Self {
+            self.per_unit_of = Some(per_unit_of.into());
+            self
+        }
+
         /// Set the opaque application payload carried through to the metadata row.
         pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
             self.application_data = Some(application_data.into());
@@ -299,6 +306,8 @@ pub struct SingleTimeSeries {
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
     pub component_field: Option<String>,
+    /// See [`crate::TimeSeriesMetadata::per_unit_of`].
+    pub per_unit_of: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -326,6 +335,7 @@ impl SingleTimeSeries {
             unit_system: None,
             time_reference: None,
             component_field: None,
+            per_unit_of: None,
             application_data: None,
         }
     }
@@ -526,6 +536,8 @@ pub struct NonSequentialTimeSeries {
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
     pub component_field: Option<String>,
+    /// See [`crate::TimeSeriesMetadata::per_unit_of`].
+    pub per_unit_of: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -560,6 +572,7 @@ impl NonSequentialTimeSeries {
             unit_system: None,
             time_reference: None,
             component_field: None,
+            per_unit_of: None,
             application_data: None,
         })
     }
@@ -676,6 +689,8 @@ pub struct PersistentTimeSeries {
     /// (e.g. `"fuel_cost"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
     pub component_field: Option<String>,
+    /// See [`crate::TimeSeriesMetadata::per_unit_of`].
+    pub per_unit_of: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. This is where a consumer's own expansion policy lives — see the type
@@ -745,6 +760,7 @@ impl PersistentTimeSeries {
             unit_system: None,
             time_reference: None,
             component_field: None,
+            per_unit_of: None,
             application_data: None,
         })
     }
@@ -872,6 +888,8 @@ pub struct Deterministic {
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
     pub component_field: Option<String>,
+    /// See [`crate::TimeSeriesMetadata::per_unit_of`].
+    pub per_unit_of: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -908,6 +926,7 @@ impl Deterministic {
             unit_system: None,
             time_reference: None,
             component_field: None,
+            per_unit_of: None,
             application_data: None,
         };
         out.validate()?;
@@ -1051,6 +1070,8 @@ pub struct Probabilistic {
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
     pub component_field: Option<String>,
+    /// See [`crate::TimeSeriesMetadata::per_unit_of`].
+    pub per_unit_of: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -1141,6 +1162,7 @@ impl Probabilistic {
             unit_system: None,
             time_reference: None,
             component_field: None,
+            per_unit_of: None,
             application_data: None,
         };
         out.validate()?;
@@ -1234,6 +1256,8 @@ pub struct Scenarios {
     /// (e.g. `"max_active_power"`), or `None`.
     /// See [`crate::TimeSeriesMetadata::component_field`].
     pub component_field: Option<String>,
+    /// See [`crate::TimeSeriesMetadata::per_unit_of`].
+    pub per_unit_of: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -1324,6 +1348,7 @@ impl Scenarios {
             unit_system: None,
             time_reference: None,
             component_field: None,
+            per_unit_of: None,
             application_data: None,
         };
         out.validate()?;
@@ -1485,10 +1510,10 @@ impl Scenarios {
 /// reconstructs a series from its array and then fills these in from the
 /// catalog row via [`TimeSeriesData::set_descriptors`].
 ///
-/// This is a struct rather than a positional argument list because four of the
-/// seven fields are `Option<String>`: as bare parameters, `units`,
-/// `quantity_kind`, `component_field`, and `application_data` would be silently
-/// interchangeable at every call site.
+/// This is a struct rather than a positional argument list because five of the
+/// eight fields are `Option<String>`: as bare parameters, `units`,
+/// `quantity_kind`, `component_field`, `per_unit_of`, and `application_data`
+/// would be silently interchangeable at every call site.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Descriptors {
     pub element_type: ElementType,
@@ -1497,6 +1522,7 @@ pub struct Descriptors {
     pub unit_system: Option<UnitSystem>,
     pub time_reference: Option<TimeReference>,
     pub component_field: Option<String>,
+    pub per_unit_of: Option<String>,
     pub application_data: Option<String>,
 }
 
@@ -1602,6 +1628,11 @@ impl TimeSeriesData {
         each_variant!(self, s => s.component_field.as_deref())
     }
 
+    /// The component field the values are a fraction of, or `None`.
+    pub fn per_unit_of(&self) -> Option<&str> {
+        each_variant!(self, s => s.per_unit_of.as_deref())
+    }
+
     /// The opaque application payload, or `None`.
     pub fn application_data(&self) -> Option<&str> {
         each_variant!(self, s => s.application_data.as_deref())
@@ -1643,6 +1674,12 @@ impl TimeSeriesData {
         self
     }
 
+    /// Name the field the wrapped series' values are a fraction of.
+    pub fn with_per_unit_of(mut self, per_unit_of: impl Into<String>) -> Self {
+        each_variant!(&mut self, s => s.per_unit_of = Some(per_unit_of.into()));
+        self
+    }
+
     /// Set the opaque application payload on the wrapped series.
     pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
         each_variant!(&mut self, s => s.application_data = Some(application_data.into()));
@@ -1659,6 +1696,7 @@ impl TimeSeriesData {
             unit_system,
             time_reference,
             component_field,
+            per_unit_of,
             application_data,
         } = descriptors;
         each_variant!(self, s => {
@@ -1668,6 +1706,7 @@ impl TimeSeriesData {
             s.unit_system = unit_system;
             s.time_reference = time_reference;
             s.component_field = component_field;
+            s.per_unit_of = per_unit_of;
             s.application_data = application_data;
         })
     }

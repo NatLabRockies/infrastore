@@ -76,6 +76,7 @@ function add_time_series!(
         _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
         _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
         _opt_string_arg(ts.component_field)::Cstring,
+        _opt_string_arg(ts.per_unit_of)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -119,6 +120,7 @@ for (S, sym) in (
             _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
             _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
             _opt_string_arg(ts.component_field)::Cstring,
+            _opt_string_arg(ts.per_unit_of)::Cstring,
         )::Int32
         _check(code)
         batch.count += 1
@@ -161,6 +163,7 @@ function add_time_series!(
         _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
         _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
         _opt_string_arg(ts.component_field)::Cstring,
+        _opt_string_arg(ts.per_unit_of)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -201,6 +204,7 @@ function add_time_series!(
         _opt_string_arg(_unit_system_str(ts.unit_system))::Cstring,
         _opt_string_arg(_time_reference_str(_audit_zone(ts.time_reference)))::Cstring,
         _opt_string_arg(ts.component_field)::Cstring,
+        _opt_string_arg(ts.per_unit_of)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1

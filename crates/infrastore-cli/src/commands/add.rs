@@ -101,6 +101,9 @@ pub struct InlineArgs {
     /// Component field these values vary over time, e.g. max_active_power.
     #[arg(long, help_heading = "Inline descriptor")]
     pub component_field: Option<String>,
+    /// Component field the values are a fraction of under component_base, e.g. base_power.
+    #[arg(long, help_heading = "Inline descriptor")]
+    pub per_unit_of: Option<String>,
     /// Opaque, package-owned payload.
     #[arg(long, help_heading = "Inline descriptor")]
     pub application_data: Option<String>,
@@ -165,6 +168,7 @@ impl InlineArgs {
             || self.unit_system.is_some()
             || self.time_reference.is_some()
             || self.component_field.is_some()
+            || self.per_unit_of.is_some()
             || self.application_data.is_some()
             || !self.element_shape.is_empty()
             || !self.feature.is_empty()
@@ -215,6 +219,7 @@ impl InlineArgs {
             unit_system: self.unit_system.clone(),
             time_reference: self.time_reference.clone(),
             component_field: self.component_field.clone(),
+            per_unit_of: self.per_unit_of.clone(),
             application_data: self.application_data.clone(),
             csv: Some(csv.display().to_string()),
             element_shape: self.element_shape.clone(),
@@ -1108,6 +1113,7 @@ fn import_options(opts: &AddArgs) -> Result<infrastore_tabular::ImportOptions, S
             .map(parse::parse_unit_system)
             .transpose()?,
         component_field: opts.inline.component_field.clone(),
+        per_unit_of: opts.inline.per_unit_of.clone(),
         application_data: opts.inline.application_data.clone(),
         skip_checksum: opts.no_checksum,
     })
@@ -1220,6 +1226,9 @@ fn empty_descriptors(request: &AddRequest) -> Vec<&'static str> {
     }
     if request.data.component_field().is_none() {
         out.push("component_field");
+    }
+    if request.data.per_unit_of().is_none() {
+        out.push("per_unit_of");
     }
     if request.data.application_data().is_none() {
         out.push("application_data");
