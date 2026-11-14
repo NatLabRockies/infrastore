@@ -1061,7 +1061,7 @@ impl MetadataStore {
         // Skipped for read-only connections (the pragma writes the header on
         // a rollback-mode file; a cleanly closed WAL store reads fine without
         // it) and no-ops for in-memory databases.
-        if !conn.is_readonly(rusqlite::DatabaseName::Main)? {
+        if !conn.is_readonly(rusqlite::MAIN_DB)? {
             // `journal_mode` returns a row ("wal"); use `query_row` to consume
             // it — `execute` would report a misuse error.
             conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
@@ -1086,7 +1086,7 @@ impl MetadataStore {
         // can do neither — `CREATE TABLE IF NOT EXISTS` against a read-only
         // database errors even when it would be a no-op — so it only reports
         // whether what it is about to read is a shape this build understands.
-        if conn.is_readonly(rusqlite::DatabaseName::Main)? {
+        if conn.is_readonly(rusqlite::MAIN_DB)? {
             migrate::check_read_only(conn)?;
         } else {
             migrate::apply(conn)?;
@@ -2998,16 +2998,12 @@ impl MetadataStore {
                 return Ok(false);
             }
         }
-        if self.has_store_attributes_table
+        Ok(!(self.has_store_attributes_table
             && self
                 .conn
                 .query_row("SELECT 1 FROM store_attributes LIMIT 1", [], |_| Ok(()))
                 .optional()?
-                .is_some()
-        {
-            return Ok(false);
-        }
-        Ok(true)
+                .is_some()))
     }
 }
 
