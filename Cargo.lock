@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-bench"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-cli"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "bytemuck",
  "cargo-husky",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-ffi"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "cbindgen",
  "chrono",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-parquet"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-proto"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "chrono",
  "infrastore-core",
@@ -1247,7 +1247,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-py"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "chrono",
  "infrastore-core",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-server"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "infrastore-tabular"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "chrono",
  "infrastore-core",
