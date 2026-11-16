@@ -11511,6 +11511,8 @@ static_read!(reader, t) -&gt; reader  # fills buffers; errors if t is off the ti
        # a ZonedDateTime (TimeZones loaded) for one recording instants or unspecified
 static_values(reader, group_index::Integer; lazy=false) -&gt; AbstractArray
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].ids[j]
+static_values(reader, group_index::Integer, Array{T,N}; lazy=Val(false)) -&gt; Array{T,N}
+       # the same, with the result type named so it infers; ArgumentError if the group differs
 </code></pre>
 <p>All matched series must share one timeline — one grid (<code>initial_timestamp</code> + <code>length</code>) for
 <code>SingleTimeSeries</code>, one timestamp vector for <code>NonSequentialTimeSeries</code>. The build validates this and
@@ -11590,6 +11592,10 @@ forecast_read!(reader, t) -&gt; reader                  # fills buffers; errors 
        # t is spelled like the axis, as for static_read!: DateTime only for a zoneless one
 forecast_values(reader, entry_index::Integer; lazy=false) -&gt; AbstractArray
        # window of size .window_shape
+forecast_values(reader, entry_indices::AbstractVector; lazy=false) -&gt; Vector
+       # one window per index, typed once for the set; entries must share dtype and rank
+forecast_values(reader, entry_indices::AbstractVector, Array{T,N}; lazy=Val(false)) -&gt; Vector{Array{T,N}}
+       # the same, with the window type named so it infers
 </code></pre>
 <p>The values are stored row-major and returned in column-major Julia layout. For an array of more than
 one dimension, <code>static_values</code> and <code>forecast_values</code> reorder the values with a copy by default,
@@ -11599,7 +11605,8 @@ values in stored order, which indexes the same way.</p>
 axis (time, for a <code>Deterministic</code> window) and the values need no decoding. In stored order each
 slice along that axis, such as one time step's values, is contiguous in memory. Keep the default
 when you will decode or reorder the values anyway, or when you need a plain <code>Array</code>. A
-one-dimensional result is a <code>Vector</code> either way.</p>
+one-dimensional result is a <code>Vector</code> either way. The typed forms take <code>lazy</code> as <code>Val(true)</code> /
+<code>Val(false)</code>, so that the choice is part of the type and the result still infers.</p>
 <p>Valid read timestamps are <code>initial_timestamp + k·interval</code> for <code>k in 0:count-1</code> (each names the
 window forecast <em>from</em> that instant). A window's shape is <code>[H, *E]</code> for <code>Deterministic</code> /
 <code>DeterministicSingleTimeSeries</code>, <code>[num_percentiles, H, *E]</code> for <code>Probabilistic</code>, and
