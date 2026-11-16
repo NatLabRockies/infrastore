@@ -91,8 +91,12 @@ _lazy_val(lazy::Bool) = lazy ? Val(true) : Val(false)
 # The column-major view over row-major `stored`, built behind a barrier on the rank so the
 # permutation is a compile-time constant. With a runtime permutation the wrapper's type
 # parameters are worked out on every call, which costs more than the copy it replaces.
-function _stored_order_view(stored::Array{T, N}) where {T, N}
-    return PermutedDimsArray(stored, ntuple(i -> N + 1 - i, Val(N)))
+# @generated needed for Julia 1.11: it does not constant-fold the permutation through
+# `PermutedDimsArray(stored, perm)`, so the result's `perm`/`iperm` parameters infer as
+# unknown. Spelling them into the type here makes them constant on every version.
+@generated function _stored_order_view(stored::Array{T, N}) where {T, N}
+    perm = ntuple(i -> N + 1 - i, N)  # a reversal is its own inverse, so iperm == perm
+    return :(PermutedDimsArray{$T, $N, $perm, $perm, Array{$T, $N}}(stored))
 end
 
 # ---- StaticReader ---------------------------------------------------------
