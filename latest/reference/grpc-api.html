@@ -288,6 +288,7 @@ message TimeSeriesMetadata {
   //   How this series' timestamps were spelled. Absent means unspecified,
   //   which is NOT a claim they were written as UTC.
   optional int64  id                        = 26;  // the catalog association id
+  optional string per_unit_of               = 27;  // field component_base values are a fraction of
   //   The handle a consumer stores in its own model to reference this series
   //   later, and what every read RPC takes. Transmitted rather than derived:
   //   nothing computes it from the attributes, so the serving store is the
@@ -434,8 +435,8 @@ arrays survive the round trip without coercion. One caveat:</p>
 <li><strong><code>application_data</code> is not carried in <code>ReadByIdResp</code>.</strong> The opaque package-owned payload is
 returned by <code>ListMetadata</code> (on <code>TimeSeriesMetadata</code>) but left empty by <code>ReadById</code>, so values
 fetched directly by id come back without it. Every other descriptor — <code>name</code>, <code>units</code>,
-<code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>time_reference</code> — is on the response, so a
-read by id returns the same described series a local read does.</li>
+<code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>per_unit_of</code>, <code>time_reference</code> — is on the
+response, so a read by id returns the same described series a local read does.</li>
 </ul>
 <h2 id="catalog-revision-and-read-only-opens"><a class="header" href="#catalog-revision-and-read-only-opens">Catalog Revision and Read-Only Opens</a></h2>
 <p>The server opens its store <strong>read-only</strong>, which means it cannot upgrade a catalog. A store whose

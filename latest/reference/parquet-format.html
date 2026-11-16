@@ -352,7 +352,7 @@ value, so even a store with a million series is a file a reader loads whole.</p>
 <h2 id="footer"><a class="header" href="#footer">Footer</a></h2>
 <p>All three files carry it.</p>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
-<tr><td><code>infrastore.format</code></td><td><code>normalized_v2</code>. Read first, so another format is refused by version rather than by a missing column.</td></tr>
+<tr><td><code>infrastore.format</code></td><td><code>normalized_v3</code>. Read first, so another format is refused by version rather than by a missing column. <code>normalized_v2</code> files, which lack the series file's <code>per_unit_of</code>, are still read, with it unset.</td></tr>
 <tr><td><code>infrastore.role</code></td><td><code>values</code>, <code>series</code> or <code>arrays</code>.</td></tr>
 <tr><td><code>time_series_type</code></td><td>The partition's type.</td></tr>
 <tr><td><code>element_type</code></td><td>The partition's element type.</td></tr>

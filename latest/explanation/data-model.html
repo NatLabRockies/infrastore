@@ -222,7 +222,7 @@ would shadow the real field there and silently change what the query means. Addi
 with one of these names raises <code>InvalidParameter</code>:</p>
 <pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
 features, horizon, id, initial_timestamp, interval, length, name, owner_category, owner_id,
-owner_type, percentiles, quantity_kind, resolution, scenario_count, time_reference,
+owner_type, per_unit_of, percentiles, quantity_kind, resolution, scenario_count, time_reference,
 time_series_type, timestamps, unit_system, units
 </code></pre>
 <p><code>dtype</code> and <code>ext</code> no longer name metadata fields — <code>element_type</code> and <code>application_data</code> replaced
@@ -455,6 +455,11 @@ convention in many models but are not the same thing, since one component may ca
 for one field (a forecast and an actual, a set of weather years) and <code>name</code> is part of a series'
 identity where this is not. Named for the common case; when the owner is a supplemental attribute
 it names a field on that attribute.</li>
+<li><strong><code>per_unit_of</code></strong> — the field on the owning component that the values are a fraction of when
+<code>unit_system</code> is <code>component_base</code>, e.g. <code>"base_power"</code> or <code>"storage_capacity"</code>. Free-form and
+never interpreted by the store, which also does not enforce any relation to <code>unit_system</code>.
+Descriptive, so it sits outside a series' identity and outside both content hashes. It is not a
+filter.</li>
 <li><strong><code>time_reference</code></strong> — how this series' timestamps were <em>spelled</em>: <code>utc</code>, <code>zoneless</code>, a fixed
 offset (<code>-07:00</code>), or an IANA zone name (<code>America/Denver</code>). See
 <a href="./time-references.html">Time References</a>, which this one deserves a page of its own for.</li>
@@ -473,10 +478,10 @@ derived from it. Unlike <code>units</code> and <code>application_data</code> it 
 validates the array's dtype and per-step shape against it. See
 <a href="../reference/element-types.html">Element types</a>.</li>
 </ul>
-<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>, and <code>application_data</code>
-are recorded in metadata and returned on read, but they do not affect identity or storage: they are
-absent from the key and from both content hashes, so two series differing only in a descriptor are a
-duplicate.</p>
+<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>, <code>per_unit_of</code>, and
+<code>application_data</code> are recorded in metadata and returned on read, but they do not affect identity or
+storage: they are absent from the key and from both content hashes, so two series differing only in
+a descriptor are a duplicate.</p>
 <p><code>component_field</code> is the one descriptor that is also a <strong>filter</strong> (<code>ListFilter::component_field</code>,
 and its equivalent in every binding): "every series that varies this field", alone or scoped to one
 owner. Being descriptive rather than identifying, it narrows a listing but never addresses a single

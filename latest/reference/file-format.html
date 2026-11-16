@@ -251,7 +251,8 @@ bump plus an append-only migration</strong>, not a re-created store. A catalog w
 <code>CatalogTooNew</code> and is refused in both directions. Catalog revision 2, which widens the
 <code>time_series_type</code> <code>CHECK</code> from <code>BETWEEN 0 AND 5</code> to <code>&gt;= 0</code>, is the first such change and takes <strong>no
 <code>DATA_FORMAT_VERSION</code> bump at all</strong> — nothing in the HDF5 file moves, so a <code>0.19.0</code> store upgrades
-in place on its first writable open. See
+in place on its first writable open. Catalog revision 3 adds the nullable <code>per_unit_of</code> column with
+a plain <code>ALTER TABLE … ADD COLUMN</code>, likewise with no <code>DATA_FORMAT_VERSION</code> bump. See
 <a href="../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
 <p><code>PersistentTimeSeries</code> (storage code 6) is the first <em>type</em> to arrive through that door, and it
 likewise takes no version bump. The HDF5 layout is unchanged — a persistent series pools into the
@@ -651,6 +652,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>unit_system</code></td><td>TEXT</td><td><code>natural_units</code> or <code>component_base</code>; <code>NULL</code> means <em>unspecified</em></td></tr>
 <tr><td><code>time_reference</code></td><td>TEXT</td><td>How the timestamps were spelled (below); <code>NULL</code> means <em>unspecified</em></td></tr>
 <tr><td><code>component_field</code></td><td>TEXT</td><td>Owning component's field these values vary; <code>NULL</code> if unset</td></tr>
+<tr><td><code>per_unit_of</code></td><td>TEXT</td><td>Owning component's field <code>component_base</code> values are a fraction of</td></tr>
 <tr><td><code>percentiles_json</code></td><td>TEXT</td><td>JSON array of percentiles for <code>Probabilistic</code>; <code>NULL</code> else</td></tr>
 <tr><td><code>element_type</code></td><td>TEXT</td><td>Canonical element-type string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
 <tr><td><code>element_shape</code></td><td>TEXT</td><td>JSON array of per-step dims (<code>[]</code> = scalar)</td></tr>
@@ -798,7 +800,7 @@ The table is not carried by the OpenAPI export or import, which have no place fo
 <pre><code class="language-sql">CREATE TABLE schema_version (version INTEGER NOT NULL);
 </code></pre>
 <p>A single-column table holding the catalog's own schema revision — <code>CATALOG_SCHEMA_REVISION</code>, which
-is <strong>2</strong> as of this build. It holds at most one row: the DDL creates the table, and the migration
+is <strong>3</strong> as of this build. It holds at most one row: the DDL creates the table, and the migration
 ladder writes the revision, replacing whatever was there. A fresh catalog is stamped with the
 current revision directly rather than seeded at <code>1</code> and walked up the ladder.</p>
 <p>An absent table, or a present one holding no row, reads as revision <code>1</code> — the pre-ladder shape,
@@ -881,7 +883,7 @@ SELECT id, owner_id, owner_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
        units, quantity_kind, unit_system, time_reference, component_field,
-       element_type, element_shape, application_data,
+       per_unit_of, element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        lower(hex(timestamps_hash)) AS timestamps_hash

@@ -1125,6 +1125,7 @@ every forecast type, <code>None</code> for the static types); <code>resolution</
     pub unit_system: Option&lt;UnitSystem&gt;,
     pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
+    pub per_unit_of: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
 }
 
@@ -1139,6 +1140,7 @@ impl SingleTimeSeries {
     pub fn with_unit_system(self, unit_system: UnitSystem) -&gt; Self;
     pub fn with_time_reference(self, time_reference: TimeReference) -&gt; Self;
     pub fn with_component_field(self, component_field: impl Into&lt;String&gt;) -&gt; Self;
+    pub fn with_per_unit_of(self, per_unit_of: impl Into&lt;String&gt;) -&gt; Self;
     pub fn with_application_data(self, application_data: impl Into&lt;String&gt;) -&gt; Self;
 
     pub fn timestamp_at(&amp;self, index: usize) -&gt; Result&lt;DateTime&lt;Utc&gt;&gt;;
@@ -1602,10 +1604,10 @@ pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
 (<code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>timestamps</code>),
 <code>features</code>, the descriptors (<code>units</code>, <code>quantity_kind: Option&lt;String&gt;</code>,
 <code>unit_system: Option&lt;UnitSystem&gt;</code>, <code>time_reference: Option&lt;TimeReference&gt;</code>,
-<code>component_field: Option&lt;String&gt;</code>, <code>application_data: Option&lt;String&gt;</code>),
-<code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and the array typing: <code>dtype: Dtype</code>,
-<code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are
-<code>Option&lt;Period&gt;</code>.</p>
+<code>component_field: Option&lt;String&gt;</code>, <code>per_unit_of: Option&lt;String&gt;</code>,
+<code>application_data: Option&lt;String&gt;</code>), <code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and
+the array typing: <code>dtype: Dtype</code>, <code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>,
+<code>horizon</code>, <code>interval</code>) are <code>Option&lt;Period&gt;</code>.</p>
 <h3 id="unitsystem"><a class="header" href="#unitsystem"><code>UnitSystem</code></a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -1674,12 +1676,13 @@ by <code>TimeSeriesData::set_descriptors</code>:</p>
     pub unit_system: Option&lt;UnitSystem&gt;,
     pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
+    pub per_unit_of: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
 }
 <span class="boring">}</span></code></pre></pre>
-<p>It is a struct rather than a positional argument list because four of the seven fields are
-<code>Option&lt;String&gt;</code>: as bare parameters, <code>units</code>, <code>quantity_kind</code>, <code>component_field</code>, and
-<code>application_data</code> would be silently interchangeable at every call site.</p>
+<p>It is a struct rather than a positional argument list because five of the eight fields are
+<code>Option&lt;String&gt;</code>: as bare parameters, <code>units</code>, <code>quantity_kind</code>, <code>component_field</code>, <code>per_unit_of</code>,
+and <code>application_data</code> would be silently interchangeable at every call site.</p>
 <h3 id="listfilter"><a class="header" href="#listfilter"><code>ListFilter</code></a></h3>
 <p>A builder; every field is an optional filter, combined with AND. <code>ListFilter::new()</code> and
 <code>ListFilter::default()</code> are the same empty filter (matches everything).</p>

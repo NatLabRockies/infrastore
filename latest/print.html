@@ -1775,7 +1775,7 @@ would shadow the real field there and silently change what the query means. Addi
 with one of these names raises <code>InvalidParameter</code>:</p>
 <pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
 features, horizon, id, initial_timestamp, interval, length, name, owner_category, owner_id,
-owner_type, percentiles, quantity_kind, resolution, scenario_count, time_reference,
+owner_type, per_unit_of, percentiles, quantity_kind, resolution, scenario_count, time_reference,
 time_series_type, timestamps, unit_system, units
 </code></pre>
 <p><code>dtype</code> and <code>ext</code> no longer name metadata fields — <code>element_type</code> and <code>application_data</code> replaced
@@ -2008,6 +2008,11 @@ convention in many models but are not the same thing, since one component may ca
 for one field (a forecast and an actual, a set of weather years) and <code>name</code> is part of a series'
 identity where this is not. Named for the common case; when the owner is a supplemental attribute
 it names a field on that attribute.</li>
+<li><strong><code>per_unit_of</code></strong> — the field on the owning component that the values are a fraction of when
+<code>unit_system</code> is <code>component_base</code>, e.g. <code>"base_power"</code> or <code>"storage_capacity"</code>. Free-form and
+never interpreted by the store, which also does not enforce any relation to <code>unit_system</code>.
+Descriptive, so it sits outside a series' identity and outside both content hashes. It is not a
+filter.</li>
 <li><strong><code>time_reference</code></strong> — how this series' timestamps were <em>spelled</em>: <code>utc</code>, <code>zoneless</code>, a fixed
 offset (<code>-07:00</code>), or an IANA zone name (<code>America/Denver</code>). See
 <a href="explanation/./time-references.html">Time References</a>, which this one deserves a page of its own for.</li>
@@ -2026,10 +2031,10 @@ derived from it. Unlike <code>units</code> and <code>application_data</code> it 
 validates the array's dtype and per-step shape against it. See
 <a href="explanation/../reference/element-types.html">Element types</a>.</li>
 </ul>
-<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>, and <code>application_data</code>
-are recorded in metadata and returned on read, but they do not affect identity or storage: they are
-absent from the key and from both content hashes, so two series differing only in a descriptor are a
-duplicate.</p>
+<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>, <code>per_unit_of</code>, and
+<code>application_data</code> are recorded in metadata and returned on read, but they do not affect identity or
+storage: they are absent from the key and from both content hashes, so two series differing only in
+a descriptor are a duplicate.</p>
 <p><code>component_field</code> is the one descriptor that is also a <strong>filter</strong> (<code>ListFilter::component_field</code>,
 and its equivalent in every binding): "every series that varies this field", alone or scoped to one
 owner. Being descriptive rather than identifying, it narrows a listing but never addresses a single
@@ -3819,7 +3824,7 @@ everything else here, and nothing but that one method uses it:</p>
 the active virtual environment:</p>
 <pre><code class="language-sh">cd crates/infrastore-py
 python3 -m venv .venv &amp;&amp; source .venv/bin/activate
-pip install maturin pytest numpy tzdata "power-openapi-models==0.4.*"  # tzdata: zoneinfo on Windows
+pip install maturin pytest numpy tzdata "power-openapi-models==0.5.*"  # tzdata: zoneinfo on Windows
 pip install netCDF4 h5py                 # only for the HDF5-interop tests
 maturin develop
 
@@ -6154,7 +6159,8 @@ bump plus an append-only migration</strong>, not a re-created store. A catalog w
 <code>CatalogTooNew</code> and is refused in both directions. Catalog revision 2, which widens the
 <code>time_series_type</code> <code>CHECK</code> from <code>BETWEEN 0 AND 5</code> to <code>&gt;= 0</code>, is the first such change and takes <strong>no
 <code>DATA_FORMAT_VERSION</code> bump at all</strong> — nothing in the HDF5 file moves, so a <code>0.19.0</code> store upgrades
-in place on its first writable open. See
+in place on its first writable open. Catalog revision 3 adds the nullable <code>per_unit_of</code> column with
+a plain <code>ALTER TABLE … ADD COLUMN</code>, likewise with no <code>DATA_FORMAT_VERSION</code> bump. See
 <a href="reference/../explanation/design-choices.html#upgrade-a-store-in-place-rather-than-bricking-it">Upgrade a store in place</a>.</p>
 <p><code>PersistentTimeSeries</code> (storage code 6) is the first <em>type</em> to arrive through that door, and it
 likewise takes no version bump. The HDF5 layout is unchanged — a persistent series pools into the
@@ -6554,6 +6560,7 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>unit_system</code></td><td>TEXT</td><td><code>natural_units</code> or <code>component_base</code>; <code>NULL</code> means <em>unspecified</em></td></tr>
 <tr><td><code>time_reference</code></td><td>TEXT</td><td>How the timestamps were spelled (below); <code>NULL</code> means <em>unspecified</em></td></tr>
 <tr><td><code>component_field</code></td><td>TEXT</td><td>Owning component's field these values vary; <code>NULL</code> if unset</td></tr>
+<tr><td><code>per_unit_of</code></td><td>TEXT</td><td>Owning component's field <code>component_base</code> values are a fraction of</td></tr>
 <tr><td><code>percentiles_json</code></td><td>TEXT</td><td>JSON array of percentiles for <code>Probabilistic</code>; <code>NULL</code> else</td></tr>
 <tr><td><code>element_type</code></td><td>TEXT</td><td>Canonical element-type string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
 <tr><td><code>element_shape</code></td><td>TEXT</td><td>JSON array of per-step dims (<code>[]</code> = scalar)</td></tr>
@@ -6701,7 +6708,7 @@ The table is not carried by the OpenAPI export or import, which have no place fo
 <pre><code class="language-sql">CREATE TABLE schema_version (version INTEGER NOT NULL);
 </code></pre>
 <p>A single-column table holding the catalog's own schema revision — <code>CATALOG_SCHEMA_REVISION</code>, which
-is <strong>2</strong> as of this build. It holds at most one row: the DDL creates the table, and the migration
+is <strong>3</strong> as of this build. It holds at most one row: the DDL creates the table, and the migration
 ladder writes the revision, replacing whatever was there. A fresh catalog is stamped with the
 current revision directly rather than seeded at <code>1</code> and walked up the ladder.</p>
 <p>An absent table, or a present one holding no row, reads as revision <code>1</code> — the pre-ladder shape,
@@ -6784,7 +6791,7 @@ SELECT id, owner_id, owner_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
        units, quantity_kind, unit_system, time_reference, component_field,
-       element_type, element_shape, application_data,
+       per_unit_of, element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        lower(hex(timestamps_hash)) AS timestamps_hash
@@ -7050,7 +7057,7 @@ value, so even a store with a million series is a file a reader loads whole.</p>
 <h2 id="footer"><a class="header" href="#footer">Footer</a></h2>
 <p>All three files carry it.</p>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>
-<tr><td><code>infrastore.format</code></td><td><code>normalized_v2</code>. Read first, so another format is refused by version rather than by a missing column.</td></tr>
+<tr><td><code>infrastore.format</code></td><td><code>normalized_v3</code>. Read first, so another format is refused by version rather than by a missing column. <code>normalized_v2</code> files, which lack the series file's <code>per_unit_of</code>, are still read, with it unset.</td></tr>
 <tr><td><code>infrastore.role</code></td><td><code>values</code>, <code>series</code> or <code>arrays</code>.</td></tr>
 <tr><td><code>time_series_type</code></td><td>The partition's type.</td></tr>
 <tr><td><code>element_type</code></td><td>The partition's element type.</td></tr>
@@ -8349,6 +8356,7 @@ every forecast type, <code>None</code> for the static types); <code>resolution</
     pub unit_system: Option&lt;UnitSystem&gt;,
     pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
+    pub per_unit_of: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
 }
 
@@ -8363,6 +8371,7 @@ impl SingleTimeSeries {
     pub fn with_unit_system(self, unit_system: UnitSystem) -&gt; Self;
     pub fn with_time_reference(self, time_reference: TimeReference) -&gt; Self;
     pub fn with_component_field(self, component_field: impl Into&lt;String&gt;) -&gt; Self;
+    pub fn with_per_unit_of(self, per_unit_of: impl Into&lt;String&gt;) -&gt; Self;
     pub fn with_application_data(self, application_data: impl Into&lt;String&gt;) -&gt; Self;
 
     pub fn timestamp_at(&amp;self, index: usize) -&gt; Result&lt;DateTime&lt;Utc&gt;&gt;;
@@ -8826,10 +8835,10 @@ pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
 (<code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>timestamps</code>),
 <code>features</code>, the descriptors (<code>units</code>, <code>quantity_kind: Option&lt;String&gt;</code>,
 <code>unit_system: Option&lt;UnitSystem&gt;</code>, <code>time_reference: Option&lt;TimeReference&gt;</code>,
-<code>component_field: Option&lt;String&gt;</code>, <code>application_data: Option&lt;String&gt;</code>),
-<code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and the array typing: <code>dtype: Dtype</code>,
-<code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are
-<code>Option&lt;Period&gt;</code>.</p>
+<code>component_field: Option&lt;String&gt;</code>, <code>per_unit_of: Option&lt;String&gt;</code>,
+<code>application_data: Option&lt;String&gt;</code>), <code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and
+the array typing: <code>dtype: Dtype</code>, <code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>,
+<code>horizon</code>, <code>interval</code>) are <code>Option&lt;Period&gt;</code>.</p>
 <h3 id="unitsystem"><a class="header" href="#unitsystem"><code>UnitSystem</code></a></h3>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
@@ -8898,12 +8907,13 @@ by <code>TimeSeriesData::set_descriptors</code>:</p>
     pub unit_system: Option&lt;UnitSystem&gt;,
     pub time_reference: Option&lt;TimeReference&gt;,
     pub component_field: Option&lt;String&gt;,
+    pub per_unit_of: Option&lt;String&gt;,
     pub application_data: Option&lt;String&gt;,
 }
 <span class="boring">}</span></code></pre></pre>
-<p>It is a struct rather than a positional argument list because four of the seven fields are
-<code>Option&lt;String&gt;</code>: as bare parameters, <code>units</code>, <code>quantity_kind</code>, <code>component_field</code>, and
-<code>application_data</code> would be silently interchangeable at every call site.</p>
+<p>It is a struct rather than a positional argument list because five of the eight fields are
+<code>Option&lt;String&gt;</code>: as bare parameters, <code>units</code>, <code>quantity_kind</code>, <code>component_field</code>, <code>per_unit_of</code>,
+and <code>application_data</code> would be silently interchangeable at every call site.</p>
 <h3 id="listfilter"><a class="header" href="#listfilter"><code>ListFilter</code></a></h3>
 <p>A builder; every field is an optional filter, combined with AND. <code>ListFilter::new()</code> and
 <code>ListFilter::default()</code> are the same empty filter (matches everything).</p>
@@ -9859,6 +9869,7 @@ numbers.</p>
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 </code></pre>
@@ -9917,6 +9928,7 @@ none can be filtered on except <code>component_field</code>.</p>
 <tr><td><code>quantity_kind</code></td><td>What kind of physical quantity they measure, e.g. <code>"ActivePower"</code>. QUDT <code>QuantityKind</code> local names are recommended.</td></tr>
 <tr><td><code>unit_system</code></td><td><code>"natural_units"</code> or <code>"component_base"</code>. Omitted leaves the basis <strong>unspecified</strong>, which is not the same as natural units.</td></tr>
 <tr><td><code>component_field</code></td><td>The owning component's field these values are the time-varying form of, e.g. <code>"max_active_power"</code>. The one filterable one.</td></tr>
+<tr><td><code>per_unit_of</code></td><td>The owning component's field <code>component_base</code> values are a fraction of, e.g. <code>"base_power"</code>. Never interpreted.</td></tr>
 <tr><td><code>application_data</code></td><td>Opaque, package-owned payload (typically JSON) stored verbatim. End users are not expected to set it.</td></tr>
 <tr><td><code>element_type</code></td><td>What the array's elements mean, e.g. <code>"tuple(3,f64)"</code>. Omit for plain numbers; the property then reports the dtype.</td></tr>
 <tr><td><code>time_reference</code></td><td>Overrides the spelling otherwise inferred from the timestamps. See <a href="reference/python-api.html#time-references">Time references</a>.</td></tr>
@@ -10031,6 +10043,7 @@ not competing spellings of the same thing.</p>
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 </code></pre>
@@ -10051,6 +10064,7 @@ naive and aware values raises <code>InvalidParameterError</code>, since one seri
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 </code></pre>
@@ -10879,10 +10893,12 @@ view or a range — is normalized to a concrete <code>Array{T,N}</code>).</p>
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=&lt;inferred&gt;)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
@@ -10894,10 +10910,12 @@ struct NonSequentialTimeSeries{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=&lt;inferred&gt;)
 
 struct PersistentTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # breakpoints, strictly increasing; one per row of dim 1
@@ -10909,10 +10927,12 @@ struct PersistentTimeSeries{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 PersistentTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=&lt;inferred&gt;)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -10928,10 +10948,12 @@ struct Deterministic{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=&lt;inferred&gt;)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -10948,10 +10970,12 @@ struct Probabilistic{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=&lt;inferred&gt;)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -10968,10 +10992,12 @@ struct Scenarios{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=&lt;inferred&gt;)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=&lt;inferred&gt;)
 # note: scenario_count is NOT a constructor argument
 
 # The seven descriptors after `name` are carried on the struct and are the only
@@ -11143,6 +11169,7 @@ every read, removal and copy takes.</p>
     unit_system       :: Union{Nothing,UnitSystem}   # NaturalUnits | ComponentBase
     time_reference    :: Union{Nothing,TimeReference}   # how the timestamps were spelled
     component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
+    per_unit_of       :: Union{Nothing,String}       # e.g. "base_power"
     application_data  :: Union{Nothing,String}
     id                :: Union{Nothing,Int64}    # the catalog row's id; nothing off-catalog
 end
@@ -12185,7 +12212,7 @@ verbatim to the add functions and stored uninterpreted. Element typing does not 
 <code>element_type</code>.</li>
 <li><strong>Strings</strong> are null-terminated UTF-8. Optional string arguments (<code>application_data</code>,
 <code>features_json</code>, <code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>time_reference</code>, <code>component_field</code>,
-<code>name_glob</code>) accept <code>NULL</code>.</li>
+<code>per_unit_of</code>, <code>name_glob</code>) accept <code>NULL</code>.</li>
 <li><strong><code>time_reference</code></strong> records how a series' timestamps were <em>spelled</em>: <code>"utc"</code>, <code>"zoneless"</code>, a
 fixed offset (<code>"-07:00"</code>), or an IANA zone name (<code>"America/Denver"</code>). An unparseable value fails
 with <code>INFRASTORE_ERR_INVALID_PARAMETER</code> rather than degrading to unset. Zone <em>existence</em> is not
@@ -12288,7 +12315,8 @@ and keeps a second, near-identical set of per-type entry points off the surface.
                             const char *quantity_kind,        /* optional */
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                            const char *component_field);     /* optional: e.g. "max_active_power" */
+                            const char *component_field,     /* optional: e.g. "max_active_power" */
+                            const char *per_unit_of);         /* optional: e.g. "base_power" */
 
 /* All-or-nothing removal by catalog association id: an id naming no row returns
    INFRASTORE_ERR_NOT_FOUND and removes nothing. A repeated id is removed, and
@@ -12331,7 +12359,8 @@ silent truncation.</p>
                                     const char *units,
                                     const char *quantity_kind, const char *unit_system,
                                     const char *time_reference,
-                                    const char *component_field);
+                                    const char *component_field,
+                                    const char *per_unit_of);
 /* Reads a NonSequentialTimeSeries or PersistentTimeSeries slot; any other type is
    INFRASTORE_ERR_INVALID_PARAMETER. */
 int32_t infrastore_bulk_result_get_irregular(const struct InfraStoreBulkReadHandle *result, uint64_t index,
@@ -12342,7 +12371,7 @@ int32_t infrastore_bulk_result_get_irregular(const struct InfraStoreBulkReadHand
                                     char **out_application_data, char **out_element_type,
                                     char **out_units, char **out_quantity_kind,
                                     char **out_unit_system, char **out_time_reference,
-                                    char **out_component_field);
+                                    char **out_component_field, char **out_per_unit_of);
 </code></pre>
 <h2 id="persistenttimeseries-3"><a class="header" href="#persistenttimeseries-3">PersistentTimeSeries</a></h2>
 <p><code>infrastore_batch_add_persistent</code> takes <strong>exactly</strong> the argument list of
@@ -12389,7 +12418,7 @@ int32_t infrastore_store_count_array_references(const struct InfraStore *handle,
    owner_category, time_series_type, name, data_hash (64-char hex),
    initial_timestamp_ms, resolution, horizon, interval, count, length,
    percentiles, element_type, element_shape, features, units, quantity_kind,
-   unit_system, time_reference, component_field, application_data, id -- fields
+   unit_system, time_reference, component_field, per_unit_of, application_data, id -- fields
    that do not apply to the row's type are null. One export covers every time
    series type, static and forecast alike. Probe-then-fetch: call with
    buf = NULL, cap = 0 to learn *out_len, then again with an out_len+1-byte
@@ -12447,7 +12476,8 @@ to <code>*out_count</code>:</p>
                               const char *quantity_kind,        /* optional */
                               const char *unit_system,          /* optional: "natural_units" | "component_base" */
                               const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                              const char *component_field);     /* optional: e.g. "max_active_power" */
+                              const char *component_field,     /* optional: e.g. "max_active_power" */
+                              const char *per_unit_of);         /* optional: e.g. "base_power" */
 
 int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                    int64_t owner_id, const char *owner_type,
@@ -12464,7 +12494,8 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                    const char *quantity_kind,        /* optional */
                                    const char *unit_system,          /* optional: "natural_units" | "component_base" */
                                    const char *time_reference,       /* optional: "utc" | "zoneless" | "-07:00" | IANA name */
-                                   const char *component_field);     /* optional: e.g. "max_active_power" */
+                                   const char *component_field,     /* optional: e.g. "max_active_power" */
+                                   const char *per_unit_of);         /* optional: e.g. "base_power" */
 
 int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                               const char *horizon, const char *interval,  /* ISO-8601 */
@@ -13384,6 +13415,7 @@ message TimeSeriesMetadata {
   //   How this series' timestamps were spelled. Absent means unspecified,
   //   which is NOT a claim they were written as UTC.
   optional int64  id                        = 26;  // the catalog association id
+  optional string per_unit_of               = 27;  // field component_base values are a fraction of
   //   The handle a consumer stores in its own model to reference this series
   //   later, and what every read RPC takes. Transmitted rather than derived:
   //   nothing computes it from the attributes, so the serving store is the
@@ -13530,8 +13562,8 @@ arrays survive the round trip without coercion. One caveat:</p>
 <li><strong><code>application_data</code> is not carried in <code>ReadByIdResp</code>.</strong> The opaque package-owned payload is
 returned by <code>ListMetadata</code> (on <code>TimeSeriesMetadata</code>) but left empty by <code>ReadById</code>, so values
 fetched directly by id come back without it. Every other descriptor — <code>name</code>, <code>units</code>,
-<code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>time_reference</code> — is on the response, so a
-read by id returns the same described series a local read does.</li>
+<code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>per_unit_of</code>, <code>time_reference</code> — is on the
+response, so a read by id returns the same described series a local read does.</li>
 </ul>
 <h2 id="catalog-revision-and-read-only-opens"><a class="header" href="#catalog-revision-and-read-only-opens">Catalog Revision and Read-Only Opens</a></h2>
 <p>The server opens its store <strong>read-only</strong>, which means it cannot upgrade a catalog. A store whose
@@ -14363,6 +14395,7 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <tr><td><code>unit_system</code></td><td>optional</td><td><code>natural_units</code> or <code>component_base</code>; unset = unspecified.</td></tr>
 <tr><td><code>time_reference</code></td><td>optional</td><td><code>utc</code> / <code>zoneless</code> / <code>-07:00</code> / an IANA name; normally inferred.</td></tr>
 <tr><td><code>component_field</code></td><td>optional</td><td>Owning component's field these values vary over time.</td></tr>
+<tr><td><code>per_unit_of</code></td><td>optional</td><td>Owning component's field <code>component_base</code> values are a share of.</td></tr>
 <tr><td><code>application_data</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
 <tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values. See below.</td></tr>
 <tr><td><code>initial_timestamp</code></td><td>all but non-sequential</td><td>Also decides the series' <code>time_reference</code> unless declared.</td></tr>
@@ -14397,8 +14430,8 @@ the descriptor as the repeatable and batch form.</p>
 <p>In the default <code>long</code> layout every value column is part of <em>one</em> series' per-timestep element, so
 loading that file would need 500 descriptors and 500 single-column CSVs. <code>"layout": "wide"</code> reads it
 as 500 separate scalar series instead, sharing this descriptor's <code>name</code>, <code>type</code>, <code>resolution</code>,
-<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>application_data</code>, and <code>features</code>, and
-differing only by owner:</p>
+<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>per_unit_of</code>, <code>application_data</code>, and
+<code>features</code>, and differing only by owner:</p>
 <pre><code class="language-json">{
   "csv": "gen_profiles.csv",
   "layout": "wide",

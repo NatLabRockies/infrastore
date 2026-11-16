@@ -771,6 +771,7 @@ numbers.</p>
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 </code></pre>
@@ -829,6 +830,7 @@ none can be filtered on except <code>component_field</code>.</p>
 <tr><td><code>quantity_kind</code></td><td>What kind of physical quantity they measure, e.g. <code>"ActivePower"</code>. QUDT <code>QuantityKind</code> local names are recommended.</td></tr>
 <tr><td><code>unit_system</code></td><td><code>"natural_units"</code> or <code>"component_base"</code>. Omitted leaves the basis <strong>unspecified</strong>, which is not the same as natural units.</td></tr>
 <tr><td><code>component_field</code></td><td>The owning component's field these values are the time-varying form of, e.g. <code>"max_active_power"</code>. The one filterable one.</td></tr>
+<tr><td><code>per_unit_of</code></td><td>The owning component's field <code>component_base</code> values are a fraction of, e.g. <code>"base_power"</code>. Never interpreted.</td></tr>
 <tr><td><code>application_data</code></td><td>Opaque, package-owned payload (typically JSON) stored verbatim. End users are not expected to set it.</td></tr>
 <tr><td><code>element_type</code></td><td>What the array's elements mean, e.g. <code>"tuple(3,f64)"</code>. Omit for plain numbers; the property then reports the dtype.</td></tr>
 <tr><td><code>time_reference</code></td><td>Overrides the spelling otherwise inferred from the timestamps. See <a href="#time-references">Time references</a>.</td></tr>
@@ -943,6 +945,7 @@ not competing spellings of the same thing.</p>
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 </code></pre>
@@ -963,6 +966,7 @@ naive and aware values raises <code>InvalidParameterError</code>, since one seri
     quantity_kind: str | None = None,
     unit_system: str | None = None,      # "natural_units" | "component_base"
     component_field: str | None = None,  # e.g. "max_active_power"
+    per_unit_of: str | None = None,  # e.g. "base_power"
     time_reference: str | None = None,   # "utc" | "zoneless" | "-07:00" | "America/Denver"
 )
 </code></pre>

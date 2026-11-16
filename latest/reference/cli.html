@@ -857,6 +857,7 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <tr><td><code>unit_system</code></td><td>optional</td><td><code>natural_units</code> or <code>component_base</code>; unset = unspecified.</td></tr>
 <tr><td><code>time_reference</code></td><td>optional</td><td><code>utc</code> / <code>zoneless</code> / <code>-07:00</code> / an IANA name; normally inferred.</td></tr>
 <tr><td><code>component_field</code></td><td>optional</td><td>Owning component's field these values vary over time.</td></tr>
+<tr><td><code>per_unit_of</code></td><td>optional</td><td>Owning component's field <code>component_base</code> values are a share of.</td></tr>
 <tr><td><code>application_data</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
 <tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values. See below.</td></tr>
 <tr><td><code>initial_timestamp</code></td><td>all but non-sequential</td><td>Also decides the series' <code>time_reference</code> unless declared.</td></tr>
@@ -891,8 +892,8 @@ the descriptor as the repeatable and batch form.</p>
 <p>In the default <code>long</code> layout every value column is part of <em>one</em> series' per-timestep element, so
 loading that file would need 500 descriptors and 500 single-column CSVs. <code>"layout": "wide"</code> reads it
 as 500 separate scalar series instead, sharing this descriptor's <code>name</code>, <code>type</code>, <code>resolution</code>,
-<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>application_data</code>, and <code>features</code>, and
-differing only by owner:</p>
+<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>per_unit_of</code>, <code>application_data</code>, and
+<code>features</code>, and differing only by owner:</p>
 <pre><code class="language-json">{
   "csv": "gen_profiles.csv",
   "layout": "wide",
