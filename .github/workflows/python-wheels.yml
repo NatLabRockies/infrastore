@@ -74,7 +74,7 @@ jobs:
         # the libraries. Keep each macos-NN entry in sync with its runner image.
         include:
           - os: ubuntu-latest
-          - os: macos-14
+          - os: macos-15
             macosx_deployment_target: "14.0"
           - os: windows-latest
     steps:

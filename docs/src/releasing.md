@@ -222,7 +222,7 @@ draft it left.
 
 | Target                      | Runner           | Archive contents          |
 | --------------------------- | ---------------- | ------------------------- |
-| `aarch64-apple-darwin`      | `macos-14`       | executables and C library |
+| `aarch64-apple-darwin`      | `macos-15`       | executables and C library |
 | `x86_64-unknown-linux-musl` | `ubuntu-latest`  | executables only          |
 | `x86_64-unknown-linux-gnu`  | `ubuntu-latest`  | C library only            |
 | `x86_64-pc-windows-msvc`    | `windows-latest` | executables and C library |
