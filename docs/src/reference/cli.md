@@ -800,6 +800,7 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 | `unit_system`                  | optional                 | `natural_units` or `component_base`; unset = unspecified.        |
 | `time_reference`               | optional                 | `utc` / `zoneless` / `-07:00` / an IANA name; normally inferred. |
 | `component_field`              | optional                 | Owning component's field these values vary over time.            |
+| `per_unit_of`                  | optional                 | Owning component's field `component_base` values are a share of. |
 | `application_data`             | optional                 | Opaque package-owned payload (e.g. JSON), stored verbatim.       |
 | `features`                     | optional                 | JSON object; int/float/bool/string values. See below.            |
 | `initial_timestamp`            | all but non-sequential   | Also decides the series' `time_reference` unless declared.       |
@@ -840,8 +841,8 @@ timestamp,gen_001,gen_002,...,gen_500
 In the default `long` layout every value column is part of _one_ series' per-timestep element, so
 loading that file would need 500 descriptors and 500 single-column CSVs. `"layout": "wide"` reads it
 as 500 separate scalar series instead, sharing this descriptor's `name`, `type`, `resolution`,
-`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`, and `features`, and
-differing only by owner:
+`units`, `quantity_kind`, `unit_system`, `component_field`, `per_unit_of`, `application_data`, and
+`features`, and differing only by owner:
 
 ```json
 {

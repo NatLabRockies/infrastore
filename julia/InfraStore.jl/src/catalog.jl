@@ -156,6 +156,7 @@ function _decode_metadata(r::AbstractDict)
         _unit_system(r["unit_system"] === nothing ? nothing : String(r["unit_system"])),
         _row_time_reference(r),
         r["component_field"] === nothing ? nothing : String(r["component_field"]),
+        r["per_unit_of"] === nothing ? nothing : String(r["per_unit_of"]),
         r["application_data"] === nothing ? nothing : String(r["application_data"]),
         # Always present on a row that came from the catalog.
         r["id"] === nothing ? nothing : Int64(r["id"]),

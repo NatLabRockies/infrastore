@@ -57,6 +57,9 @@ anything but a `Probabilistic`).
 - `units`, `quantity_kind`, `component_field`, `application_data` — `nothing`
   when unset. `component_field` names the field on the owning component whose
   value these values are the time-varying form of, e.g. `"max_active_power"`.
+- `per_unit_of` — the field on the owning component that the values are a
+  fraction of when `unit_system` is `ComponentBase` (e.g. `"base_power"`), or
+  `nothing`. Free-form and never interpreted by the store.
 - `unit_system` — a [`UnitSystem`](@ref), or `nothing` when unspecified (which
   is not the same as `NaturalUnits`).
 - `time_reference` — a [`TimeReference`](@ref) recording how `initial_timestamp`
@@ -90,6 +93,7 @@ struct TimeSeriesMetadata
     unit_system::Union{Nothing, UnitSystem}
     time_reference::Union{Nothing, TimeReference}
     component_field::Union{Nothing, String}
+    per_unit_of::Union{Nothing, String}
     application_data::Union{Nothing, String}
     id::Union{Nothing, Int64}
 end

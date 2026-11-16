@@ -123,10 +123,12 @@ struct SingleTimeSeries{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=<inferred>)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
@@ -138,10 +140,12 @@ struct NonSequentialTimeSeries{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 NonSequentialTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=<inferred>)
 
 struct PersistentTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # breakpoints, strictly increasing; one per row of dim 1
@@ -153,10 +157,12 @@ struct PersistentTimeSeries{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 PersistentTimeSeries(timestamps, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=<inferred>)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -172,10 +178,12 @@ struct Deterministic{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=<inferred>)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -192,10 +200,12 @@ struct Probabilistic{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=<inferred>)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -212,10 +222,12 @@ struct Scenarios{T,N}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # nothing = unspecified, not NaturalUnits
     component_field   :: Union{Nothing,String}
+    per_unit_of       :: Union{Nothing,String}
     time_reference    :: Union{Nothing,TimeReference}  # inferred from the timestamp; see below
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name; application_data=nothing, element_type=nothing, units=nothing,
-    quantity_kind=nothing, unit_system=nothing, component_field=nothing, time_reference=<inferred>)
+    quantity_kind=nothing, unit_system=nothing, component_field=nothing, per_unit_of=nothing,
+    time_reference=<inferred>)
 # note: scenario_count is NOT a constructor argument
 
 # The seven descriptors after `name` are carried on the struct and are the only
@@ -424,6 +436,7 @@ struct TimeSeriesMetadata                    # get_metadata_by_id / list_metadat
     unit_system       :: Union{Nothing,UnitSystem}   # NaturalUnits | ComponentBase
     time_reference    :: Union{Nothing,TimeReference}   # how the timestamps were spelled
     component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
+    per_unit_of       :: Union{Nothing,String}       # e.g. "base_power"
     application_data  :: Union{Nothing,String}
     id                :: Union{Nothing,Int64}    # the catalog row's id; nothing off-catalog
 end

@@ -4347,7 +4347,7 @@ fn store_info_reports_the_catalog_schema_revision() {
 /// it from every read command.
 ///
 /// The no-op test above cannot show this: a current store opens read-only just
-/// fine and reports revision 2 either way, so it would pass unchanged if this
+/// fine and reports the current revision either way, so it would pass unchanged if this
 /// command quietly used the read-only opener and migrated nothing. This one
 /// backdates the catalog's revision stamp and walks the whole loop a user hits
 /// — a read refuses and names the remedy, `upgrade` applies it, the read works.
@@ -4379,8 +4379,8 @@ fn upgrade_migrates_a_stale_catalog_and_unblocks_the_read_commands() {
 
     // `upgrade` is that writable open.
     let out = run(&store, &["-f", "json", "upgrade"]);
-    assert!(out.contains("\"catalog_schema_revision\": 2"), "{out}");
-    assert_eq!(revision(), 2);
+    assert!(out.contains("\"catalog_schema_revision\": 3"), "{out}");
+    assert_eq!(revision(), 3);
 
     // And the read that just refused now works.
     run(&store, &["list"]);
@@ -4433,7 +4433,7 @@ fn upgrade_is_the_writable_open_and_a_no_op_on_a_current_store() {
     run(&store, &["init"]);
     for _ in 0..2 {
         let out = run(&store, &["-f", "json", "upgrade"]);
-        assert!(out.contains("\"catalog_schema_revision\": 2"), "{out}");
+        assert!(out.contains("\"catalog_schema_revision\": 3"), "{out}");
         assert!(out.contains("data_format_version"), "{out}");
     }
     // It must not invent a store where none exists — that is `init`'s job, and

@@ -74,7 +74,8 @@ bump plus an append-only migration**, not a re-created store. A catalog written 
 `CatalogTooNew` and is refused in both directions. Catalog revision 2, which widens the
 `time_series_type` `CHECK` from `BETWEEN 0 AND 5` to `>= 0`, is the first such change and takes **no
 `DATA_FORMAT_VERSION` bump at all** — nothing in the HDF5 file moves, so a `0.19.0` store upgrades
-in place on its first writable open. See
+in place on its first writable open. Catalog revision 3 adds the nullable `per_unit_of` column with
+a plain `ALTER TABLE … ADD COLUMN`, likewise with no `DATA_FORMAT_VERSION` bump. See
 [Upgrade a store in place](../explanation/design-choices.md#upgrade-a-store-in-place-rather-than-bricking-it).
 
 `PersistentTimeSeries` (storage code 6) is the first _type_ to arrive through that door, and it
@@ -543,6 +544,7 @@ One row per association between an owner and a stored array.
 | `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_     |
 | `time_reference`    | TEXT    | How the timestamps were spelled (below); `NULL` means _unspecified_ |
 | `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset         |
+| `per_unit_of`       | TEXT    | Owning component's field `component_base` values are a fraction of  |
 | `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else          |
 | `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)            |
 | `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                         |
@@ -729,7 +731,7 @@ CREATE TABLE schema_version (version INTEGER NOT NULL);
 ```
 
 A single-column table holding the catalog's own schema revision — `CATALOG_SCHEMA_REVISION`, which
-is **2** as of this build. It holds at most one row: the DDL creates the table, and the migration
+is **3** as of this build. It holds at most one row: the DDL creates the table, and the migration
 ladder writes the revision, replacing whatever was there. A fresh catalog is stamped with the
 current revision directly rather than seeded at `1` and walked up the ladder.
 
@@ -828,7 +830,7 @@ SELECT id, owner_id, owner_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
        units, quantity_kind, unit_system, time_reference, component_field,
-       element_type, element_shape, application_data,
+       per_unit_of, element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        lower(hex(timestamps_hash)) AS timestamps_hash

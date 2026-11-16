@@ -18,7 +18,9 @@ use infrastore_core::{
     TimeSeriesMetadata, TypedArray,
 };
 use infrastore_parquet::read::{ImportOptions, ImportedSeries};
-use infrastore_parquet::{PartitionFiles, partitions, read_partition_with, write_partitions};
+use infrastore_parquet::{
+    PartitionFiles, partitions, read_partition_with, table, write_partitions,
+};
 
 /// [`read_partition_with`], collecting every series.
 fn read_partition(
@@ -53,6 +55,7 @@ fn descriptors_of(data: &TimeSeriesData) -> infrastore_core::Descriptors {
         unit_system: None,
         time_reference: data.time_reference().cloned(),
         component_field: None,
+        per_unit_of: None,
         application_data: None,
     }
 }
@@ -170,6 +173,7 @@ fn every_descriptor_comes_back() {
     inner.quantity_kind = Some("ActivePower".into());
     inner.unit_system = Some(infrastore_core::UnitSystem::NaturalUnits);
     inner.component_field = Some("max_active_power".into());
+    inner.per_unit_of = Some("base_power".into());
     inner.application_data = Some(r#"{"k":1}"#.into());
     inner.time_reference = Some(TimeReference::Utc);
 
@@ -194,6 +198,7 @@ fn every_descriptor_comes_back() {
         Some(infrastore_core::UnitSystem::NaturalUnits)
     );
     assert_eq!(s.component_field.as_deref(), Some("max_active_power"));
+    assert_eq!(s.per_unit_of.as_deref(), Some("base_power"));
     assert_eq!(s.application_data.as_deref(), Some(r#"{"k":1}"#));
 }
 
@@ -209,6 +214,7 @@ fn an_absent_descriptor_stays_absent() {
     assert_eq!(s.quantity_kind, None);
     assert_eq!(s.unit_system, None);
     assert_eq!(s.component_field, None);
+    assert_eq!(s.per_unit_of, None);
     assert_eq!(s.application_data, None);
 }
 
@@ -882,6 +888,63 @@ fn a_series_file_missing_a_required_column_is_refused() {
         .expect_err("a required column");
     assert!(err.to_string().contains("`features`"), "{err}");
     assert!(err.to_string().contains("required"), "{err}");
+}
+
+/// Export one series carrying `per_unit_of`, then rewrite the export as an
+/// older build would have written it: `marker` on every file's footer, and the
+/// series file without the `per_unit_of` column.
+fn without_per_unit_of(dir: &Path, marker: &str) -> infrastore_parquet::WrittenPartition {
+    let TimeSeriesData::SingleTimeSeries(mut inner) = hourly("load", &[1.0, 2.0]) else {
+        unreachable!()
+    };
+    inner.unit_system = Some(infrastore_core::UnitSystem::ComponentBase);
+    inner.per_unit_of = Some("base_power".into());
+    let written = export_one(dir, TimeSeriesData::SingleTimeSeries(inner));
+    for path in [
+        &written.values_path,
+        &written.series_path,
+        &written.arrays_path,
+    ] {
+        let (schema, batch) = read_one(path);
+        let keep: Vec<usize> = (0..schema.fields().len())
+            .filter(|i| schema.field(*i).name() != "per_unit_of")
+            .collect();
+        let mut metadata = schema.metadata().clone();
+        metadata.insert(table::FORMAT.into(), marker.into());
+        let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
+        let rewritten = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            fields, metadata,
+        ));
+        let columns = keep.iter().map(|i| batch.column(*i).clone()).collect();
+        write_batch(
+            path,
+            &arrow::array::RecordBatch::try_new(rewritten, columns).expect("rebuild"),
+        );
+    }
+    written
+}
+
+#[test]
+fn a_v2_series_file_imports_without_per_unit_of() {
+    // v2 predates the column, so its files lack it; it reads as unset.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = without_per_unit_of(dir.path(), table::FORMAT_V2);
+    let back = read_partition(&pair_of(&written), &ImportOptions::default()).expect("a v2 file");
+    let TimeSeriesData::SingleTimeSeries(s) = &back[0].data else {
+        panic!("expected a SingleTimeSeries");
+    };
+    assert_eq!(s.per_unit_of, None);
+    assert_eq!(s.data.to_f64_vec().unwrap(), vec![1.0, 2.0]);
+}
+
+#[test]
+fn a_v3_series_file_without_per_unit_of_is_refused() {
+    // v3 writes the column, so a v3 file without it has lost it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = without_per_unit_of(dir.path(), table::FORMAT_V3);
+    let err = read_partition(&pair_of(&written), &ImportOptions::default())
+        .expect_err("a required column");
+    assert!(err.to_string().contains("`per_unit_of`"), "{err}");
 }
 
 #[test]

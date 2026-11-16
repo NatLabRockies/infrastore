@@ -20,6 +20,7 @@
   "units": "pu",
   "quantity_kind": "ActivePower",
   "unit_system": "COMPONENT_BASE",
+  "per_unit_of": "base_power",
   "component_field": "max_active_power",
   "interval_alignment": "PERIOD_ENDING",
   "initial_timestamp": "2030-01-01T00:00:00Z",

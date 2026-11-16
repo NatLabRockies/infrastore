@@ -115,6 +115,12 @@
 /// catalog side, and a 0.19.0 store upgrades in place on its first writable
 /// open.
 ///
+/// Catalog revision 3 likewise takes no bump. It adds the nullable
+/// `per_unit_of` column to `time_series_associations` — the field on the
+/// owning component that `component_base` values are a fraction of — with a
+/// plain `ALTER TABLE … ADD COLUMN`, so existing rows read it as unset and a
+/// 0.19.0 store upgrades in place on its first writable open.
+///
 /// `PersistentTimeSeries` (storage code 6) is the first *type* to arrive
 /// through that door, and it likewise takes no bump. The HDF5 layout is
 /// untouched — a persistent series pools into the same `nsts_…` datasets as a

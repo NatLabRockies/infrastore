@@ -50,7 +50,7 @@ with one of these names raises `InvalidParameter`:
 ```text
 application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
 features, horizon, id, initial_timestamp, interval, length, name, owner_category, owner_id,
-owner_type, percentiles, quantity_kind, resolution, scenario_count, time_reference,
+owner_type, per_unit_of, percentiles, quantity_kind, resolution, scenario_count, time_reference,
 time_series_type, timestamps, unit_system, units
 ```
 
@@ -321,6 +321,11 @@ Each association can also carry:
   for one field (a forecast and an actual, a set of weather years) and `name` is part of a series'
   identity where this is not. Named for the common case; when the owner is a supplemental attribute
   it names a field on that attribute.
+- **`per_unit_of`** — the field on the owning component that the values are a fraction of when
+  `unit_system` is `component_base`, e.g. `"base_power"` or `"storage_capacity"`. Free-form and
+  never interpreted by the store, which also does not enforce any relation to `unit_system`.
+  Descriptive, so it sits outside a series' identity and outside both content hashes. It is not a
+  filter.
 - **`time_reference`** — how this series' timestamps were _spelled_: `utc`, `zoneless`, a fixed
   offset (`-07:00`), or an IANA zone name (`America/Denver`). See
   [Time References](./time-references.md), which this one deserves a page of its own for.
@@ -339,10 +344,10 @@ Each association can also carry:
   validates the array's dtype and per-step shape against it. See
   [Element types](../reference/element-types.md).
 
-`units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`, and `application_data`
-are recorded in metadata and returned on read, but they do not affect identity or storage: they are
-absent from the key and from both content hashes, so two series differing only in a descriptor are a
-duplicate.
+`units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`, `per_unit_of`, and
+`application_data` are recorded in metadata and returned on read, but they do not affect identity or
+storage: they are absent from the key and from both content hashes, so two series differing only in
+a descriptor are a duplicate.
 
 `component_field` is the one descriptor that is also a **filter** (`ListFilter::component_field`,
 and its equivalent in every binding): "every series that varies this field", alone or scoped to one

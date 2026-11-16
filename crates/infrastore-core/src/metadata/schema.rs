@@ -112,6 +112,13 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- `name`, which is part of the row's identity and often carries a
     -- disambiguating suffix; this one records only what the values are for.
     component_field   TEXT,
+    -- The field on the owning component that the values are a fraction of when
+    -- `unit_system` is 'component_base', e.g. 'base_power'. Free form and never
+    -- interpreted here, like `component_field`; nothing ties it to `unit_system`.
+    -- Added by catalog revision 3 (`metadata::migrate`), which is why an
+    -- upgraded store has it after `features_hash` rather than here. Column
+    -- order is cosmetic, as noted below.
+    per_unit_of       TEXT,
     percentiles_json  TEXT,
     -- The logical element type in its canonical string form (`ElementType`):
     -- a dtype spelling for plain scalars, else `tuple(N,dtype)` or one of the
@@ -447,7 +454,7 @@ SELECT id, owner_id, owner_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
        units, quantity_kind, unit_system, time_reference, component_field,
-       element_type, element_shape, application_data,
+       per_unit_of, element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        -- `hex()` is not NULL-propagating: it renders NULL as the empty string,

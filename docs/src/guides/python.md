@@ -38,7 +38,7 @@ the active virtual environment:
 ```sh
 cd crates/infrastore-py
 python3 -m venv .venv && source .venv/bin/activate
-pip install maturin pytest numpy tzdata "power-openapi-models==0.4.*"  # tzdata: zoneinfo on Windows
+pip install maturin pytest numpy tzdata "power-openapi-models==0.5.*"  # tzdata: zoneinfo on Windows
 pip install netCDF4 h5py                 # only for the HDF5-interop tests
 maturin develop
 

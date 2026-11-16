@@ -925,6 +925,7 @@ unsafe fn parse_add_common<'a>(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    per_unit_of: *const c_char,
 ) -> Result<(AddCommon<'a>, core_lib::TypedArray), i32> {
     let owner_type = unsafe { cstr_to_str(owner_type) }.inspect_err(|_| {
         set_error("owner_type is invalid");
@@ -936,6 +937,7 @@ unsafe fn parse_add_common<'a>(
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
     let time_reference = unsafe { cstr_to_optional_time_reference(time_reference) }?;
     let component_field = unsafe { cstr_to_optional_string(component_field) }?;
+    let per_unit_of = unsafe { cstr_to_optional_string(per_unit_of) }?;
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
     let features = unsafe { parse_features_json(features_json) }?;
     let element_type = unsafe { cstr_to_element_type(element_type) }?;
@@ -952,6 +954,7 @@ unsafe fn parse_add_common<'a>(
             unit_system,
             time_reference,
             component_field,
+            per_unit_of,
             application_data,
         },
         features,
@@ -2204,6 +2207,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    per_unit_of: *const c_char,
 ) -> i32 {
     clear_error();
     let batch = deref_handle!(mut batch, "batch handle is null");
@@ -2229,6 +2233,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
                 unit_system,
                 time_reference,
                 component_field,
+                per_unit_of,
             )
         }?;
         let initial_timestamp = initial_timestamp_from_ms(initial_ts_unix_ms)?;
@@ -2273,6 +2278,7 @@ unsafe fn batch_add_irregular(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    per_unit_of: *const c_char,
 ) -> i32 {
     clear_error();
     let batch = deref_handle!(mut batch, "batch handle is null");
@@ -2298,6 +2304,7 @@ unsafe fn batch_add_irregular(
                 unit_system,
                 time_reference,
                 component_field,
+                per_unit_of,
             )
         }?;
         let timestamps = unsafe {
@@ -2352,6 +2359,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    per_unit_of: *const c_char,
 ) -> i32 {
     unsafe {
         batch_add_irregular(
@@ -2375,6 +2383,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             unit_system,
             time_reference,
             component_field,
+            per_unit_of,
         )
     }
 }
@@ -2411,6 +2420,7 @@ pub unsafe extern "C" fn infrastore_batch_add_persistent(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    per_unit_of: *const c_char,
 ) -> i32 {
     unsafe {
         batch_add_irregular(
@@ -2434,6 +2444,7 @@ pub unsafe extern "C" fn infrastore_batch_add_persistent(
             unit_system,
             time_reference,
             component_field,
+            per_unit_of,
         )
     }
 }
@@ -2472,6 +2483,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    per_unit_of: *const c_char,
 ) -> i32 {
     clear_error();
     let batch = deref_handle!(mut batch, "batch handle is null");
@@ -2499,6 +2511,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
                 unit_system,
                 time_reference,
                 component_field,
+                per_unit_of,
             )
         }?;
         let initial_timestamp = initial_timestamp_from_ms(initial_ts_unix_ms)?;
@@ -2578,6 +2591,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     unit_system: *const c_char,
     time_reference: *const c_char,
     component_field: *const c_char,
+    per_unit_of: *const c_char,
 ) -> i32 {
     clear_error();
     let batch = deref_handle!(mut batch, "batch handle is null");
@@ -2603,6 +2617,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
                 unit_system,
                 time_reference,
                 component_field,
+                per_unit_of,
             )
         }?;
         let initial_timestamp = initial_timestamp_from_ms(initial_ts_unix_ms)?;
@@ -2674,8 +2689,8 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
 // element-by-element through the `infrastore_bulk_result_*` accessors.
 
 /// Write a series' descriptive attributes (`application_data`, `element_type`,
-/// `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`)
-/// into seven optional out-params.
+/// `units`, `quantity_kind`, `unit_system`, `time_reference`, `component_field`,
+/// `per_unit_of`) into eight optional out-params.
 ///
 /// Each pointer may be null to skip that attribute. A non-null target receives
 /// either null (the attribute is unset on this series) or an owned C string the
@@ -2683,7 +2698,7 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
 /// is emitted as its `natural_units` / `component_base` spelling rather than a
 /// code, so an added basis reaches an older caller as a name it can report.
 ///
-/// All seven live on the series itself, so a bulk-read result carries them just
+/// All eight live on the series itself, so a bulk-read result carries them just
 /// as a per-key read does — the two paths must not disagree.
 ///
 /// All-or-nothing: every attribute string is built first (an interior NUL in
@@ -2704,6 +2719,7 @@ unsafe fn emit_descriptors(
     out_unit_system: *mut *mut c_char,
     out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
+    out_per_unit_of: *mut *mut c_char,
 ) -> i32 {
     let application_data_c = if out_application_data.is_null() {
         None
@@ -2724,6 +2740,11 @@ unsafe fn emit_descriptors(
         None
     } else {
         ffi_try!(code opt_attr_cstring(series.component_field()))
+    };
+    let per_unit_of_c = if out_per_unit_of.is_null() {
+        None
+    } else {
+        ffi_try!(code opt_attr_cstring(series.per_unit_of()))
     };
     // No fallible step: `UnitSystem::as_str` is a fixed identifier, so it can
     // never carry an interior NUL the way a user-supplied label can.
@@ -2765,6 +2786,9 @@ unsafe fn emit_descriptors(
         }
         if !out_component_field.is_null() {
             *out_component_field = into_raw_or_null(component_field_c);
+        }
+        if !out_per_unit_of.is_null() {
+            *out_per_unit_of = into_raw_or_null(per_unit_of_c);
         }
     }
     INFRASTORE_OK
@@ -2812,6 +2836,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     out_unit_system: *mut *mut c_char,
     out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
+    out_per_unit_of: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = deref_handle!(ref result, "bulk-read result handle is null");
@@ -2847,6 +2872,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
             out_unit_system,
             out_time_reference,
             out_component_field,
+            out_per_unit_of,
         )
     };
     if code != INFRASTORE_OK {
@@ -3190,6 +3216,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_irregular(
     out_unit_system: *mut *mut c_char,
     out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
+    out_per_unit_of: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = deref_handle!(ref result, "bulk-read result handle is null");
@@ -3233,6 +3260,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_irregular(
             out_unit_system,
             out_time_reference,
             out_component_field,
+            out_per_unit_of,
         )
     };
     if code != INFRASTORE_OK {
@@ -3300,6 +3328,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
     out_unit_system: *mut *mut c_char,
     out_time_reference: *mut *mut c_char,
     out_component_field: *mut *mut c_char,
+    out_per_unit_of: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = deref_handle!(ref result, "bulk-read result handle is null");
@@ -3350,6 +3379,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             out_unit_system,
             out_time_reference,
             out_component_field,
+            out_per_unit_of,
         )
     };
     if code != INFRASTORE_OK {
@@ -3706,6 +3736,13 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
     o.insert(
         "component_field".into(),
         m.component_field
+            .clone()
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    o.insert(
+        "per_unit_of".into(),
+        m.per_unit_of
             .clone()
             .map(Value::from)
             .unwrap_or(Value::Null),
@@ -6907,6 +6944,7 @@ mod reader_ffi_tests {
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
+                    std::ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -7048,6 +7086,7 @@ mod abi_tests {
         unit_system: *const c_char,
         time_reference: *const c_char,
         component_field: *const c_char,
+        per_unit_of: *const c_char,
         out_id: *mut i64,
     ) -> i32 {
         let batch = unsafe { infrastore_batch_new() };
@@ -7072,6 +7111,7 @@ mod abi_tests {
                 unit_system,
                 time_reference,
                 component_field,
+                per_unit_of,
             )
         };
         if rc != INFRASTORE_OK {
@@ -7103,6 +7143,7 @@ mod abi_tests {
         unit_system: *const c_char,
         time_reference: *const c_char,
         component_field: *const c_char,
+        per_unit_of: *const c_char,
         out_id: *mut i64,
     ) -> i32 {
         let batch = unsafe { infrastore_batch_new() };
@@ -7127,6 +7168,7 @@ mod abi_tests {
                 unit_system,
                 time_reference,
                 component_field,
+                per_unit_of,
             )
         };
         if rc != INFRASTORE_OK {
@@ -7172,6 +7214,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                std::ptr::null(),
                 &mut id,
             )
         };
@@ -7293,6 +7336,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    std::ptr::null(),
                     &mut id,
                 )
             },
@@ -7351,6 +7395,7 @@ mod abi_tests {
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
+                    std::ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -7551,6 +7596,7 @@ mod abi_tests {
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
+                    std::ptr::null_mut(),
                 )
             },
             INFRASTORE_OK,
@@ -8308,6 +8354,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                std::ptr::null(),
                 &mut id,
             )
         };
@@ -8367,6 +8414,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                std::ptr::null(),
                 &mut id,
             )
         };
@@ -8660,6 +8708,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    std::ptr::null(),
                     &mut id,
                 )
             },
@@ -9281,6 +9330,7 @@ mod abi_tests {
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
+                    std::ptr::null_mut(),
                 )
             },
             INFRASTORE_OK,

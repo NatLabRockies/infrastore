@@ -483,21 +483,21 @@ function _read_values(
     return raw ? data : decode_element_values(data, element_type; types=types)
 end
 
-# The seven descriptor strings every bulk getter hands back, as out-pointers in
+# The eight descriptor strings every bulk getter hands back, as out-pointers in
 # ABI order: application_data, element_type, units, quantity_kind, unit_system,
-# time_reference, component_field. Each is owned by the caller and freed with
+# time_reference, component_field, per_unit_of. Each is owned by the caller and freed with
 # `foreach(r -> _free_cstr(r[]), desc)` in the getter's `finally`.
-_descriptor_refs() = [Ref{Ptr{Cchar}}(C_NULL) for _ in 1:7]
+_descriptor_refs() = [Ref{Ptr{Cchar}}(C_NULL) for _ in 1:8]
 
 # The constructor keywords the filled descriptor refs spell, read without
 # freeing (the caller's `finally` does that).
 function _descriptor_kwargs(desc)
     application_data, element_type, units, quantity_kind, unit_system, time_reference,
-    component_field = (_peek_cstr(r[]) for r in desc)
+    component_field, per_unit_of = (_peek_cstr(r[]) for r in desc)
     return (;
         application_data, element_type, units, quantity_kind,
         unit_system=_unit_system(unit_system),
-        time_reference=_time_reference(time_reference), component_field,
+        time_reference=_time_reference(time_reference), component_field, per_unit_of,
     )
 end
 
@@ -531,6 +531,7 @@ function _bulk_single(
             desc[5]::Ref{Ptr{Cchar}},
             desc[6]::Ref{Ptr{Cchar}},
             desc[7]::Ref{Ptr{Cchar}},
+            desc[8]::Ref{Ptr{Cchar}},
         )::Int32
     )
     try
@@ -584,6 +585,7 @@ function _bulk_irregular(
             desc[5]::Ref{Ptr{Cchar}},
             desc[6]::Ref{Ptr{Cchar}},
             desc[7]::Ref{Ptr{Cchar}},
+            desc[8]::Ref{Ptr{Cchar}},
         )::Int32
     )
     try
@@ -649,6 +651,7 @@ function _bulk_forecast(
             desc[5]::Ref{Ptr{Cchar}},
             desc[6]::Ref{Ptr{Cchar}},
             desc[7]::Ref{Ptr{Cchar}},
+            desc[8]::Ref{Ptr{Cchar}},
         )::Int32
     )
     local raw_data, initial, resolution, horizon, interval, count, percentiles, kw

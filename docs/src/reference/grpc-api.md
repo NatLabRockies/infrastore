@@ -110,6 +110,7 @@ message TimeSeriesMetadata {
   //   How this series' timestamps were spelled. Absent means unspecified,
   //   which is NOT a claim they were written as UTC.
   optional int64  id                        = 26;  // the catalog association id
+  optional string per_unit_of               = 27;  // field component_base values are a fraction of
   //   The handle a consumer stores in its own model to reference this series
   //   later, and what every read RPC takes. Transmitted rather than derived:
   //   nothing computes it from the attributes, so the serving store is the
@@ -268,8 +269,8 @@ arrays survive the round trip without coercion. One caveat:
 - **`application_data` is not carried in `ReadByIdResp`.** The opaque package-owned payload is
   returned by `ListMetadata` (on `TimeSeriesMetadata`) but left empty by `ReadById`, so values
   fetched directly by id come back without it. Every other descriptor — `name`, `units`,
-  `quantity_kind`, `unit_system`, `component_field`, `time_reference` — is on the response, so a
-  read by id returns the same described series a local read does.
+  `quantity_kind`, `unit_system`, `component_field`, `per_unit_of`, `time_reference` — is on the
+  response, so a read by id returns the same described series a local read does.
 
 ## Catalog Revision and Read-Only Opens
 

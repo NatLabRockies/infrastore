@@ -177,7 +177,8 @@ fn build_fixture_store() -> Store {
     .with_units("pu")
     .with_quantity_kind("ActivePower")
     .with_unit_system(UnitSystem::ComponentBase)
-    .with_component_field("max_active_power");
+    .with_component_field("max_active_power")
+    .with_per_unit_of("base_power");
     store
         .add_time_series(
             7,
@@ -828,7 +829,7 @@ fn add_bulk_rejects_geometry_mismatch_and_leaves_the_whole_batch_untouched() {
 // id tests in `association_ids.rs` pin one `Deterministic` row through an
 // import. Neither covers the rest of the descriptive surface on the way back
 // in, so these carry `units`, `quantity_kind`, `unit_system`,
-// `component_field`, `application_data`, `percentiles`, a non-`f64` dtype, a
+// `component_field`, `per_unit_of`, `application_data`, `percentiles`, a non-`f64` dtype, a
 // non-scalar `element_type`, a calendar `Period`, a sub-second
 // `initial_timestamp`, every `TimeReference` spelling, and a `Probabilistic`
 // and a `Scenarios` row through `import_time_series_associations_openapi`.
@@ -919,6 +920,7 @@ fn full_surface_rows() -> Vec<(i64, &'static str, TimeSeriesData, Features)> {
     .with_quantity_kind("EnergyPrice")
     .with_unit_system(UnitSystem::ComponentBase)
     .with_component_field("operation_cost")
+    .with_per_unit_of("base_power")
     .with_application_data(r#"{"cost":"linear"}"#)
     .with_time_reference(TimeReference::Utc);
 
@@ -1107,6 +1109,7 @@ fn the_full_surface_export_spells_every_optional_field() {
         r#""units":"USD/MWh""#,
         r#""quantity_kind":"ReactivePower""#,
         r#""component_field":"operation_cost""#,
+        r#""per_unit_of":"base_power""#,
         r#""application_data":"{\"ensemble\":\"weather\"}""#,
         // Element types beyond the `f64` scalar default.
         r#""element_type":"tuple(2,i32)""#,
@@ -1153,6 +1156,7 @@ fn the_full_surface_export_spells_every_optional_field() {
         "quantity_kind",
         "unit_system",
         "component_field",
+        "per_unit_of",
         "application_data",
         "time_reference",
     ] {

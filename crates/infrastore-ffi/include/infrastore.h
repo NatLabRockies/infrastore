@@ -1016,7 +1016,8 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                                     const char *quantity_kind,
                                     const char *unit_system,
                                     const char *time_reference,
-                                    const char *component_field);
+                                    const char *component_field,
+                                    const char *per_unit_of);
 
 /**
  * Append a NonSequentialTimeSeries to a batch. Commit it with
@@ -1047,7 +1048,8 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const char *quantity_kind,
                                             const char *unit_system,
                                             const char *time_reference,
-                                            const char *component_field);
+                                            const char *component_field,
+                                            const char *per_unit_of);
 
 /**
  * Append a `PersistentTimeSeries` to a batch. Commit it with
@@ -1079,7 +1081,8 @@ int32_t infrastore_batch_add_persistent(struct InfraStoreBatch *batch,
                                         const char *quantity_kind,
                                         const char *unit_system,
                                         const char *time_reference,
-                                        const char *component_field);
+                                        const char *component_field,
+                                        const char *per_unit_of);
 
 /**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
@@ -1113,7 +1116,8 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                                       const char *quantity_kind,
                                       const char *unit_system,
                                       const char *time_reference,
-                                      const char *component_field);
+                                      const char *component_field,
+                                      const char *per_unit_of);
 
 /**
  * Append a `Probabilistic` forecast to a batch. Commit it with
@@ -1149,7 +1153,8 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                            const char *quantity_kind,
                                            const char *unit_system,
                                            const char *time_reference,
-                                           const char *component_field);
+                                           const char *component_field,
+                                           const char *per_unit_of);
 
 /**
  * Submit every request in `batch` through one all-or-nothing bulk add — the
@@ -1211,7 +1216,8 @@ int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle 
                                           char **out_quantity_kind,
                                           char **out_unit_system,
                                           char **out_time_reference,
-                                          char **out_component_field);
+                                          char **out_component_field,
+                                          char **out_per_unit_of);
 
 /**
  * Read many series named by their catalog association `id`, in the order the
@@ -1395,7 +1401,8 @@ int32_t infrastore_bulk_result_get_irregular(const struct InfraStoreBulkReadHand
                                              char **out_quantity_kind,
                                              char **out_unit_system,
                                              char **out_time_reference,
-                                             char **out_component_field);
+                                             char **out_component_field,
+                                             char **out_per_unit_of);
 
 /**
  * Read a forecast element (`Deterministic`, `Probabilistic`, or `Scenarios`)
@@ -1439,7 +1446,8 @@ int32_t infrastore_bulk_result_get_forecast(const struct InfraStoreBulkReadHandl
                                             char **out_quantity_kind,
                                             char **out_unit_system,
                                             char **out_time_reference,
-                                            char **out_component_field);
+                                            char **out_component_field,
+                                            char **out_per_unit_of);
 
 /**
  * Free a read result handle created by `infrastore_store_read_by_ids` or

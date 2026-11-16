@@ -122,6 +122,10 @@ message TimeSeriesMetadata {
   // thing that knows it. Absent only for metadata that never came from a
   // catalog; every row a server returns carries one.
   optional int64  id                             = 26;
+  // The field on the owning component that the values are a fraction of when
+  // `unit_system` is "component_base", e.g. "base_power". Free-form and never
+  // interpreted by the store.
+  optional string per_unit_of                    = 27;
 }
 
 // ---- ListMetadata / ListMetadataByIds ----
@@ -228,6 +232,8 @@ message ReadByIdResp {
   // over gRPC came back with an empty name where the identical local call
   // returned it.
   string             name                        = 22;
+  // See TimeSeriesMetadata.per_unit_of; a unit descriptor like those above.
+  optional string    per_unit_of                 = 23;
 }
 
 // ---- GetResolutions ----

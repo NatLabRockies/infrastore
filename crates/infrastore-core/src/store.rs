@@ -3280,6 +3280,7 @@ impl Store {
                     unit_system: None,
                     time_reference: None,
                     component_field: None,
+                    per_unit_of: None,
                     application_data: None,
                 }))
             }
@@ -6249,6 +6250,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         unit_system: data.unit_system(),
         time_reference: data.time_reference().cloned(),
         component_field: data.component_field().map(str::to_owned),
+        per_unit_of: data.per_unit_of().map(str::to_owned),
         percentiles: None,
         element_type,
         element_shape: array.element_shape().to_vec(),
@@ -6563,6 +6565,7 @@ fn descriptors_of(meta: &TimeSeriesMetadata) -> Descriptors {
         unit_system: meta.unit_system,
         time_reference: meta.time_reference.clone(),
         component_field: meta.component_field.clone(),
+        per_unit_of: meta.per_unit_of.clone(),
         application_data: meta.application_data.clone(),
     }
 }

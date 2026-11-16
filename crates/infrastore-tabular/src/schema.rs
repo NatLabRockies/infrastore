@@ -69,6 +69,8 @@ pub const QUANTITY_KIND: &str = "quantity_kind";
 pub const UNIT_SYSTEM: &str = "unit_system";
 /// The owning component's field these values vary.
 pub const COMPONENT_FIELD: &str = "component_field";
+/// The owning component's field per-unit values are a fraction of.
+pub const PER_UNIT_OF: &str = "per_unit_of";
 /// The opaque package-owned payload, verbatim.
 pub const APPLICATION_DATA: &str = "application_data";
 

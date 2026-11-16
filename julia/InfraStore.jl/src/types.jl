@@ -188,6 +188,11 @@ const _DESCRIPTORS = (
         "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity.",
     ),
     (
+        :per_unit_of, Union{Nothing, String}, Union{Nothing, AbstractString},
+        nothing, :(_maybe_string(per_unit_of)),
+        "The field on the owning component that the values are a fraction of when `unit_system` is `ComponentBase` (e.g. `\"base_power\"`, `\"storage_capacity\"`), or `nothing`. Free-form and never interpreted by the store. Descriptive, so it sits outside a series' identity and outside both content hashes.",
+    ),
+    (
         :time_reference, Union{Nothing, TimeReference}, TimeReferenceArg,
         INFERRED, nothing,
         "How the timestamps were spelled (a [`TimeReference`](@ref)), or `nothing` for unspecified. Inferred from the timestamp the constructor was handed -- a bare `DateTime` is a wall clock and records `ZonelessReference()`, a `ZonedDateTime` records the spelling its zone names -- unless `time_reference=` overrides it. Passing `time_reference=nothing` explicitly declares *unspecified*, which is what a read hands back for a series that recorded no spelling, and is not the same as a wall clock. Descriptive: it changes nothing about the stored instants, the grid, or either content hash.",

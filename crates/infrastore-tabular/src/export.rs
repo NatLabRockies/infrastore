@@ -215,6 +215,10 @@ pub fn descriptor_row(
             row.component_field.clone().unwrap_or_default(),
         ),
         (
+            schema::PER_UNIT_OF,
+            row.per_unit_of.clone().unwrap_or_default(),
+        ),
+        (
             schema::APPLICATION_DATA,
             row.application_data.clone().unwrap_or_default(),
         ),

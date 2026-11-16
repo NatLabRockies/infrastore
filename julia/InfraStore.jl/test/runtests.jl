@@ -2014,7 +2014,7 @@ end
     @test typeof(scen) == Scenarios{Float32, 3}
 end
 
-@testset "quantity_kind, unit_system, and component_field round-trip on every read path" begin
+@testset "quantity_kind, unit_system, component_field, and per_unit_of round-trip on every read path" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)
@@ -2022,7 +2022,7 @@ end
     sts = SingleTimeSeries(
         t0, res, collect(1.0:4.0), "load";
         units="MW", quantity_kind="ActivePower", unit_system=ComponentBase,
-        component_field="max_active_power",
+        component_field="max_active_power", per_unit_of="base_power",
     )
     k = add_time_series!(store, 1, "Generator", Component, sts)
 
@@ -2031,6 +2031,7 @@ end
     @test md.quantity_kind == "ActivePower"
     @test md.unit_system === ComponentBase
     @test md.component_field == "max_active_power"
+    @test md.per_unit_of == "base_power"
     @test list_metadata(store; owner_id=1)[1].unit_system === ComponentBase
 
     # ...and the get path puts them back on the struct, as it already does for
@@ -2040,10 +2041,12 @@ end
     @test got.quantity_kind == "ActivePower"
     @test got.unit_system === ComponentBase
     @test got.component_field == "max_active_power"
+    @test got.per_unit_of == "base_power"
 
     # The bulk path builds its own struct, so it must agree rather than drop them.
     @test read_by_ids(store, [k])[1].unit_system === ComponentBase
     @test read_by_ids(store, [k])[1].component_field == "max_active_power"
+    @test read_by_ids(store, [k])[1].per_unit_of == "base_power"
 
     # Unset means unspecified, NOT NaturalUnits: nothing declared a basis here.
     bare = SingleTimeSeries(t0, res, collect(1.0:4.0), "bare")
@@ -2052,6 +2055,8 @@ end
     @test get_metadata_by_id(store, kb).component_field === nothing
     @test read_by_id(store, kb).quantity_kind === nothing
     @test read_by_id(store, kb).component_field === nothing
+    @test get_metadata_by_id(store, kb).per_unit_of === nothing
+    @test read_by_id(store, kb).per_unit_of === nothing
 
     # A string spelling is accepted and normalized; an unknown one is rejected
     # rather than degrading to `nothing`.

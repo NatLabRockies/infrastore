@@ -957,6 +957,7 @@ pub fn read_sqlite_partition_with(
         schema::UNIT_SYSTEM,
         schema::COMPONENT_FIELD,
         schema::APPLICATION_DATA,
+        schema::PER_UNIT_OF,
     ];
     let mut select: Vec<String> = ["a.data_hash", "a.time_axis", "s.id", "s.owner_id"]
         .map(String::from)
@@ -1030,7 +1031,7 @@ fn check_columns(
     let columns = table_columns(conn, table)?;
     let missing: Vec<&str> = layout::required_columns(ts_type, role)
         .into_iter()
-        .filter(|c| !columns.contains(*c))
+        .filter(|c| !columns.contains(*c) && !layout::ADDED_COLUMNS.contains(c))
         .collect();
     if missing.is_empty() {
         return Ok(columns);
@@ -1155,6 +1156,7 @@ fn series_row(row: &rusqlite::Row<'_>) -> Result<SeriesRow> {
         unit_system: text(16)?,
         component_field: text(17)?,
         application_data: text(18)?,
+        per_unit_of: text(19)?,
     })
 }
 
