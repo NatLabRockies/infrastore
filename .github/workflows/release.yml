@@ -61,7 +61,7 @@ jobs:
         # manylinux2014 containers so their floor is glibc 2.17 rather than
         # the bare runner's ~2.39.
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             payload: bins+lib
             artifact_triplet: aarch64-apple-darwin
